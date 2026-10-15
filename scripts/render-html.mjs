@@ -3,7 +3,10 @@
 // Markdown digest -> one self-contained HTML file. Zero dependencies.
 // Inline CSS and JS only; the result opens correctly from file:// offline.
 import { randomBytes } from 'node:crypto';
-import { chmodSync, readFileSync, renameSync, statSync, unlinkSync, writeFileSync } from 'node:fs';
+import {
+  accessSync, chmodSync, constants, existsSync, readFileSync, renameSync, statSync, unlinkSync,
+  writeFileSync,
+} from 'node:fs';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { readDomains, readSettings, shortCap } from './lib/mdtable.mjs';
 import { externalAssets } from './lib/assets.mjs';
@@ -38,9 +41,17 @@ function esc(text) {
 // leaving the tail of the destination in the prose. One level of nesting is supported,
 // which covers the URLs a digest cites.
 const URL_PART = '(?:[^()\\s]|\\([^()\\s]*\\))';
+// A status flag is a token: its '#' must not be glued to a word character, so it opens the text
+// or follows whitespace or punctuation. Without a boundary a spelling the collector's neutraliser
+// deliberately preserves - 'C#new async patterns' - drew a status tag here, so the renderer and
+// the neutraliser disagreed about what a flag is. A whitespace-only boundary would go too far the
+// other way: the shipped example's legend writes '#new' between backticks to show the tag the
+// vocabulary draws, and that tag is part of the frozen artifact. Every flag scan below uses this
+// same boundary, and the neutraliser uses it too.
+const FLAG_BOUNDARY = '(?<!\\w)#';
 const TOKEN = new RegExp('\\[src:([^\\]]+?)\\]\\((https?:\\/\\/' + URL_PART + '+)\\)'
   + '|\\[alt:([^\\]]+?)\\]\\((https?:\\/\\/' + URL_PART + '+)\\)'
-  + '|\\[prov:([a-z-]+)\\]|#(new|followup|developing|watch)\\b|\\*\\*([^*\\n]+?)\\*\\*', 'g');
+  + '|\\[prov:([a-z-]+)\\]|' + FLAG_BOUNDARY + '(new|followup|developing|watch)\\b|\\*\\*([^*\\n]+?)\\*\\*', 'g');
 
 export function linkify(text) {
   return esc(text).replace(TOKEN, (match, srcLabel, srcUrl, altLabel, altUrl, prov, flag, strong) => {
@@ -285,7 +296,7 @@ export function render(md, config) {
   // The summary keeps the prose only; the status scan keeps the flags, because a
   // #new inside a citation URL is part of an href and a #new in prose is not the
   // item's flag - the trailing token is.
-  const stripMarkers = (text) => stripCitations(text).replace(/#(?:new|followup|developing|watch)\b/g, ' ');
+  const stripMarkers = (text) => stripCitations(text).replace(new RegExp(FLAG_BOUNDARY + '(?:new|followup|developing|watch)\\b', 'g'), ' ');
   // Removing a marker leaves the space it occupied, which lands before the punctuation the
   // author wrote after it ("citations and ." from "citations and [prov:primary] .").
   const tidyProse = (text) => String(text).replace(/\s+([.,;:!?])/g, '$1').replace(/\s+/g, ' ').trim();
@@ -321,7 +332,7 @@ export function render(md, config) {
     // The status tag is the item's new-or-follow-up state, which the gate and the state
     // merge both read as the last #new|#followup token. An additive flag such as
     // #developing does not decide it, wherever the author wrote it.
-    const status = [...stripCitations(text).matchAll(/#(new|followup)\b/g)];
+    const status = [...stripCitations(text).matchAll(new RegExp(FLAG_BOUNDARY + '(new|followup)\\b', 'g'))];
     if (status.length) {
       const flag = status[status.length - 1][1];
       bits.push(`<span class="tag t-${flag}">${flag}</span>`);
@@ -555,6 +566,10 @@ function destinationMode(path) {
 // A replacement is published by a rename, so a refused or interrupted write leaves the
 // previous deliverable intact rather than truncated. The temp name is unique and created
 // exclusively, so a pre-planted path is never followed, and it is removed on every failure.
+// A destination that exists but is not writable is refused before the rename: the rename
+// itself needs only the directory, so without this check a read-only deliverable the
+// operator protected was silently replaced. The state writer refuses the same way, so the
+// three writers really do agree on the rule the comment above claims for them.
 function writeAtomic(path, text) {
   const mode = destinationMode(path);
   const tmp = `${path}.${process.pid}.${randomBytes(6).toString('hex')}.tmp`;
@@ -565,6 +580,7 @@ function writeAtomic(path, text) {
     // that already existed is pinned: a fresh deliverable keeps the create's own
     // 0666 & ~umask, so a newly rendered digest is not owner-only.
     if (mode !== null) chmodSync(tmp, mode);
+    if (existsSync(path)) accessSync(path, constants.W_OK);
     renameSync(tmp, path);
   } catch (err) {
     try { unlinkSync(tmp); } catch { /* the temp was never created */ }

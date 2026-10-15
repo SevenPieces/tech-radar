@@ -4,11 +4,11 @@
 // the watchlist and per-domain watermarks. Zero dependencies.
 import { createHash, randomBytes } from 'node:crypto';
 import {
-  accessSync, chmodSync, constants, existsSync, lstatSync, readFileSync, renameSync, statSync,
-  unlinkSync, writeFileSync,
+  accessSync, chmodSync, constants, existsSync, lstatSync, readFileSync, realpathSync, renameSync,
+  statSync, unlinkSync, writeFileSync,
 } from 'node:fs';
 import { hostname } from 'node:os';
-import { dirname } from 'node:path';
+import { basename, dirname, join, resolve } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { readConfig } from './lib/mdtable.mjs';
 import { hostOf } from './lib/net.mjs';
@@ -521,12 +521,26 @@ function writeStateAtomic(out, body) {
 // The lock's subject is the file the merge writes. Locking --state alone left two updates
 // that named different states and one shared --out free to overwrite each other, and the
 // later write silently dropped the earlier run, so the destination is locked too; the
-// state is locked as well when it is a different path, because the merge reads it. The
-// documented --out == --state invocation is one path and therefore one lock.
+// state is locked as well when it is a different file, because the merge reads it. The
+// documented --out == --state invocation is one path and therefore one lock, and two
+// spellings of one path are one path here too (see canonicalPath below).
 function lockTargets(opts) {
-  const paths = [opts.state];
-  if (opts.out && opts.out !== opts.state) paths.push(opts.out);
+  const paths = [canonicalPath(opts.state)];
+  if (opts.out) paths.push(canonicalPath(opts.out));
   return [...new Set(paths)].sort();
+}
+
+// Two spellings of one path - 's.json' and './s.json', the same file named absolutely,
+// or a symlink to it - name one file, so they have to produce one lock name and compare
+// equal. The canonical spelling is the real path when the file is there, and the real
+// directory plus the file name when it is not: a lock is taken for an output that does
+// not exist yet as much as for one that does, and a caller who spells its own state two
+// ways must not be refused by the lock it just took. Nothing here writes to the canonical
+// path; it is the identity of the file, not a destination.
+function canonicalPath(path) {
+  const name = String(path);
+  try { return realpathSync(name); } catch { /* the file does not exist yet */ }
+  try { return join(realpathSync(dirname(name)), basename(name)); } catch { return resolve(name); }
 }
 
 function releaseLocks(lockPaths) {
@@ -571,7 +585,9 @@ function acquireLock(path) {
   const record = JSON.stringify({ pid: process.pid, host: hostname(), startedAt: new Date().toISOString() });
   for (let attempt = 0; ; attempt += 1) {
     try {
-      writeFileSync(lockPath, record + '\n', { flag: 'wx' });
+      // Owner-only: the record names the process that holds the lock, and the lock itself
+      // is nobody else's business.
+      writeFileSync(lockPath, record + '\n', { flag: 'wx', mode: 0o600 });
       return lockPath;
     } catch (err) {
       // A lock that cannot be created for a permission reason - the destination directory
@@ -704,7 +720,7 @@ function runCommand(opts, config) {
   // writers. When the two differ and the destination already exists, this run would
   // overwrite the runs recorded there without ever reading them and silently drop the
   // earlier run, so the divergent invocation is refused instead.
-  if (opts.out !== opts.state && existsSync(opts.out)) {
+  if (canonicalPath(opts.out) !== canonicalPath(opts.state) && existsSync(opts.out)) {
     console.error(`update-state: --out ${opts.out} already exists and is not --state ${opts.state}; refusing to overwrite the runs recorded there. Pass the same path for --state and --out, or remove the destination first.`);
     process.exitCode = 2;
     return 2;

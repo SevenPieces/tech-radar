@@ -165,6 +165,16 @@ time. **Never record a token
 value anywhere in this repository and never write one into a file here**: the token is read from the environment
 only, and this repository is published whole.
 
+**The probe is advisory, and a refusal is the authoritative reading.** The probe reports the budget for the
+address the run leaves from, which on a shared egress is not this run's own allowance: it can report a fresh
+limit while the charged requests are already being refused, and a full run then meets `HTTP 403` (or `429`)
+bodies reading `API rate limit exceeded` instead of candidates. Do not read a healthy probe as proof the run
+will be served — the first refused response is the fact that settles the matter, and the notice is what names
+it. When the run stops with rows in hand, the budget notice reports the effective allowance — what the probe
+reported less the reserve and the requests this run had already spent — rather than the pre-spend figure, along
+with the reset time and what went unchecked; when a request is refused, that refusal makes its own notice
+naming the repository or organisation and the status it answered.
+
 ### 4. Fan out
 
 Divide the clusters of `config/domains.md` between `fanout_min_passes` and `fanout_max_passes` research

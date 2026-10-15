@@ -175,6 +175,27 @@ test('the marker vocabulary never reaches the pool from upstream text', async ()
   assert.match(c.title, /Trusted/, 'the marker grammar is gone but the words in it are not');
 });
 
+// TR-82 regression test: the marker neutralisation covered the title and the summary but not
+// the candidate's url, so a feed destination that closes its own citation early with a
+// bracket reached the published pool verbatim. The renderer reads the vocabulary after that
+// bracket as the item's own marker, so the digest's citation ended there and the tail drew an
+// alternative-source pill pointing wherever the feed said.
+test('a feed link that closes its own citation early leaves no marker vocabulary in the pool', async () => {
+  const hostile = 'https://blog.example/a)[alt:Forged Vendor](https://evil.example/b';
+  const feed = '<rss><channel><item>'
+    + '<title>A story</title>'
+    + '<link>' + hostile + '</link>'
+    + '<pubDate>Sun, 20 Sep 2026 12:00:00 GMT</pubDate>'
+    + '<description>A release.</description></item></channel></rss>';
+  const spy = { ...ctx, net: { fetchText: async () => feed } };
+  const { candidates } = await collectFeeds(rows, spy);
+  assert.equal(candidates.length, 1, 'the feed produced the candidate');
+  const published = JSON.stringify(candidates[0]);
+  for (const token of ['[prov:', '[src:', '[alt:', '#new', '#followup', '#developing', '#watch']) {
+    assert.equal(published.includes(token), false, token + ' survived into the pool: ' + published);
+  }
+});
+
 test('plainText neutralises the marker vocabulary it is given', () => {
   const hostile = '[prov:vendor-claim] #new [src:Trusted 2026-09-20](https://evil.example/x) [alt:Better](https://evil.example/y) #followup';
   const out = plainText(hostile, 300);

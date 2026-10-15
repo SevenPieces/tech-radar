@@ -193,6 +193,10 @@ test('collectGithub still names the repository when one repository 404s', () => 
   assert.match(notices[0], /^github nodejs\/node: HTTP 404 for /);
 }));
 
+// A 403 whose answer names the rate limit is the server settling the allowance (TR-90), so it
+// makes its own notice naming the repository *and* the budget notice that names the effective
+// allowance; a 403 that names something else stays a single repository notice (the 404 case
+// below covers the same shape).
 test('collectGithub turns a per-repository 403 into a notice naming the repository', () => anonymous(async () => {
   const net = {
     fetchText: async (url) => {
@@ -202,8 +206,58 @@ test('collectGithub turns a per-repository 403 into a notice naming the reposito
   };
   const { candidates, notices } = await collectGithub(rows, ctxWith(net));
   assert.deepEqual(candidates, []);
-  assert.equal(notices.length, 1);
+  assert.equal(notices.length, 2, 'the repository notice and the budget notice: ' + JSON.stringify(notices));
   assert.match(notices[0], /^github nodejs\/node: HTTP 403 for .*rate limit exceeded/);
+  assert.match(notices[1], /^github: rate limit reached /, 'the refusal settles the budget');
+}));
+
+// TR-90 regression test: the free /rate_limit probe reports the bucket of the address the run
+// leaves from, and on a shared egress it can report a full budget while the charged requests are
+// already refused. A run then spent a believed allowance on refusals and, when the rows outlasted
+// it, reported the pre-spend figure as the remaining allowance. The refusal is the authoritative
+// reading: the block stops spending, and the single budget notice names the effective allowance it
+// observed (zero) with what the run could not check.
+test('a refusal the probe did not predict stops the block and is named in the budget notice', () => anonymous(async () => {
+  const calls = [];
+  const net = {
+    fetchText: async (url) => {
+      calls.push(url);
+      if (url === PROBE) return rateLimit(60); // a fresh 60/60 probe, the case production hit
+      throw shapeHttpError(403,
+        Buffer.from('{"message":"API rate limit exceeded for 203.0.113.9."}'), url, 200);
+    },
+  };
+  const { candidates, notices } = await collectGithub(repoRows(5), ctxWith(net));
+  assert.deepEqual(candidates, []);
+  assert.deepEqual(calls, [PROBE, 'https://api.github.com/repos/org/repo0/releases?per_page=10'],
+    'the first refusal ends the block: no further request is spent');
+  const budgets = notices.filter((n) => n.startsWith('github: rate limit reached '));
+  assert.equal(budgets.length, 1, 'exactly one budget notice: ' + JSON.stringify(notices));
+  const budget = budgets[0];
+  assert.match(budget, /remaining 0 of 60/, 'the effective allowance is the observed one: ' + budget);
+  assert.doesNotMatch(budget, /remaining 6[0-9]|remaining 5[0-9]/, 'the pre-spend figure is not quoted');
+  assert.match(budget, /1 refused as rate limited/, 'the refusal the probe did not predict is named: ' + budget);
+  assert.match(budget, /4 repository release listings not checked/, 'what went unchecked is named: ' + budget);
+  assert.match(budget, /set GITHUB_TOKEN to raise the limit/);
+}));
+
+// The whole-row shortfall case: the refusal is the only loss, so the notice names the refusal
+// without an empty unchecked clause (and the run still reports the refusal it observed).
+test('a refusal that leaves no unchecked row still names the effective allowance', () => anonymous(async () => {
+  const net = {
+    fetchText: async (url) => {
+      if (url === PROBE) return rateLimit(60);
+      throw shapeHttpError(429, Buffer.from('{"message":"API rate limit exceeded."}'), url, 200);
+    },
+  };
+  const { notices } = await collectGithub(rows, ctxWith(net));
+  const budget = notices.find((n) => n.startsWith('github: rate limit reached '));
+  assert.ok(budget, 'the budget notice is emitted: ' + JSON.stringify(notices));
+  assert.match(budget, /remaining 0 of 60/);
+  assert.match(budget, /1 refused as rate limited/);
+  assert.doesNotMatch(budget, /;\s*;/, 'no empty clause: ' + budget);
+  assert.match(budget, /\); set GITHUB_TOKEN to raise the limit$/,
+    'the remedy follows the allowance directly: ' + budget);
 }));
 
 test('an exhausted budget makes exactly one notice and no repository request', () => anonymous(async () => {

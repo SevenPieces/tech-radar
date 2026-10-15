@@ -51,12 +51,17 @@ const RESOURCE_ATTRS = {
 const LINK_RELS = new Set(['stylesheet', 'preload', 'modulepreload', 'icon',
   'apple-touch-icon', 'mask-icon', 'manifest']);
 
+// Every attribute value is compared decoded: a character reference around a word the
+// browser matches ('st&#121;lesheet', 'url(&#104;ttps://...') is the same value to the
+// browser, so it is the same value here. Decoding exactly once matters - srcdoc carries a
+// whole document, and decoding it twice would read '&amp;lt;img&amp;gt;', which a browser
+// renders as text, as markup that fetches.
 function attrsOf(region) {
   const out = {};
   for (const m of String(region).matchAll(ATTR)) {
     const name = m[1].toLowerCase();
     // The first spelling wins, as it does in a browser.
-    if (!(name in out)) out[name] = m[2] ?? m[3] ?? m[4] ?? '';
+    if (!(name in out)) out[name] = decodeEntities(m[2] ?? m[3] ?? m[4] ?? '');
   }
   return out;
 }
@@ -74,6 +79,29 @@ function isInDocument(value) {
   return value === '' || value.startsWith('#') || isInline(value);
 }
 
+// A data: reference whose media type is a document - text/html, application/xhtml+xml or
+// image/svg+xml - is not simply "carried in the document": an iframe src or an object data
+// opens it as a browsing context of its own, and whatever its markup loads is fetched. The
+// payload is decoded (percent-escapes, or a base64 body) and scanned like an srcdoc, where
+// a data: image, font or stylesheet is still only bytes the artifact already holds.
+const DOCUMENT_DATA = /^data:(?:text\/html|application\/xhtml\+xml|image\/svg\+xml)\s*(?:[;,]|$)/i;
+
+function dataDocument(value) {
+  if (!DOCUMENT_DATA.test(value)) return null;
+  const comma = value.indexOf(',');
+  if (comma < 0) return null;
+  const body = value.slice(comma + 1);
+  try {
+    return /;base64/i.test(value.slice(0, comma))
+      ? Buffer.from(body, 'base64').toString('utf8')
+      : decodeURIComponent(body);
+  } catch {
+    // A payload that will not decode is bytes, not a document; the resource decision for
+    // the reference itself already saw it as an in-document data: URI.
+    return null;
+  }
+}
+
 function srcsetIsInline(value) {
   // A data: URI carries the same comma that separates srcset candidates, so drop the
   // data: URIs and their descriptors before deciding whether anything is left.
@@ -84,26 +112,94 @@ function srcsetIsInline(value) {
   });
 }
 
-// image-set() names candidate images the browser may fetch. A data: candidate is carried
-// in the document, and the descriptors (1x, 2x) name no resource, so what is left after
-// those are removed decides it.
+// Whether a CSS reference is fetched when the artifact is opened from disk. A remote URL
+// carries a scheme or a scheme-relative '//' authority; a data: payload, a fragment and a
+// relative name are all inside the artifact the reader already has.
+function isRemoteReference(value) {
+  const url = String(value).trim();
+  if (url === '' || url.startsWith('#') || isInline(url)) return false;
+  return /^(?:[a-z][a-z0-9+.-]*:)?\/\//i.test(url) || /^[a-z][a-z0-9+.-]*:/i.test(url);
+}
+
+// The argument list of every image-set() call. A nested url() or type() carries a ')' of
+// its own, so the list is sliced with balanced parentheses and quotes: stopping at the
+// first ')' leaves a half-read candidate - 'url("data:image/png;base64,AA' - that then
+// reads as a fetch the artifact does not make.
+function imageSetArgs(css) {
+  const out = [];
+  for (const m of css.matchAll(/image-set\s*\(/gi)) {
+    const open = m.index + m[0].length;
+    let depth = 1;
+    let quote = '';
+    let end = css.length;
+    for (let i = open; i < css.length; i += 1) {
+      const ch = css[i];
+      if (quote) {
+        if (ch === '\\') i += 1;
+        else if (ch === quote) quote = '';
+      } else if (ch === '"' || ch === "'") quote = ch;
+      else if (ch === '(') depth += 1;
+      else if (ch === ')' && (depth -= 1) === 0) { end = i; break; }
+    }
+    out.push(css.slice(open, end));
+  }
+  return out;
+}
+
+// image-set() names candidate images the browser may fetch. A type('image/png') descriptor
+// names no resource, the 1x/2x descriptors name no resource, and a candidate that is a
+// data: payload, a fragment or a relative name is in the document already; what is left
+// that is actually remote decides it.
 function imageSetFetches(args) {
-  const rest = String(args)
-    .replace(/url\(\s*["']?data:[^)]*\)/gi, ' ')
-    .replace(/["']?data:[^\s'"),]*["']?/gi, ' ')
-    .replace(/\b\d+(?:\.\d+)?[wx]\b/gi, ' ')
-    .replace(/[,\s()"']+/g, '');
-  return rest !== '';
+  const text = String(args).replace(/\btype\s*\(\s*(?:"[^"]*"|'[^']*'|[^)]*)\)/gi, ' ');
+  const candidates = [];
+  for (const m of text.matchAll(/url\(\s*(?:"([^"]*)"|'([^']*)'|([^)"'\s]*))\s*\)/gi)) {
+    candidates.push(m[1] ?? m[2] ?? m[3] ?? '');
+  }
+  // A bare quoted string is a candidate too: image-set("photo.png" 1x) names one without
+  // url(). A quoted string inside type() was removed above, so it is not read as one.
+  for (const m of text.replace(/url\([^)]*\)/gi, ' ').matchAll(/"([^"]*)"|'([^']*)'/g)) {
+    candidates.push(m[1] ?? m[2] ?? '');
+  }
+  return candidates.some((candidate) => isRemoteReference(candidate));
+}
+
+// A CSS comment is not CSS: a candidate named inside one is never fetched, so the comment
+// regions are removed before any CSS vocabulary is looked for. The scan is string-aware,
+// because '/*' inside a quoted string opens no comment for a browser: a plain replace would
+// swallow the rest of the stylesheet and hide a fetch that really happens.
+function stripCssComments(css) {
+  const text = String(css);
+  let out = '';
+  let i = 0;
+  while (i < text.length) {
+    const ch = text[i];
+    if (ch === '"' || ch === "'") {
+      let j = i + 1;
+      while (j < text.length && text[j] !== ch) j += text[j] === '\\' ? 2 : 1;
+      out += text.slice(i, Math.min(j + 1, text.length));
+      i = j + 1;
+    } else if (ch === '/' && text[i + 1] === '*') {
+      const end = text.indexOf('*/', i + 2);
+      i = end === -1 ? text.length : end + 2;
+      out += ' ';
+    } else {
+      out += ch;
+      i += 1;
+    }
+  }
+  return out;
 }
 
 function cssFetches(css) {
-  if (REMOTE_URL.test(css)) return true;
+  const text = stripCssComments(css);
+  if (REMOTE_URL.test(text)) return true;
   // @import fetches unless the target it names is itself inline.
-  for (const m of css.matchAll(/@import\s+(?:url\(\s*)?["']?([^"')\s;]+)/gi)) {
+  for (const m of text.matchAll(/@import\s+(?:url\(\s*)?["']?([^"')\s;]+)/gi)) {
     if (!isInline(m[1])) return true;
   }
-  for (const m of css.matchAll(/image-set\s*\(([^)]*)\)/gi)) {
-    if (imageSetFetches(m[1])) return true;
+  for (const args of imageSetArgs(text)) {
+    if (imageSetFetches(args)) return true;
   }
   return false;
 }
@@ -115,15 +211,24 @@ function refreshTarget(value) {
   return m ? m[1] : null;
 }
 
-// The most nested documents one call will follow. An iframe srcdoc carries markup of its
-// own, so a document can name another document; the scan follows them iteratively rather
-// than recursively (a hostile input can nest deeply, and a stack overflow is not a verdict)
-// and refuses a nest deeper than this rather than traversing it without a bound.
-const MAX_NESTED_DOCUMENTS = 64;
+// The deepest nested document one call will follow. An iframe srcdoc carries markup of
+// its own, so a document can name another document; the scan follows them iteratively
+// rather than recursively (a hostile input can nest deeply, and a stack overflow is not a
+// verdict) and refuses a nest deeper than this rather than traversing it without a bound.
+// The bound is a depth, not a count of documents: a document with a thousand sibling
+// iframes is ordinary markup and is judged on what it actually names, while a nest this
+// deep is not markup anyone writes by hand.
+const MAX_NESTED_DEPTH = 64;
 
-// One document's own fetches. A document named by an iframe srcdoc is not scanned here: it
-// is pushed onto the worklist, which is what bounds how many documents one call follows.
-function documentFetches(text, nested) {
+// The elements whose srcdoc attribute a browser honours. On any other element srcdoc is an
+// attribute like another and its value is text, so reading it as a document invents a
+// fetch the browser never makes.
+const SRCDOC_ELEMENTS = new Set(['iframe']);
+
+// One document's own fetches. A document named by an iframe srcdoc, or carried as a data:
+// document, is not scanned here: it is pushed onto the worklist, which is what bounds the
+// traversal.
+function documentFetches(text, nested, depth) {
   for (const tag of text.matchAll(TAG)) {
     const name = tag[1].toLowerCase();
     const attrs = attrsOf(tag[2]);
@@ -137,6 +242,12 @@ function documentFetches(text, nested) {
         if (value === undefined) continue;
         if (attr === 'srcset') { if (!srcsetIsInline(value)) return true; }
         else if (!isInDocument(value)) return true;
+        else {
+          // A data: document is carried in the artifact, but the browsing context it opens
+          // loads whatever its own markup names.
+          const nestedDocument = dataDocument(value);
+          if (nestedDocument !== null) nested.push({ text: nestedDocument, depth: depth + 1 });
+        }
       }
     }
 
@@ -145,17 +256,21 @@ function documentFetches(text, nested) {
       if (href !== undefined && !isInDocument(href)) return true;
     }
 
-    // The http-equiv value is compared decoded: a character reference around the word
-    // 'refresh' ('&#114;efresh') is the same declaration to a browser, so it is the same
-    // fetch here.
-    if (name === 'meta' && decodeEntities(attrs['http-equiv'] ?? '').toLowerCase() === 'refresh') {
+    // The http-equiv value is compared decoded (attrsOf decodes every value once): a
+    // character reference around the word 'refresh' ('&#114;efresh') is the same declaration
+    // to a browser, so it is the same fetch here.
+    if (name === 'meta' && (attrs['http-equiv'] ?? '').toLowerCase() === 'refresh') {
       const target = refreshTarget(attrs.content ?? '');
       if (target !== null && !isInDocument(target)) return true;
     }
 
     // An srcdoc attribute carries a whole document as its value. A quoted attribute value is
-    // opaque to the tag tokeniser, so without this the markup inside it is never scanned.
-    if (attrs.srcdoc !== undefined && attrs.srcdoc !== '') nested.push(decodeEntities(attrs.srcdoc));
+    // opaque to the tag tokeniser, so without this the markup inside it is never scanned. A
+    // browser honours the attribute on an iframe only, and the value is already decoded
+    // once by attrsOf.
+    if (SRCDOC_ELEMENTS.has(name) && attrs.srcdoc) {
+      nested.push({ text: attrs.srcdoc, depth: depth + 1 });
+    }
 
     // CSS forms count inside CSS only: a style element or a style attribute.
     if (attrs.style !== undefined && cssFetches(attrs.style)) return true;
@@ -168,15 +283,18 @@ function documentFetches(text, nested) {
 }
 
 export function externalAssets(html) {
-  const pending = [String(html)];
+  const pending = [{ text: String(html), depth: 0 }];
   const seen = new Set();
   while (pending.length > 0) {
-    const text = pending.shift();
+    const { text, depth } = pending.shift();
+    // A nest deeper than the bound is refused rather than traversed: the verdict is the
+    // conservative one, because a document this deeply nested is not markup a reader
+    // opens, and one call must terminate whatever it is handed.
+    if (depth > MAX_NESTED_DEPTH) return true;
     // A document that names itself (or repeats) is scanned once: the worklist must terminate.
     if (seen.has(text)) continue;
     seen.add(text);
-    if (seen.size > MAX_NESTED_DOCUMENTS) return true;
-    if (documentFetches(text, pending)) return true;
+    if (documentFetches(text, pending, depth)) return true;
   }
   return false;
 }

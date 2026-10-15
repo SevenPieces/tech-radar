@@ -36,10 +36,16 @@ const ITEM = /^-\s+\*\*(.+?)\*\*\s+—\s+([\s\S]*)$/;
 // case); [^)]+ truncated them at the first ')' and made the gate read a different URL than
 // the renderer drew. One level of nesting is supported, as in render-html.mjs.
 const SRC = /\[src:([^\]]+?)\s+(\d{4}-\d{2}-\d{2}[^\]]*)\]\((https?:\/\/(?:[^()\s]|\([^()\s]*\))+)\)/;
-const MARKER = /\[src:[^\]]*\]\((?:[^()\s]|\([^()\s]*\))*\)|\[alt:[^\]]*\]\((?:[^()\s]|\([^()\s]*\))*\)|\[prov:[a-z-]+\]|#(?:new|followup|developing|watch)\b/g;
+// A status flag is a token: its '#' must not be glued to a word character, so it opens the
+// text or follows whitespace or punctuation. Without this boundary the gate read 'C#new' in
+// prose as a flag while the renderer drew no status tag, so an item could pass the gate
+// carrying no tag at all. Both flag scans below use the same boundary as the renderer's
+// FLAG_BOUNDARY and the neutraliser's STATUS_FLAG, so the three agree on what a flag is.
+const FLAG_BOUNDARY = '(?<!\\w)#';
+const MARKER = new RegExp('\\[src:[^\\]]*\\]\\((?:[^()\\s]|\\([^()\\s]*\\))*\\)|\\[alt:[^\\]]*\\]\\((?:[^()\\s]|\\([^()\\s]*\\))*\\)|\\[prov:[a-z-]+\\]|' + FLAG_BOUNDARY + '(?:new|followup|developing|watch)\\b', 'g');
 const CITATION_LINK = /\[(?:src|alt):[^\]]*\]\((?:[^()\s]|\([^()\s]*\))*\)/g;
 const PROV = /\[prov:[a-z-]+\]/g;
-const STATUS = /#(new|followup|developing|watch)\b/g;
+const STATUS = new RegExp(FLAG_BOUNDARY + '(new|followup|developing|watch)\\b', 'g');
 
 // A digest written on another platform carries CRLF line endings; every parser
 // normalises them, because \r left in place makes the heading and item anchors match

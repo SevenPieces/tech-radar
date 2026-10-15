@@ -38,13 +38,35 @@ export function redactUrl(url) {
 // the whole argv -- which is where an Authorization header lives. Anything shaped like
 // that header or its Bearer value is removed before the text can reach a notice. The
 // authorization shape consumes the scheme as well as the first word: matching only up to the
-// first space deleted the word 'Basic' and left the credential behind in full.
+// first space deleted the word 'Basic' and left the credential behind in full. The scheme's
+// own token has to be credential-shaped as well, so prose that merely says 'a Bearer token'
+// stays readable while a real value goes; MIN_SECRET_CHARS is that shape's floor.
 const SECRET_SHAPES = [
-  /\bBearer\s+[^\s,;"']+/gi,
+  /\bBearer\s+[^\s,;"']{8,}/gi,
   /\b(?:proxy-)?authorization\s*:\s*(?:\S+\s+)?\S+/gi,
   /\bgh[pousr]_[A-Za-z0-9]{6,}\b/g,
   /\bgithub_pat_[A-Za-z0-9_]{20,}\b/g,
 ];
+
+// The floor for removing a value by exact match. The earlier rule removed every query value of
+// three characters or more, so a benign '?format=atom' deleted the word 'atom' from a notice
+// ('the [redacted] feed could not be parsed') and a '?per_page=100' deleted the number: the
+// notice is the run's only diagnosis of a degraded source, and a reaper that removes ordinary
+// words and numbers costs the diagnosis its meaning. A bare number is never a credential here,
+// and a value shorter than this is not one: the shape list above is what covers the spellings a
+// curated set cannot know. Two trade-offs are deliberate. A short custom token is removed only by
+// shape. And a longer value the request itself sent (a query value of eight characters or more)
+// is still removed wherever it appears, because the stricter rule - remove only a credential-shaped
+// value or one the text presents as a credential - leaves a server's echo of the request's own
+// userinfo readable when the echo labels it 'user=' rather than a credential-named parameter. The
+// over-redaction this row is about is the removal of ordinary short words and bare numbers, and
+// that is what the floor removes.
+const MIN_SECRET_CHARS = 8;
+
+function looksLikeValue(value) {
+  const v = String(value ?? '');
+  return v.length >= MIN_SECRET_CHARS && !/^\d+$/.test(v);
+}
 
 // A Basic credential is the base64 of 'user:password', so it is recognised as one: the token
 // decodes to printable text carrying the colon. Matching by that property leaves a body that
@@ -64,22 +86,38 @@ function redactBasicCredentials(text) {
 // shape list can know the operator's spelling. A value is removed literally (split/join, so a
 // regex metacharacter in it is not read as a pattern) and a value shorter than a credential
 // is left alone rather than replacing every occurrence of two characters in the diagnostic.
-function requestSecrets(url, headers) {
+export function requestSecrets(url, headers) {
   const out = new Set();
   const add = (value) => {
-    const v = String(value ?? '');
-    if (v.length >= 3) out.add(v);
+    if (looksLikeValue(value)) out.add(String(value));
   };
-  const addBoth = (value) => {
-    add(value);
-    try { add(decodeURIComponent(String(value ?? ''))); } catch { /* not percent-encoded */ }
+  // Every spelling of one value is collected: the decoded form a server would print after
+  // decoding, the raw spelling curl actually put on the request line, and the percent-encoded
+  // form of the decoded one. A server that echoes $request_uri republishes the raw spelling,
+  // and removing only the decoded form left that spelling readable in the notice.
+  const addSpellings = (value) => {
+    const v = String(value ?? '');
+    add(v);
+    let decoded = null;
+    try { decoded = decodeURIComponent(v); } catch { /* not percent-encoded */ }
+    if (decoded !== null && decoded !== v) add(decoded);
+    for (const spelling of [v, decoded, String(v).replace(/\+/g, ' ')]) {
+      if (spelling === null) continue;
+      try { add(encodeURIComponent(spelling)); } catch { /* a lone surrogate */ }
+    }
   };
   const raw = String(url ?? '');
   try {
     const parsed = new URL(raw);
-    addBoth(parsed.username);
-    addBoth(parsed.password);
-    for (const value of parsed.searchParams.values()) addBoth(value);
+    addSpellings(parsed.username);
+    addSpellings(parsed.password);
+    for (const value of parsed.searchParams.values()) addSpellings(value);
+    // URLSearchParams reports the decoded value, so 'token=oper+plus' arrives as 'oper plus'
+    // and the raw pair spelling is read from the query string itself.
+    for (const pair of parsed.search.replace(/^\?/, '').split('&')) {
+      const eq = pair.indexOf('=');
+      if (eq !== -1) addSpellings(pair.slice(eq + 1));
+    }
     // The Basic header curl would send is the base64 of the userinfo: a request with none
     // contributes nothing here rather than the base64 of a bare colon.
     if (parsed.username !== '' || parsed.password !== '') {
@@ -88,22 +126,34 @@ function requestSecrets(url, headers) {
     }
   } catch {
     const userinfo = /\/\/([^/?#\s]*)@/.exec(raw);
-    if (userinfo) addBoth(userinfo[1]);
-    for (const m of raw.matchAll(/[?&][^=&#\s]+=([^&#\s]*)/g)) addBoth(m[1]);
+    if (userinfo) addSpellings(userinfo[1]);
+    for (const m of raw.matchAll(/[?&][^=&#\s]+=([^&#\s]*)/g)) addSpellings(m[1]);
   }
-  // A credential the request carried in a header is the request's own secret too: the token
-  // the GitHub path sends is never in the URL, so it is taken from the headers by value.
+  // A credential the request carried in a header is the request's own secret too: the token the
+  // GitHub path sends is never in the URL, so the header value is collected whole and each of
+  // its words with it -- a server that echoes only the token part still gives it up. The words
+  // pass the same floor as every other value, which is what keeps the scheme word 'Bearer' (and
+  // 'Basic', 'Token') out of the removal set: the earlier rule added them unconditionally and
+  // deleted the word from a notice that merely mentioned it.
   for (const [name, value] of Object.entries(headers ?? {})) {
     if (!/authorization|cookie|token|key|secret/i.test(String(name))) continue;
-    addBoth(value);
-    for (const part of String(value).split(/\s+/)) add(part);
+    addSpellings(value);
+    for (const part of String(value).split(/\s+/)) addSpellings(part);
   }
   return [...out];
 }
 
-function redactSecrets(text, secrets) {
+// The removal itself, and the second half of the boundary: every notice in the collector is
+// pushed through this, so a path that quotes a server answer cannot forget it. A value is
+// removed by exact match against the request's own values -- longest first, so a value that
+// contains another is removed whole -- and only when it passes the same floor the set was
+// built with. The shape list covers the credential classes no curated set can know.
+export function redactSecrets(text, secrets) {
   let out = redactBasicCredentials(String(text ?? ''));
-  for (const value of secrets ?? []) out = out.split(value).join('[redacted]');
+  const values = [...new Set((secrets ?? []).map((v) => String(v ?? '')))]
+    .filter(looksLikeValue)
+    .sort((a, b) => b.length - a.length);
+  for (const value of values) out = out.split(value).join('[redacted]');
   for (const shape of SECRET_SHAPES) out = out.replace(shape, '[redacted]');
   return out;
 }
@@ -290,12 +340,23 @@ const CONTROLS = /[\u0000-\u001f\u007f-\u009f]/g;
 // become spaces and the body keeps its words, so 'Rust 1.90 [prov:preprint] notes' reads
 // 'Rust 1.90 prov preprint notes' instead of leaving a stray closer behind.
 const MARKER = /\[(src|alt|prov):([a-z0-9][a-z0-9 ._/-]*)\]/gi;
-// An opener whose body is not plausible is still the vocabulary the renderer trusts, so it
-// loses its opener; nothing else about the text is rewritten.
-const MARKER_OPENER = /\[(?:src|alt|prov):/gi;
+// An opener whose body is not plausible is still the vocabulary the renderer trusts, so the whole
+// bracketed span loses its opener and its closer while the body keeps its words: 'a [prov:_x] b'
+// reads 'a _x b' rather than leaving 'a _x] b', because a surviving closer is a fragment of the
+// grammar the renderer reads. The closer is only consumed when it is on the same line and belongs
+// to this bracket pair (no '[' between it and the opener); a legitimate bracketed word that spells
+// no opener keeps its brackets, and an opener with no closer of its own is dropped by the rule
+// below.
+const MARKER_OPENER = /\[(?:src|alt|prov):([^\[\]\n]*)\]/gi;
+const MARKER_OPEN = /\[(?:src|alt|prov):/gi;
 // The hash is replaced by a space rather than deleted: a title that merely spells '#new' is
-// still prose, and 'C#new' must not fuse into one word.
-const STATUS_FLAG = /#(?=(?:new|followup|developing|watch)\b)/gi;
+// still prose, and 'C#new' must not fuse into one word. A status flag is a token, so its '#'
+// must not be glued to a word character: 'C#new', 'F# watch mode' and '#newrelease' keep every
+// character, while a '#new' that opens the text or follows whitespace or punctuation is still
+// neutralised. The renderer's own scans use the same boundary, so the two agree on what a flag
+// is; so does the shipped example's legend, which writes '#new' between backticks to show the
+// tag the vocabulary draws.
+const STATUS_FLAG = /(?<!\w)#(?=(?:new|followup|developing|watch)\b)/gi;
 // The renderer draws emphasis from '**like this**', so the bold marker is the same class of
 // trusted vocabulary as a citation and a status token: upstream text that spells it drew real
 // emphasis into a published card. Both asterisks become a space, so the words keep their
@@ -308,9 +369,57 @@ const BOLD = /\*\*/g;
 export function neutraliseMarkers(text) {
   return String(text)
     .replace(MARKER, ' $1 $2 ')
-    .replace(MARKER_OPENER, ' ')
+    .replace(MARKER_OPENER, ' $1 ')
+    .replace(MARKER_OPEN, ' ')
     .replace(STATUS_FLAG, ' ')
     .replace(BOLD, ' ');
+}
+
+// The same vocabulary, in the one candidate field that is a URL rather than prose. The
+// renderer reads a marker, a status token or an emphasis marker out of whatever its citation
+// destinations do not cover, and a URL is published as a destination: a line break, or the
+// first unbalanced parenthesis, ends the destination there (the renderer's destination
+// grammar admits one level of balanced parentheses and no line break), so a vocabulary the
+// URL spells after that point is read as prose and drew a badge, an alternative-source pill
+// or a status tag on the card. The collector is the only place that can cover a destination
+// that ends early, so the field is neutralised here, before it reaches the pool.
+//
+// The marker's brackets are encoded whenever the URL spells an opener. '[' and ']' are not
+// legal unencoded in a URL outside the host's IPv6 form, so no well-formed URL loses
+// anything: a URL that merely carries a query string, a fragment or a Wikipedia-style
+// balanced parenthesis is returned byte-identical.
+const URL_MARKER = /\[(?:src|alt|prov):/i;
+// A flag is the same token here as in the neutraliser: its '#' must not be glued to a word
+// character, so a URL fragment such as 'https://x/y#new' stays a '#' and is read by the
+// renderer as the fragment it is, while a token that opens the URL or follows whitespace or
+// punctuation is still encoded before the URL can leak it into the renderer's scans.
+const URL_STATUS = /(?<!\w)#(?=(?:new|followup|developing|watch)\b)/gi;
+const URL_BOLD = /\*\*/g;
+
+// Whether the URL would end its own citation destination early. '#' and '*' are legal and
+// meaningful in an ordinary URL ('https://example.com/page#new' is a fragment, not a status
+// token), so they are only encoded for a URL that cannot stay inside its destination - the
+// shape that can leak them into the renderer's marker scans at all.
+function breaksDestination(url) {
+  let depth = 0;
+  for (const ch of String(url)) {
+    if (ch === '\n' || ch === '\r') return true;
+    if (ch === '(') depth += 1;
+    else if (ch === ')') {
+      if (depth === 0) return true;
+      depth -= 1;
+    }
+  }
+  return depth !== 0;
+}
+
+export function neutraliseUrl(url) {
+  let out = String(url ?? '');
+  if (URL_MARKER.test(out)) out = out.replace(/\[/g, '%5B').replace(/\]/g, '%5D');
+  if (breaksDestination(out)) {
+    out = out.replace(URL_STATUS, '%23').replace(URL_BOLD, '%2A%2A');
+  }
+  return out;
 }
 
 export function plainText(raw, limit) {

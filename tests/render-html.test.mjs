@@ -859,6 +859,35 @@ test('the renderer replaces its deliverable atomically', () => {
   }
 });
 
+// TR-80 regression test: the deliverable writer publishes by renaming, and a rename needs only
+// the destination directory - so a digest the operator had protected with a cleared write bit
+// was replaced anyway, where the state writer refuses exactly that. The refusal is the
+// documented output exit and the previous artifact keeps its bytes.
+test('the renderer refuses a write-protected deliverable and leaves it byte-identical', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'tech-radar-protected-render-'));
+  const quiet = { log: () => {}, error: () => {} };
+  try {
+    const input = join(dir, 'digest.md');
+    const out = join(dir, 'digest.html');
+    writeFileSync(input, md);
+    const published = 'the previous deliverable\n';
+    writeFileSync(out, published);
+    chmodSync(out, 0o444);
+    let refused;
+    try {
+      refused = run([input, '--out', out], quiet);
+    } finally {
+      chmodSync(out, 0o644);
+    }
+    assert.equal(refused, 4, 'a protected deliverable is the documented output exit');
+    assert.equal(readFileSync(out, 'utf8'), published, 'the previous deliverable survives byte-identically');
+    const leftovers = readdirSync(dir).filter((name) => name !== 'digest.md' && name !== 'digest.html');
+    assert.deepEqual(leftovers, [], 'no temp file is left behind: ' + leftovers.join(', '));
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 // Regression test: an absent deliverable is not a protected one. The atomic writer resolved
 // a missing destination to 0600, so a first render produced an owner-only digest under the
 // usual umask - narrower than the plain write it replaced, and the digest is meant to be
@@ -1039,4 +1068,172 @@ test('upstream bold markers leave no emphasis in a published card', async () => 
   const card = render(md.replace('Why it matters.', candidates[0].title), config);
   assert.doesNotMatch(card, /<strong>/, 'upstream text draws no emphasis: ' + candidates[0].title);
   assert.match(card, /FORGED EMPHASIS/, 'the words still read');
+});
+
+// TR-82 regression test: a candidate's url is upstream text too, and the marker
+// neutralisation stopped at the title and summary. A feed destination that closes its own
+// citation early with a bracket therefore reached the pool, and the renderer read the
+// vocabulary after the bracket as the item's own - the citation ended there and the tail
+// drew an alternative-source pill pointing wherever the feed said.
+test('a feed link that closes its own citation early forges no badge when rendered', async () => {
+  const hostile = 'https://blog.example/a)[alt:Forged Vendor](https://evil.example/b';
+  const feed = '<?xml version="1.0"?><rss><channel><item>'
+    + '<title>A story</title><link>' + hostile + '</link>'
+    + '<pubDate>Mon, 21 Sep 2026 09:00:00 GMT</pubDate>'
+    + '<description>A release.</description></item></channel></rss>';
+  const ctx = {
+    since: '2026-09-16T00:00:00Z', until: '2026-09-30T00:00:00Z', timeout: 20000,
+    settings: {
+      user_agent: 'tech-radar/1.0', title_max_chars: 200, summary_max_chars: 400,
+      error_snippet_max_chars: 200,
+    },
+    net: { fetchText: async () => feed },
+  };
+  const { candidates } = await collectFeeds(
+    [{ kind: 'rss', target: 'https://blog.example/feed.xml', domain: 'ai-llm' }], ctx,
+  );
+  assert.equal(candidates.length, 1, 'the feed produced the candidate the card is built from');
+  const cited = '- **A story** — Why it matters. [src:Blog 2026-09-21]('
+    + candidates[0].url + ') [prov:primary] #new';
+  const html = render(md.replace(
+    '- **A model shipped** — Why it matters. [src:Hugging Face blog 2026-09-20](https://huggingface.co/blog/x) [prov:primary] #new',
+    cited,
+  ), config);
+  assert.doesNotMatch(html, /class="badge alt"/,
+    'the destination tail forged no alternative-source pill: ' + candidates[0].url);
+  assert.doesNotMatch(html, /prov-vendor-claim/, 'no forged provenance badge');
+  assert.doesNotMatch(html, /href="https:\/\/evil\.example\/b"/, 'the tail of a destination is not a citation');
+});
+
+// TR-84 regression test: image-set() candidates went through a stripper that dropped only
+// url()-wrapped data: values, so a bare data: candidate, a candidate whose payload carries a
+// comma, a fragment, a plain relative name and a type() descriptor were each left as content.
+// All of them fetch nothing, so each one failed a genuinely self-contained artifact.
+test('image-set candidates that fetch nothing are not reported as external assets', () => {
+  const benign = [
+    ['a url()-wrapped data: candidate', '<style>div{background:image-set(url("data:image/png;base64,AAA") 1x)}</style>'],
+    ['a bare data: candidate', '<style>div{background:image-set("data:image/png;base64,AAA" 1x)}</style>'],
+    ['a comma inside the data: payload', '<style>div{background:image-set("data:image/png;base64,AA,BB" 1x)}</style>'],
+    ['a fragment candidate', '<style>div{background:image-set(url(#gradient) 1x)}</style>'],
+    ['a plain name', '<style>div{background:image-set("photo.png" 1x)}</style>'],
+    ['a type() descriptor', '<style>div{background:image-set(url("data:image/png;base64,AAA") type("image/png") 1x)}</style>'],
+  ];
+  for (const [what, html] of benign) {
+    assert.equal(externalAssets(html), false, what + ' fetches nothing: ' + html);
+  }
+  for (const [what, html] of [
+    ['a remote candidate', '<style>div{background:image-set("https://cdn.example.com/a.png" 1x)}</style>'],
+    ['a remote candidate after a data: one', '<style>div{background:image-set(url("data:image/png;base64,AAA") 1x, "https://cdn.example.com/a.png" 2x)}</style>'],
+  ]) {
+    assert.equal(externalAssets(html), true, what + ' is a fetch: ' + html);
+  }
+});
+
+// TR-87 regression test: character references were decoded for http-equiv and srcdoc only, so
+// an entity-encoded rel or style attribute was compared as raw text and the fetch behind it
+// was invisible; and every data: value counted as carried in the document, although a
+// data:text/html browsing context loads whatever its own markup names. These are the evasions
+// the gate must see.
+test('externalAssets sees an entity-encoded rel and style and a data: document that fetches', () => {
+  const evasions = [
+    ['an entity-encoded rel', '<link rel="st&#121;lesheet" href="https://cdn.example.com/a.css">'],
+    ['an entity-encoded style attribute', '<div style="background:&#117;rl(https://cdn.example.com/a.png)">x</div>'],
+    ['a data:text/html iframe carrying a remote image', '<iframe src="data:text/html,<img src=\'https://cdn.example.com/a.png\'>"></iframe>'],
+  ];
+  for (const [what, html] of evasions) {
+    assert.equal(externalAssets(html), true, what + ' is a fetch: ' + html);
+  }
+  for (const benign of [
+    '<div style="background:url(photo.png)">x</div>',
+    '<iframe src="data:text/html,<p>no fetch here</p>"></iframe>',
+  ]) {
+    assert.equal(externalAssets(benign), false, 'a name that fetches nothing stays self-contained: ' + benign);
+  }
+});
+
+// TR-88 regression test: the document bound answered "fetches" where it meant "stop
+// traversing", the image-set stripper kept a type() descriptor as content, and the srcdoc
+// worklist was fed from any element although only an iframe honours srcdoc. Three benign
+// documents were therefore reported as external assets and the gate failed a correct
+// artifact. (The same tokeniser's security half is pinned by the two tests above.)
+test('the predicate reports no fetch for benign nested, non-iframe and type() documents', () => {
+  const many = Array.from({ length: 70 },
+    (_, i) => '<iframe srcdoc="benign document ' + i + '"></iframe>').join('');
+  const cases = [
+    ['more than 64 benign nested srcdoc documents', many],
+    ['srcdoc on an element that does not honour it', '<div srcdoc="<img src=\'https://cdn.example.com/a.png\'>">x</div>'],
+    ['an image-set with a type() descriptor', '<style>div{background:image-set(url("data:image/png;base64,AAA") type("image/png") 1x)}</style>'],
+  ];
+  for (const [what, html] of cases) {
+    assert.equal(externalAssets(html), false, what + ' fetches nothing: ' + html.slice(0, 90));
+  }
+});
+
+// TR-91 regression test: the status scan read '#new' wherever it appeared, so an item whose own
+// text quotes an upstream spelling such as 'C#new async patterns' drew a status tag the item
+// never carried. A status flag is a token: at the start of the text or preceded by whitespace.
+test('a status-shaped word that is not a standalone token draws no status tag', () => {
+  const digest = (item) => [
+    '# T', '_m_', '', '## Core domains', '### AI / LLM · 人工智能 / 大模型', item,
+    '', '## Watch domains — quiet', 'Quantum technologies (scanned, nothing notable)', '',
+  ].join('\n');
+  const src = '[src:Hugging Face blog 2026-09-20](https://huggingface.co/blog/x) [prov:primary]';
+
+  // A grammar item whose own prose quotes the spelling: the trailing flag is what the grammar
+  // reserves for the status scan, and this text is not one.
+  const summary = render(digest('- **A model shipped** — The C#new async patterns landed. ' + src), config);
+  assert.doesNotMatch(summary, /class="tag t-/, 'a quoted C#new is not the item card status flag');
+
+  // A bullet the grammar does not describe: the whole text, title included, feeds the scan.
+  const title = render(digest('- C#new async patterns ' + src), config);
+  assert.doesNotMatch(title, /class="tag t-/, 'a title that spells C#new draws no status tag');
+
+  // Every other non-token spelling the boundary rule must leave alone.
+  for (const word of ['F# watch mode', '#newrelease', 'C#watch']) {
+    const html = render(digest('- **A model shipped** — The ' + word + ' story landed. ' + src), config);
+    assert.doesNotMatch(html, /class="tag t-/, word + ' is not a status flag: ' + html.match(/class="tag t-[^"]*"/));
+  }
+});
+
+// TR-91 regression test: the renderer's own marker stripper rewrote a status word wherever it
+// appeared, so a card quoting 'C#new async patterns' published 'C new async patterns'. The
+// boundary rule keeps the characters on the card, headline and prose alike.
+test('a card keeps the characters of a status-shaped word it quotes', () => {
+  const digest = (item) => [
+    '# T', '_m_', '', '## Core domains', '### AI / LLM · 人工智能 / 大模型', item,
+    '', '## Watch domains — quiet', 'Quantum technologies (scanned, nothing notable)', '',
+  ].join('\n');
+  const src = '[src:Hugging Face blog 2026-09-20](https://huggingface.co/blog/x) [prov:primary]';
+  const html = render(digest('- **C#new async patterns** — The F# watch mode story landed. ' + src), config);
+
+  assert.match(html, /C#new async patterns/, 'the headline keeps the characters of C#new');
+  assert.match(html, /The F# watch mode story landed\./, 'the prose keeps the characters of F#');
+  assert.doesNotMatch(html, /C\s+new async patterns/, 'the hash of C#new is not rewritten to a space');
+  assert.doesNotMatch(html, /F\s+watch mode/, 'the hash of F# is not rewritten to a space');
+
+  const named = render(digest('- **A model shipped** — The #newrelease shipped. ' + src), config);
+  assert.match(named, /#newrelease/, 'a hash that opens a longer word keeps every character');
+});
+
+// The other half of TR-91: bounding the scan must not drop the tag the grammar does expect. An
+// authored standalone flag -- after a space or at the start of the item text -- still becomes
+// the card's status tag, and the additive flags still do not decide it.
+test('an authored standalone status flag still draws its tag', () => {
+  const digest = (item) => [
+    '# T', '_m_', '', '## Core domains', '### AI / LLM · 人工智能 / 大模型', item,
+    '', '## Watch domains — quiet', 'Quantum technologies (scanned, nothing notable)', '',
+  ].join('\n');
+  const src = '[src:Hugging Face blog 2026-09-20](https://huggingface.co/blog/x) [prov:primary]';
+  const card = (item) => render(digest(item), config);
+
+  assert.match(card('- **A model shipped** — Why it matters. ' + src + ' #new'),
+    /<span class="tag t-new">new<\/span>/, 'a trailing #new is the card status');
+  assert.match(card('- **A model shipped** — Why it matters. ' + src + ' #followup'),
+    /<span class="tag t-followup">followup<\/span>/, 'a trailing #followup is the card status');
+  assert.match(card('- **A model shipped** — #new Why it matters. ' + src),
+    /<span class="tag t-new">new<\/span>/, 'a #new at the start of the item text is still a flag');
+  assert.match(card('- **A model shipped** — Why it matters. ' + src + ' #new #developing'),
+    /<span class="tag t-new">new<\/span>/, 'an additive flag still does not decide the tag');
+  assert.doesNotMatch(card('- **A model shipped** — Why it matters. ' + src + ' #new #developing'),
+    /class="tag t-developing"/, 'and it draws no developing tag');
 });

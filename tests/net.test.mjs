@@ -6,7 +6,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
-import { decodeBuffer, decodeEntities, field, atomLink, splitItems, plainText, isDiscoveryOnly, hostOf, shapeHttpError, shapeTransportError, splitCurlOutput, redactUrl, fetchText } from '../scripts/lib/net.mjs';
+import { decodeBuffer, decodeEntities, field, atomLink, splitItems, neutraliseMarkers, plainText, isDiscoveryOnly, hostOf, shapeHttpError, shapeTransportError, splitCurlOutput, redactUrl, fetchText, neutraliseUrl } from '../scripts/lib/net.mjs';
 
 test('decodeBuffer passes UTF-8 through', () => {
   assert.equal(decodeBuffer(Buffer.from('中文 test', 'utf8')), '中文 test');
@@ -288,6 +288,72 @@ test('redactUrl drops the whole query string and the userinfo for every credenti
   assert.equal(redactUrl('//u:p4ssw0rd@h.example/x?token=v').includes('p4ssw0rd'), false);
 });
 
+// TR-85 regression test: the secret set was built from the decoded query value only, so a
+// server that echoed the request's own percent-encoded spelling - the form curl actually put on
+// the request line, and the common server-log spelling - republished the credential in a
+// trivially decodable form. Every spelling the request could have sent is removed.
+test('a request credential is removed in its raw, encoded and decoded spellings', () => {
+  const secret = 'oper' + '+OPERATORSECRET42';
+  const url = 'https://feed.example/x?token=' + secret;
+  const bodies = [
+    'token=' + secret,
+    'token=' + encodeURIComponent(secret),
+    'token=oper%2BOPERATORSECRET42',
+  ];
+  for (const body of bodies) {
+    const shaped = shapeHttpError(500, Buffer.from(body), url, 400);
+    assert.equal(shaped.message.includes(secret), false, 'the raw spelling survived: ' + shaped.message);
+    assert.equal(shaped.message.includes('oper%2BOPERATORSECRET42'), false,
+      'the encoded spelling survived: ' + shaped.message);
+  }
+  // URLSearchParams decodes '+' as a space, so the spelling a server logs after decoding it and
+  // the encoded form of that decoded value are both spellings of the request's own value.
+  const spaced = 'https://feed.example/x?token=oper+plus';
+  for (const body of ['token=oper+plus', 'token=oper%20plus', 'token=oper plus']) {
+    const shaped = shapeHttpError(500, Buffer.from(body), spaced, 400);
+    assert.equal(/oper[+% ]?plus/.test(shaped.message), false,
+      'a spelling of the request value survived: ' + shaped.message);
+  }
+});
+
+// TR-82 regression test: a candidate URL is the one text field the marker neutraliser did not
+// cover, and the renderer reads its vocabulary out of whatever the citation destination does not
+// cover - which a ')' or a line break in the destination ends early. The marker's brackets are
+// encoded; a status hash and the emphasis marker are encoded only when the URL cannot stay inside
+// its destination, because '#' and '*' are legal and meaningful in an ordinary URL.
+test('neutraliseUrl takes the marker grammar out of a URL and leaves an ordinary URL alone', () => {
+  assert.equal(neutraliseUrl('https://blog.example/a)[alt:Forged](https://evil.example/b'),
+    'https://blog.example/a)%5Balt:Forged%5D(https://evil.example/b');
+  assert.equal(neutraliseUrl('https://evil.example/x)[prov:vendor-claim]'),
+    'https://evil.example/x)%5Bprov:vendor-claim%5D');
+  assert.equal(neutraliseUrl('https://evil.example/x\n#followup'),
+    'https://evil.example/x\n%23followup', 'a destination that ends early cannot leak a status token');
+  for (const url of [
+    'https://github.com/nodejs/node/releases/tag/v24.1.0',
+    'https://en.wikipedia.org/wiki/Foo_(bar)',
+    'https://example.com/a?per_page=10&lang=zh-Hans',
+    'https://example.com/page#new',
+    'https://example.com/a?per_page=10#new',
+  ]) {
+    assert.equal(neutraliseUrl(url), url, 'an ordinary URL survives byte-identical: ' + url);
+  }
+});
+
+// TR-89 regression test: the plausible-body rule left the closer of an implausible marker body
+// behind, so the neutraliser published a fragment of the grammar it exists to remove ('a _x] b').
+// The body keeps its words, the bracket pair goes, and a bracketed word that is not an opener is
+// untouched.
+test('an implausible marker body loses its closer as well as its opener', () => {
+  const out = plainText('a [prov:_x] b', 200);
+  assert.equal(out, 'a _x b', 'the body keeps its words and no fragment is left: ' + JSON.stringify(out));
+  assert.doesNotMatch(out, /\]/, 'no closer survives: ' + JSON.stringify(out));
+  assert.equal(plainText('[alt:-1] and [src:!] here', 200), '-1 and ! here',
+    'each opener takes its own closer');
+  assert.equal(plainText('see the [note] and the [draft-2] tags', 200),
+    'see the [note] and the [draft-2] tags', 'a bracketed word that is not an opener keeps its brackets');
+  assert.equal(plainText('a [prov:_x', 200), 'a _x', 'an opener with no closer is still dropped');
+});
+
 // Regression test: the neutraliser deleted the matched opener and the status flag instead of
 // spacing them and left a marker's closer behind, so legitimate upstream text was damaged -
 // 'C#new async patterns' came out 'Cnew async patterns' and 'Rust 1.90 [prov:preprint] notes'
@@ -367,5 +433,65 @@ test('shapeHttpError removes the request credential a server body echoes back', 
   assert.equal(shaped.message.includes(token), false, 'the echoed token must not survive: ' + shaped.message);
   assert.equal(shaped.message.includes(basic), false, 'the Basic value must not survive: ' + shaped.message);
   assert.equal(shaped.message.includes(password), false, 'the password must not survive: ' + shaped.message);
+});
+
+// TR-85 regression test: the value redaction removed every query value of three characters or
+// more and every whitespace-separated part of a credential-named header, with no word boundary
+// and no credential-shaped test. A notice whose own wording happened to carry either therefore
+// read "the [redacted] feed could not be parsed", and the notice is the run's only diagnosis of
+// a degraded source. The benign words stay; the request's own credential still goes.
+test('a notice keeps its own wording while the request credential is still removed', () => {
+  const secret = 'echo' + '-TOKENVALUE1234';
+  const benign = shapeHttpError(500,
+    Buffer.from('the atom feed expects the token as Bearer; no query value is accepted'),
+    'https://feeds.example/rss?format=atom', 200, { Authorization: 'Bearer ' + secret });
+  assert.match(benign.message, /the atom feed expects/, 'a benign query value stays: ' + benign.message);
+  assert.match(benign.message, /as Bearer;/, 'the scheme word stays: ' + benign.message);
+  assert.doesNotMatch(benign.message, /\[redacted\]/, 'a benign wording is not redacted: ' + benign.message);
+  const echoed = shapeHttpError(500,
+    Buffer.from('denied: token=' + secret + ' for the atom feed'),
+    'https://feeds.example/rss?format=atom', 200, { Authorization: 'Bearer ' + secret });
+  assert.equal(echoed.message.includes(secret), false,
+    'the request credential is still removed: ' + echoed.message);
+});
+
+// TR-91 regression test: the neutraliser replaced the hash of any text that spelled a status
+// word, so a legitimate upstream spelling lost its characters -- 'C#new async patterns' was
+// published as 'C new async patterns'. A status flag is a token: it stands at the start of the
+// text or follows whitespace. Every other spelling keeps its characters.
+test('the neutraliser keeps a status-shaped hash that is not a standalone token', () => {
+  const spellings = [
+    'C#new async patterns',
+    'F# watch mode',
+    '#newrelease',
+    'C#followup notes',
+    'C#developing',
+    'C#watch',
+  ];
+  for (const text of spellings) {
+    assert.equal(neutraliseMarkers(text), text,
+      'the neutraliser must keep the characters of a non-token spelling: ' + JSON.stringify(text));
+    assert.equal(plainText(text, 200), text,
+      'and the published text must carry it unchanged: ' + JSON.stringify(text));
+  }
+});
+
+// The other half of TR-91: the boundary must not let a real flag through. A standalone flag is
+// still neutralised wherever it is a token, the start of the text included, so upstream text
+// cannot draw a status tag on a published card.
+test('the neutraliser still rewrites a standalone status flag at a token boundary', () => {
+  for (const flag of ['new', 'followup', 'developing', 'watch']) {
+    assert.equal(plainText('shipped #' + flag + ' today', 200), 'shipped ' + flag + ' today',
+      'a mid-sentence #' + flag + ' is still neutralised');
+    assert.equal(plainText('#' + flag + ' leads the text', 200), flag + ' leads the text',
+      'a #' + flag + ' at the start of the text is still neutralised');
+    assert.equal(plainText('the last token is #' + flag, 200), 'the last token is ' + flag,
+      'a trailing #' + flag + ' is still neutralised');
+    assert.doesNotMatch(neutraliseMarkers('a #' + flag + ' b'), new RegExp('#' + flag + '\\b'),
+      'the neutraliser leaves no status flag behind: #' + flag);
+  }
+  const hostile = plainText('[src:Trusted 2026-09-20](https://evil.example/x) [prov:primary] #new', 200);
+  assert.doesNotMatch(hostile, /#(?:new|followup|developing|watch)\b/,
+    'a real flag in an upstream body is still neutralised: ' + JSON.stringify(hostile));
 });
 

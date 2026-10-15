@@ -5,13 +5,16 @@
 // ranks or scores: judgement stays with the agent. A failing source becomes a
 // notice, never a thrown error and never a silent skip.
 import { randomBytes } from 'node:crypto';
-import { chmodSync, mkdirSync, renameSync, statSync, unlinkSync, writeFileSync } from 'node:fs';
+import {
+  accessSync, chmodSync, constants, existsSync, mkdirSync, renameSync, statSync, unlinkSync,
+  writeFileSync,
+} from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { readConfig } from './lib/mdtable.mjs';
 import {
   fetchText, hostOf, isDiscoveryOnly, splitItems, field, atomLink, plainText, redactUrl,
-  neutraliseMarkers,
+  neutraliseMarkers, neutraliseUrl, redactSecrets, requestSecrets,
 } from './lib/net.mjs';
 
 // The collector must work from any working directory, so the default configuration
@@ -30,6 +33,13 @@ const GITHUB_API = 'https://api.github.com';
 // SKILL.md requires the notices to be carried into the published Coverage note, so a notice
 // is published text -- and the text is bounded so one hostile response cannot become an
 // unbounded notice.
+//
+// The request's own credential is removed here too, at the one boundary every notice crosses.
+// The transport shapers redact the messages they build, but the shapers are not the only
+// source of a notice: a JSON parse failure is raised by Node with the head of the body in its
+// message, and any fetch implementation can throw whatever it likes, so the guarantee lives at
+// the push. A caller that knows the request passes its secret list (requestSecrets); a notice
+// that quotes nothing the request sent needs none.
 const NOTICE_CONTROLS = /[\u0000-\u001f\u007f-\u009f]/g;
 const NOTICE_MAX_CHARS = 1000;
 function sanitizeNotice(text) {
@@ -37,8 +47,21 @@ function sanitizeNotice(text) {
     String(text).replace(NOTICE_CONTROLS, (ch) => (/\s/.test(ch) ? ' ' : '')),
   ).slice(0, NOTICE_MAX_CHARS);
 }
-function pushNotice(notices, text) {
-  notices.push(sanitizeNotice(text));
+function pushNotice(notices, text, secrets) {
+  notices.push(sanitizeNotice(redactSecrets(text, secrets)));
+}
+
+// A response that will not parse is shaped here rather than quoted: Node's SyntaxError carries
+// the head of the body (or the ten characters around the error position) in its message, and
+// which part of a credential that slice holds is the parser's choice, so no by-value redaction
+// can identify it. The notice names the endpoint and says the answer was not JSON, which is
+// what a reader of a degraded source needs, and the body never reaches the notice at all.
+function parseJson(text, url) {
+  try {
+    return JSON.parse(text);
+  } catch {
+    throw new Error(`the response was not JSON (${redactUrl(url)})`);
+  }
 }
 
 // The Go module proxy protocol case-encodes a module path: every uppercase letter is
@@ -223,7 +246,9 @@ async function runSource(name, rows, fn, ctx, acc) {
     acc.candidates.push(...res.candidates);
     acc.notices.push(...(res.notices ?? []));
   } catch (err) {
-    acc.notices.push(sanitizeNotice(`${name}: ${err.message}`));
+    // No request is in scope here: a failure that escapes a whole source is not a request's
+    // answer, and the per-request notices the source pushed already carried their own secrets.
+    pushNotice(acc.notices, `${name}: ${err.message}`);
   }
 }
 
@@ -231,6 +256,16 @@ function toIso(value) {
   if (!value) return null;
   const d = new Date(value);
   return Number.isNaN(d.getTime()) ? null : d.toISOString();
+}
+
+// A 403 or 429 whose answer names the rate limit is the server saying the allowance is spent.
+// A repository that is merely forbidden answers with its own message, so the text has to name
+// the limit to count; the shaped HTTP error carries the bounded, tag-stripped snippet in both
+// its message and its body.
+function isRateLimitRefusal(err) {
+  const status = Number(err?.httpStatus);
+  if (status !== 403 && status !== 429) return false;
+  return /rate limit/i.test(String(err?.body ?? '')) || /rate limit/i.test(String(err?.message ?? ''));
 }
 
 export async function collectGithub(rows, ctx) {
@@ -245,13 +280,17 @@ export async function collectGithub(rows, ctx) {
     throw new Error('github_rate_limit_reserve is missing or invalid in config/settings.md');
   }
   const get = (url) => ctx.net.fetchText(url, ctx.timeout, headers, s.user_agent, s.error_snippet_max_chars);
+  // The request's own secrets, for the notice boundary: every call in the block can quote the
+  // server's answer in a notice, and the header this path sends is never in the URL.
+  const secretsFor = (url) => requestSecrets(url, headers);
   // Probe the budget once, before the block: one free call instead of discovering an
   // exhausted limit once per row, 55 times over.
   let budget;
+  const probeUrl = `${GITHUB_API}/rate_limit`;
   try {
-    budget = coreBudget(JSON.parse(await get(`${GITHUB_API}/rate_limit`)));
+    budget = coreBudget(parseJson(await get(probeUrl), probeUrl));
   } catch (err) {
-    pushNotice(notices, `github: rate limit could not be checked (${err.message}); ${uncheckedPhraseFor(rows)}`);
+    pushNotice(notices, `github: rate limit could not be checked (${err.message}); ${uncheckedPhraseFor(rows)}`, secretsFor(probeUrl));
     return { candidates, notices };
   }
   if (budget.remaining === null) {
@@ -265,6 +304,18 @@ export async function collectGithub(rows, ctx) {
   const charged = { count: 0 };
   const spend = () => { if (left.value <= 0) return false; left.value -= 1; charged.count += 1; return true; };
   const shortfall = { repos: 0, orgs: 0, tags: 0 };
+  // The probe is advisory and a refusal is the authoritative reading: the allowance is keyed to
+  // the address the run leaves from, and on a shared egress the probe can report a full budget
+  // while the charged requests are already refused. The first refusal that names the limit
+  // therefore ends the block's spending, and the notice below reports the effective allowance it
+  // observed (zero) with what went unchecked, instead of the pre-spend figure.
+  const refusals = { count: 0 };
+  const refused = (err) => {
+    if (!isRateLimitRefusal(err)) return false;
+    refusals.count += 1;
+    left.value = 0;
+    return true;
+  };
 
   // Phase 0 -- organisations. /orgs/{org}/releases does not exist (probe 2026-09-23:
   // 404 Not Found where the repo endpoint answers 200), so an organisation is
@@ -277,14 +328,17 @@ export async function collectGithub(rows, ctx) {
   for (const row of rows) {
     if (row.kind !== 'github-org') continue;
     if (!spend()) { shortfall.orgs += 1; continue; }
+    const url = `${GITHUB_API}/orgs/${row.target}/repos`
+      + `?per_page=${encodeURIComponent(s.github_org_repos)}&sort=updated`;
     try {
-      const url = `${GITHUB_API}/orgs/${row.target}/repos`
-        + `?per_page=${encodeURIComponent(s.github_org_repos)}&sort=updated`;
-      const body = JSON.parse(await get(url));
+      const body = parseJson(await get(url), url);
       if (!Array.isArray(body)) throw new Error('unexpected response shape');
       for (const repo of body) if (repo.full_name) targets.push({ target: repo.full_name, domain: row.domain });
     } catch (err) {
-      pushNotice(notices, `github ${row.target}: ${err.message}`);
+      pushNotice(notices, `github ${row.target}: ${err.message}`, secretsFor(url));
+      // The refused request is named by this notice and counted as a refusal in the budget
+      // notice; every later organisation is counted by the spend() guard above.
+      refused(err);
     }
   }
 
@@ -298,7 +352,7 @@ export async function collectGithub(rows, ctx) {
     const url = `${GITHUB_API}/repos/${t.target}/releases`
       + `?per_page=${encodeURIComponent(s.github_releases_per_repo)}`;
     try {
-      const body = JSON.parse(await get(url));
+      const body = parseJson(await get(url), url);
       if (!Array.isArray(body)) throw new Error('unexpected response shape');
       for (const rel of body) {
         if (rel.draft || !rel.tag_name || !rel.html_url) continue;
@@ -309,7 +363,7 @@ export async function collectGithub(rows, ctx) {
           domain: t.domain,
           kind: 'github-release',
           title: plainText(`${t.target} ${rel.tag_name}`, s.title_max_chars),
-          url: rel.html_url,
+          url: neutraliseUrl(rel.html_url),
           publishedAt,
           source: `github:${t.target}`,
           tierHint: 'primary',
@@ -317,7 +371,11 @@ export async function collectGithub(rows, ctx) {
         });
       }
     } catch (err) {
-      pushNotice(notices, `github ${t.target}: ${err.message}`);
+      pushNotice(notices, `github ${t.target}: ${err.message}`, secretsFor(url));
+      // The refusal is the settled allowance, so the block stops spending here: the refused
+      // repository is named by this notice and by the refusal count, and every repository after
+      // it - which the run never asked for - is what the budget notice counts as unchecked.
+      if (refused(err)) { shortfall.repos = targets.length - i - 1; break; }
       continue;
     }
     if (candidates.length === before) tagFallbacks.push(t);
@@ -333,7 +391,7 @@ export async function collectGithub(rows, ctx) {
     const url = `${GITHUB_API}/repos/${t.target}/tags`
       + `?per_page=${encodeURIComponent(s.github_tags_per_repo)}`;
     try {
-      const body = JSON.parse(await get(url));
+      const body = parseJson(await get(url), url);
       if (!Array.isArray(body)) throw new Error('unexpected response shape');
       for (const tag of body) {
         if (!tag.name || !tag.commit || !tag.commit.sha) continue;
@@ -341,7 +399,7 @@ export async function collectGithub(rows, ctx) {
           domain: t.domain,
           kind: 'github-tag',
           title: plainText(`${t.target} ${tag.name}`, s.title_max_chars),
-          url: `https://github.com/${t.target}/releases/tag/${encodeURIComponent(tag.name)}`,
+          url: neutraliseUrl(`https://github.com/${t.target}/releases/tag/${encodeURIComponent(tag.name)}`),
           publishedAt: null,
           undated: true, // a lead, never a window match: the tags payload has no date
           source: `github-tags:${t.target}`,
@@ -351,7 +409,8 @@ export async function collectGithub(rows, ctx) {
         tagLeads += 1;
       }
     } catch (err) {
-      pushNotice(notices, `github-tags ${t.target}: ${err.message}`);
+      pushNotice(notices, `github-tags ${t.target}: ${err.message}`, secretsFor(url));
+      if (refused(err)) { shortfall.tags = tagFallbacks.length - i - 1; break; }
     }
   }
 
@@ -359,13 +418,17 @@ export async function collectGithub(rows, ctx) {
     pushNotice(notices, `github-tags: ${tagLeads} undated tag ${tagLeads === 1 ? 'lead' : 'leads'} carried `
       + '(the tags API has no date, so they cannot be window-filtered)');
   }
-  if (shortfall.repos || shortfall.orgs || shortfall.tags) {
+  if (shortfall.repos || shortfall.orgs || shortfall.tags || refusals.count > 0) {
     // A probe that reports the whole allowance means nothing had been charged before the
     // block, so its "remaining" is a pre-spend snapshot: the notice states the effective
     // allowance instead, which is how a fully spent run stops claiming a full one. A probe
     // that already reports a partial budget keeps its reading.
+    //
+    // A refusal observed by the block is not a reading at all: it is the server settling the
+    // allowance at zero, which is what the notice has to say whatever the probe reported.
     const fresh = budget.limit !== null && budget.remaining === budget.limit;
-    const reported = fresh ? { ...budget, reserve, spent: charged.count } : budget;
+    const tracked = fresh || refusals.count > 0;
+    const reported = tracked ? { ...budget, reserve, spent: charged.count, refused: refusals.count } : budget;
     pushNotice(notices, budgetNotice(reported, shortfall, Boolean(token)));
   }
   return { candidates, notices };
@@ -397,7 +460,7 @@ export async function collectArxiv(rows, ctx) {
           domain: row.domain,
           kind: 'arxiv',
           title: plainText(field(entry, 'title'), ctx.settings.title_max_chars),
-          url: link,
+          url: neutraliseUrl(link),
           publishedAt,
           source: `arxiv:${row.target}`,
           tierHint: 'preprint',
@@ -405,7 +468,7 @@ export async function collectArxiv(rows, ctx) {
         });
       }
     } catch (err) {
-      pushNotice(notices, `arxiv ${row.target}: ${err.message}`);
+      pushNotice(notices, `arxiv ${row.target}: ${err.message}`, requestSecrets(url, {}));
     }
   }
   return { candidates, notices };
@@ -445,7 +508,7 @@ export async function collectFeeds(rows, ctx) {
           domain: row.domain,
           kind: 'feed',
           title: plainText(field(item, 'title'), ctx.settings.title_max_chars),
-          url,
+          url: neutraliseUrl(url),
           publishedAt,
           // The source labels the feed for the reader, so it is built from the same
           // redaction the notice uses: a target carrying userinfo or a credential-named
@@ -457,7 +520,7 @@ export async function collectFeeds(rows, ctx) {
         });
       }
     } catch (err) {
-      pushNotice(notices, `rss ${redactUrl(target)}: ${err.message}`);
+      pushNotice(notices, `rss ${redactUrl(target)}: ${err.message}`, requestSecrets(target, {}));
     }
   }
   return { candidates, notices };
@@ -530,15 +593,28 @@ export function budgetNotice(budget, shortfall, token) {
   const reserve = Number(budget?.reserve);
   const spent = Number(budget?.spent);
   const tracked = Number.isFinite(reserve) || Number.isFinite(spent);
-  const quoted = tracked
+  const arithmetic = tracked
     ? Math.max(0, Number(budget.remaining)
       - (Number.isFinite(reserve) ? reserve : 0)
       - (Number.isFinite(spent) ? spent : 0))
     : budget.remaining;
+  // A refusal the block observed is the authoritative reading, and it settles the allowance at
+  // zero: the probe described the bucket of the address the run left from, not this run's own
+  // allowance, so quoting the probe's arithmetic here would overstate what is left to spend.
+  // The count of refusals the probe did not predict is named with it, and the rows the run
+  // could not check keep their own count below.
+  const refused = Number(budget?.refused);
+  const observed = Number.isFinite(refused) && refused > 0;
+  const quoted = observed ? 0 : arithmetic;
   const held = tracked && Number.isFinite(reserve) && reserve > 0
     ? `, ${reserve} held in reserve` : '';
-  return `github: rate limit reached (remaining ${quoted} of ${budget.limit}${held}${resets}); `
-    + `${parts.join('; ')}; ${remedy}`;
+  const refusedNote = observed
+    ? `, ${refused} refused as rate limited` : '';
+  // A run whose whole shortfall is the refusal itself has no separate unchecked count to name:
+  // the middle clause is dropped rather than left as an empty one.
+  const unchecked = parts.length ? `${parts.join('; ')}; ` : '';
+  return `github: rate limit reached (remaining ${quoted} of ${budget.limit}${held}${refusedNote}${resets}); `
+    + `${unchecked}${remedy}`;
 }
 
 const REGISTRY = {
@@ -593,8 +669,9 @@ export async function collectRegistries(rows, ctx) {
   for (const row of rows) {
     const spec = REGISTRY[row.kind];
     if (!spec) { pushNotice(notices, `registry unknown kind ${row.kind}`); continue; }
+    const url = spec.url(row.target);
     try {
-      const json = JSON.parse(await ctx.net.fetchText(spec.url(row.target), ctx.timeout, {}, ctx.settings.user_agent, ctx.settings.error_snippet_max_chars));
+      const json = parseJson(await ctx.net.fetchText(url, ctx.timeout, {}, ctx.settings.user_agent, ctx.settings.error_snippet_max_chars), url);
       const { version, at } = spec.read(json);
       const publishedAt = toIso(at);
       // A registry release whose release time cannot be established is a notice, not an
@@ -608,15 +685,19 @@ export async function collectRegistries(rows, ctx) {
       candidates.push({
         domain: row.domain,
         kind: 'registry',
-        title: `${row.kind} ${row.target} ${version}`.trim(),
-        url: spec.page(row.target),
+        // The version is upstream text, so the title and the summary are normalised and bounded
+        // like every other candidate field, and the page URL goes through the URL rule: a
+        // registry that answered with the renderer's own vocabulary in its version string must
+        // not draw a badge on the card the agent builds from this pool.
+        title: plainText(`${row.kind} ${row.target} ${version}`, ctx.settings.title_max_chars),
+        url: neutraliseUrl(spec.page(row.target)),
         publishedAt,
         source: `${row.kind}:${row.target}`,
         tierHint: 'primary',
-        summary: `New ${row.kind} release ${version}`,
+        summary: plainText(`New ${row.kind} release ${version}`, ctx.settings.summary_max_chars),
       });
     } catch (err) {
-      pushNotice(notices, `${row.kind} ${row.target}: ${err.message}`);
+      pushNotice(notices, `${row.kind} ${row.target}: ${err.message}`, requestSecrets(url, {}));
     }
   }
   return { candidates, notices };
@@ -627,6 +708,10 @@ export async function collectAdvisories(rows, ctx) {
   const notices = [];
   const token = process.env.GITHUB_TOKEN || process.env.GH_TOKEN;
   for (const row of rows) {
+    // The request in flight, for the notice boundary: the GHSA path sends a credential and the
+    // NVD path a window, and a failure that quotes the server's answer needs its own request's
+    // secrets rather than the other branch's.
+    let secrets = [];
     try {
       if (row.kind === 'ghsa') {
         const headers = { Accept: 'application/vnd.github+json' };
@@ -634,7 +719,8 @@ export async function collectAdvisories(rows, ctx) {
         const url = `${GITHUB_API}/advisories`
           + `?per_page=${encodeURIComponent(ctx.settings.ghsa_page_size)}`
           + `&published=${(ctx.since ?? '').slice(0, 10)}..${(ctx.until ?? '').slice(0, 10)}`;
-        const body = JSON.parse(await ctx.net.fetchText(url, ctx.timeout, headers, ctx.settings.user_agent, ctx.settings.error_snippet_max_chars));
+        secrets = requestSecrets(url, headers);
+        const body = parseJson(await ctx.net.fetchText(url, ctx.timeout, headers, ctx.settings.user_agent, ctx.settings.error_snippet_max_chars), url);
         for (const a of Array.isArray(body) ? body : []) {
           const publishedAt = toIso(a.published_at);
           if (ctx.since && publishedAt && publishedAt < ctx.since) continue;
@@ -642,7 +728,7 @@ export async function collectAdvisories(rows, ctx) {
           candidates.push({
             domain: row.domain, kind: 'advisory',
             title: plainText(String(a.ghsa_id || a.summary || ''), ctx.settings.summary_max_chars),
-            url: a.html_url, publishedAt, source: 'ghsa', tierHint: 'primary',
+            url: neutraliseUrl(a.html_url), publishedAt, source: 'ghsa', tierHint: 'primary',
             summary: plainText(a.summary ?? '', ctx.settings.summary_max_chars),
           });
         }
@@ -651,7 +737,8 @@ export async function collectAdvisories(rows, ctx) {
           + `?pubStartDate=${encodeURIComponent(nvdStamp(ctx.since))}`
           + `&pubEndDate=${encodeURIComponent(nvdStamp(ctx.until))}`
           + `&cvssV3Severity=${encodeURIComponent(ctx.settings.nvd_severity)}`;
-        const body = JSON.parse(await ctx.net.fetchText(url, ctx.timeout, {}, ctx.settings.user_agent, ctx.settings.error_snippet_max_chars));
+        secrets = requestSecrets(url, {});
+        const body = parseJson(await ctx.net.fetchText(url, ctx.timeout, {}, ctx.settings.user_agent, ctx.settings.error_snippet_max_chars), url);
         for (const v of body.vulnerabilities ?? []) {
           const cve = v.cve ?? {};
           const en = (cve.descriptions ?? []).find((d) => d.lang === 'en');
@@ -659,15 +746,19 @@ export async function collectAdvisories(rows, ctx) {
           if (ctx.since && publishedAt && publishedAt < ctx.since) continue;
           if (ctx.until && publishedAt && publishedAt > ctx.until) continue;
           candidates.push({
-            domain: row.domain, kind: 'advisory', title: cve.id,
-            url: `https://nvd.nist.gov/vuln/detail/${cve.id}`,
+            // The identifier is upstream text too: the title and the detail URL both carry it.
+            domain: row.domain, kind: 'advisory',
+            title: plainText(String(cve.id ?? ''), ctx.settings.summary_max_chars),
+            url: neutraliseUrl(`https://nvd.nist.gov/vuln/detail/${cve.id}`),
             publishedAt, source: 'nvd', tierHint: 'primary',
             summary: plainText(en?.value ?? '', ctx.settings.summary_max_chars),
           });
         }
       }
     } catch (err) {
-      pushNotice(notices, `${row.kind}: ${err.message}`);
+      // The secrets are those of the request this row made; a row that failed before it
+      // reached one contributes none.
+      pushNotice(notices, `${row.kind}: ${err.message}`, secrets);
     }
   }
   return { candidates, notices };
@@ -737,7 +828,7 @@ function operatorWarning(notices) {
 // came back 0664. A fresh (absent) destination has no mode to keep, so it is left at the
 // mode the create itself gave it - 0666 masked by the process umask - exactly what the
 // plain write this replaced produced. The state writer resolves the same way, so the three
-// writers agree on the rule.
+// writers agree on the rule and on the refusal below.
 function destinationMode(out) {
   try { return statSync(out).mode & 0o777; } catch { return null; }
 }
@@ -745,6 +836,9 @@ function destinationMode(out) {
 // A replacement is published by a rename, so a refused or interrupted write leaves the
 // previous pool intact rather than truncated. The temp name is unique and created
 // exclusively, so a pre-planted path is never followed, and it is removed on every failure.
+// A destination that exists but is not writable is refused before the rename: the rename
+// itself needs only the directory, so without this check a pool the operator had protected
+// was silently replaced. The state writer refuses the same way.
 function writeAtomic(out, text) {
   const mode = destinationMode(out);
   const dir = dirname(out);
@@ -756,6 +850,7 @@ function writeAtomic(out, text) {
     // held (a 0664 pool under a 022 umask is the common case). Only a destination that
     // already existed is pinned: a fresh one keeps the create's own 0666 & ~umask.
     if (mode !== null) chmodSync(tmp, mode);
+    if (existsSync(out)) accessSync(out, constants.W_OK);
     renameSync(tmp, out);
   } catch (err) {
     try { unlinkSync(tmp); } catch { /* the temp was never created */ }

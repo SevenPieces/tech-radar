@@ -5,7 +5,7 @@ import { cpSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:f
 import { readSettings, readDomains } from '../scripts/lib/mdtable.mjs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { execFileSync } from 'node:child_process';
+import { execFileSync, spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import { parseItems, parseArgs, check, main, scopedMinItems, registeredOutlet, FEATURED_STANDIN } from '../scripts/check-quality.mjs';
 import { readConfig } from '../scripts/lib/mdtable.mjs';
@@ -781,6 +781,52 @@ test('more than one status token still warns when the flag is additive', () => {
   assert.deepEqual(failures, []);
   assert.match(warnings.join('\n'), /2 status tokens/, 'the multi-token warning still fires');
   assert.match(warnings.join('\n'), /read as the flag/, 'and it names the token the gate read');
+});
+
+// TR-92 regression test: the gate read a status flag with no token boundary while the neutraliser
+// and the renderer both required one, so an item whose own prose quotes 'C#new async patterns' was
+// counted as carrying #new. The renderer draws no status tag for that text, so the gate accepted an
+// item that ships with no tag at all and the three components disagreed about what a flag is.
+test('the gate reads a flag by the same token boundary as the renderer and the neutraliser', () => {
+  const spellings = [
+    'The C#new async patterns landed.',
+    'The C#followup notes landed.',
+    'The C#developing branch landed.',
+  ];
+  for (const prose of spellings) {
+    const digest = good
+      .replace(' [prov:primary] #new', ' [prov:primary]')
+      .replace('Why it matters.', prose);
+    const items = parseItems(digest);
+    assert.equal(items.length, 1, prose + ': the one item is parsed');
+    assert.deepEqual(items[0].flags, [], prose + ': a status-shaped word is not a flag');
+    assert.deepEqual(items[0].statusTokens, [], prose + ': and it is not a status token either');
+    assert.match(check(digest, config, plan).failures.join('\n'),
+      /expected exactly one of #new or #followup/,
+      prose + ': the gate reports the missing status flag');
+  }
+});
+
+// The other half of TR-92: the boundary must not stop a real flag being counted. A standalone #new
+// still decides the flag even when the prose also spells a fused word, and the item still passes.
+test('a standalone #new is still counted as the flag at the new boundary', () => {
+  const digest = good.replace('Why it matters.', 'The C#new async patterns landed.');
+  assert.deepEqual(parseItems(digest)[0].flags, ['new'], 'the trailing #new is the flag');
+  assert.deepEqual(parseItems(digest)[0].statusTokens, ['new'], 'the fused word adds no token');
+  assert.deepEqual(check(digest, config, plan).failures, [], 'and the gate still accepts it');
+});
+
+// TR-92: the shipped example is the frozen artifact the three components must still agree on. The
+// boundary rule must not change what the gate accepts there.
+test('the shipped example still passes the gate', () => {
+  const res = spawnSync(process.execPath, [
+    join(REPO, 'scripts', 'check-quality.mjs'),
+    join(REPO, 'examples', 'sample-digest.md'),
+    '--plan', join(REPO, 'examples', 'sample-plan.json'),
+    '--html', join(REPO, 'examples', 'sample-digest.html'),
+  ], { encoding: 'utf8' });
+  assert.equal(res.status, 0, 'the shipped example passes the gate: ' + res.stdout + res.stderr);
+  assert.match(res.stdout, /QUALITY: PASS/, 'and the gate says so');
 });
 
 test('a bullet that looks like an item but does not parse is warned about', () => {

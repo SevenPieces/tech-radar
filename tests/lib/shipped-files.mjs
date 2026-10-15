@@ -9,7 +9,7 @@
 // applies the stated rule from the tree, and when git can answer it also drops every other
 // path the repository ignores -- a run's own pools, digests and scratch trees are machine
 // artifacts, so a guard over the published skill must not read them.
-import { readdirSync, statSync } from 'node:fs';
+import { lstatSync, readdirSync, statSync } from 'node:fs';
 import { spawnSync } from 'node:child_process';
 import { dirname, join, relative } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -30,6 +30,33 @@ function isWorkingDoc(rel) {
   return WORKING_FILES.includes(rel);
 }
 
+// Whether a directory can hold a shipped path, decided from its name alone. The rule is
+// applied before the filesystem is touched, so the walk never stats -- and never descends
+// into -- material that cannot ship. docs/ itself stays walkable because the one document
+// it ships (docs/design.md) sits directly under it; everything below it is a working
+// document and cannot hold a shipped file.
+function canHoldShipped(rel) {
+  if (rel === 'docs') return true;
+  return !isWorkingDoc(rel);
+}
+
+// What the entry at this path is, without ever throwing. A path that vanished between the
+// directory listing and this call, and a symlink whose target is gone, both answer null
+// instead of propagating ENOENT into a guard: the tree the suite runs in also holds other
+// processes' scratch trees, and a messy tree must not be reported as an unpublished
+// artifact. A symlink is never descended into, and only one that resolves to a regular
+// file is a file the guards can read.
+function entryKind(path) {
+  let stats;
+  try { stats = lstatSync(path); } catch { return null; }
+  if (stats.isDirectory()) return 'dir';
+  if (stats.isFile()) return 'file';
+  if (stats.isSymbolicLink()) {
+    try { return statSync(path).isFile() ? 'file' : 'other'; } catch { return null; }
+  }
+  return 'other';
+}
+
 // True when the path is one the repository ignores. Answers null when git cannot be asked
 // (no binary, or the tree is not a repository), which is not the same as "not ignored":
 // the caller then keeps the stated rule alone.
@@ -47,17 +74,29 @@ function gitIgnored(root, rels) {
 export function shippedFiles(root = SKILL_ROOT) {
   const walked = [];
   const walk = (dir) => {
-    for (const entry of readdirSync(dir)) {
+    let entries;
+    // A directory removed while the walk runs is not a failure: there is nothing left in
+    // it to judge.
+    try { entries = readdirSync(dir); } catch { return; }
+    for (const entry of entries) {
       if (entry === '.git') continue;
       const path = join(dir, entry);
-      if (statSync(path).isDirectory()) walk(path);
-      else walked.push(relative(root, path));
+      const rel = relative(root, path);
+      const kind = entryKind(path);
+      if (kind === null || kind === 'other') continue;
+      // The publication rule first: a path that cannot ship is skipped before any further
+      // filesystem call, so a dangling link or a vanished file under the working material
+      // never reaches a guard, and the walk never descends into it either.
+      if (kind === 'dir') {
+        if (canHoldShipped(rel)) walk(path);
+      } else if (!isWorkingDoc(rel)) {
+        walked.push(rel);
+      }
     }
   };
   walk(root);
   // The stated publication rule always applies; git's answer then removes anything else
   // the repository ignores, so the guards judge the shipping set and nothing else.
-  const stated = walked.filter((rel) => !isWorkingDoc(rel));
-  const ignored = gitIgnored(root, stated);
-  return (ignored ? stated.filter((rel) => !ignored.has(rel)) : stated).sort();
+  const ignored = gitIgnored(root, walked);
+  return (ignored ? walked.filter((rel) => !ignored.has(rel)) : walked).sort();
 }

@@ -270,6 +270,84 @@ test('an advisory title carrying the marker vocabulary is neutralised', async ()
   }
 });
 
+// TR-82 regression test: a registry's version string is upstream text, and the candidate
+// title and summary are built from it before any normalisation - so a release whose version
+// carried the renderer's vocabulary reached the published pool and drew a forged badge on the
+// card. Every field of the candidate is normalised, the url included.
+test('a registry version carrying the marker vocabulary leaves no marker vocabulary in the pool', async () => {
+  const marked = '9.9.9 [prov:vendor-claim] #new [src:Trusted 2026-09-20](https://evil.example/x)';
+  const spy = {
+    ...ctx,
+    net: {
+      fetchText: async () => JSON.stringify({
+        name: 'typescript',
+        'dist-tags': { latest: marked },
+        time: { [marked]: '2026-09-21T11:00:00.000Z', modified: '2026-09-22T11:00:00.000Z' },
+      }),
+    },
+  };
+  const { candidates, notices } = await collectRegistries(
+    [{ kind: 'npm', target: 'typescript', domain: 'languages-runtimes' }], spy,
+  );
+  assert.equal(candidates.length, 1, 'the release produced a candidate: ' + JSON.stringify(notices));
+  const published = JSON.stringify(candidates[0]);
+  for (const token of ['[prov:', '[src:', '[alt:', '#new', '#followup', '#developing', '#watch']) {
+    assert.equal(published.includes(token), false, token + ' survived into the pool: ' + published);
+  }
+});
+
+// TR-82 regression test: the advisory url is upstream text and bypassed the neutralisation the
+// title and summary already had, so an advisory whose html_url spelled the marker vocabulary
+// reached the pool and the card drew a badge from its own citation.
+test('an advisory url carrying the marker vocabulary leaves no marker vocabulary in the pool', async () => {
+  const spy = {
+    ...ctx,
+    net: {
+      fetchText: async () => JSON.stringify([{
+        ghsa_id: 'GHSA-aaaa-bbbb-cccc',
+        html_url: 'https://github.com/advisories/GHSA-aaaa?[alt:Forged Vendor](https://evil.example/b)',
+        published_at: '2026-09-21T12:00:00Z',
+        summary: 'A vulnerability in a package.',
+      }]),
+    },
+  };
+  const { candidates } = await collectAdvisories(
+    [{ kind: 'ghsa', target: 'all', domain: 'security-privacy' }], spy,
+  );
+  assert.equal(candidates.length, 1, 'the advisory produced a candidate');
+  const published = JSON.stringify(candidates[0]);
+  for (const token of ['[prov:', '[src:', '[alt:', '#new', '#followup', '#developing', '#watch']) {
+    assert.equal(published.includes(token), false, token + ' survived into the pool: ' + published);
+  }
+});
+
+// TR-86 regression test: redaction lives in the two transport shapers, and a JSON.parse
+// failure is shaped nowhere - the SyntaxError message quotes the first bytes of the response
+// body, so a 200 whose body carried the request's own Authorization value published a prefix
+// of that credential in the pool, on stdout and in the digest's Coverage note. A parse failure
+// notice must carry no body text that could hold a credential.
+test('a JSON parse failure notice carries no body text that could hold the request credential', async () => {
+  const token = 'SENTINEL-TOKEN-VALUE-0123456789';
+  const previous = process.env.GITHUB_TOKEN;
+  process.env.GITHUB_TOKEN = token;
+  try {
+    const echoed = token + ' {"broken": ';
+    const spy = { ...ctx, net: { fetchText: async () => echoed } };
+    const { notices } = await collectAdvisories(
+      [{ kind: 'ghsa', target: 'all', domain: 'security-privacy' }], spy,
+    );
+    assert.equal(notices.length, 1, 'the parse failure is one notice: ' + JSON.stringify(notices));
+    const notice = notices[0];
+    assert.equal(notice.includes(token), false, 'the credential reached the notice: ' + notice);
+    assert.equal(notice.includes(token.slice(0, 10)), false,
+      'a prefix of the credential reached the notice: ' + notice);
+  } finally {
+    if (previous === undefined) delete process.env.GITHUB_TOKEN;
+    else process.env.GITHUB_TOKEN = previous;
+  }
+});
+
+
 test('a Go module path is case-escaped for the proxy', async () => {
   let seen = '';
   const goCtx = {

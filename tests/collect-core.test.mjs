@@ -565,6 +565,36 @@ test('the collector replaces its pool atomically', () => {
   rmSync(dir, { recursive: true, force: true });
 });
 
+// TR-80 regression test: the atomic pool writer publishes by renaming, and a rename needs
+// only the destination directory - so a pool the operator had protected with a cleared write
+// bit was replaced anyway. The state writer refuses exactly that ("the rename itself needs
+// only the directory and would otherwise replace a file the operator protected"), and the
+// batch that made the three writers agree on the mode rule claimed the agreement without it.
+// A protected destination is refused at the documented output exit and keeps its bytes.
+test('the collector refuses a write-protected pool and leaves it byte-identical', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'tech-radar-protected-pool-'));
+  try {
+    const out = join(dir, '.pool.json');
+    const published = 'the previous pool\n';
+    writeFileSync(out, published);
+    chmodSync(out, 0o444);
+    const cli = fileURLToPath(new URL('../scripts/collect.mjs', import.meta.url));
+    let res;
+    try {
+      res = spawnSync(process.execPath, [cli, '--config', FIXTURE_CONFIG, '--domain', 'ai-llm',
+        '--timeout', '20000', '--since', '2026-09-16T00:00:00Z', '--out', out], { encoding: 'utf8' });
+    } finally {
+      chmodSync(out, 0o644);
+    }
+    assert.equal(res.status, 4, 'a protected pool is the documented output exit: ' + res.stderr);
+    assert.equal(readFileSync(out, 'utf8'), published, 'the previous pool survives byte-identically');
+    const leftovers = readdirSync(dir).filter((name) => name !== '.pool.json');
+    assert.deepEqual(leftovers, [], 'no temp file is left behind: ' + leftovers.join(', '));
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 // Regression test: an absent pool is not a protected one. The atomic writer resolved a
 // missing destination to 0600, so the first render of a digest produced an owner-only file
 // under the usual umask - narrower than the plain write it replaced, and awkward to forward

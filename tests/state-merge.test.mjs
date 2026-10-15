@@ -3,7 +3,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { chmodSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync, symlinkSync, utimesSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { join, relative } from 'node:path';
 import { spawn, spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import { emptyState, mergeRun, storyKey, normalizeTitle, normalizeRunDate, findRecordedRun, main } from '../scripts/update-state.mjs';
@@ -531,6 +531,40 @@ test('a failed state write exits 4 and leaves the previous state byte-identical'
   const leftovers = readdirSync(dir).filter((name) => name !== 'state.json' && name !== 'items.json'
     && name !== 'config' && !/^state\.json\./.test(name));
   assert.deepEqual(leftovers, [], 'no stray file is left behind: ' + leftovers.join(', '));
+});
+
+// TR-81 regression test: the lock de-duplicated its subjects by raw string and the divergent
+// --out guard compared raw strings too, so two spellings of one state file asked for the same
+// lock twice - the second request saw the first's own record and refused it as another
+// process's - and a symlink to the state was read as a different file that already existed.
+// One file named three ways is one file: the run reads it, merges once and writes it back.
+test('one state file named three ways merges instead of refusing itself', () => {
+  const spellings = [
+    ['a relative and an absolute spelling', (dir, state) => [relative(process.cwd(), state), state]],
+    ['a ./-prefixed spelling', (dir, state) => [state, dir + '/./state.json']],
+    ['a symlink to the state', (dir, state) => {
+      const link = join(dir, 'link.json');
+      symlinkSync(state, link);
+      return [state, link];
+    }],
+  ];
+  for (const [what, names] of spellings) {
+    const dir = mkdtempSync(join(tmpdir(), 'tech-radar-spelling-'));
+    try {
+      const f = updateFixture(dir);
+      writeFileSync(f.itemsPath, JSON.stringify([item]));
+      const [stateName, outName] = names(dir, f.statePath);
+      const res = runCli(['update', '--state', stateName, '--items', f.itemsPath,
+        '--out', outName, '--date', '2026-09-23', '--config', f.configDir]);
+      assert.equal(res.code, 0, what + ': the run names one file, not two: ' + res.errs);
+      const merged = JSON.parse(readFileSync(outName, 'utf8'));
+      assert.equal(merged.runs.length, 1, what + ': exactly one run was merged');
+      assert.deepEqual(readdirSync(dir).filter((name) => name.endsWith('.lock')), [],
+        what + ': no lock is left behind');
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  }
 });
 
 // Regression test: the read-modify-write across the state file is unsynchronised -

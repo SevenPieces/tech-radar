@@ -6,7 +6,7 @@
 // What counts as shipped is decided in tests/lib/shipped-files.mjs.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { spawnSync } from 'node:child_process';
@@ -112,6 +112,33 @@ test('the shipping scan judges the shipping set, not the working tree', () => {
       'a shipped file naming the build process is still caught');
     assert.deepEqual(scan(dir, SECRET, 'carries'), ['tests/helper.mjs carries a GitHub token'],
       'a shipped file carrying a credential shape is still caught');
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+// Regression test: the walker statted every entry before it applied the publication rule,
+// so a dangling symlink anywhere in the tree - including under the working material that
+// never ships - threw ENOENT out of every guard that consults the walk, and an entry that
+// vanished between the directory listing and the stat raced the same way. The rule is read
+// from the path first, and an entry the walk cannot read is skipped rather than thrown
+// over, while a leak planted in a file that does ship is still caught.
+test('a dangling symlink does not break the guards, and a shipped leak is still caught', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'tech-radar-dangling-'));
+  try {
+    mkdirSync(join(dir, 'docs', 'planted'), { recursive: true });
+    mkdirSync(join(dir, 'config'), { recursive: true });
+    writeFileSync(join(dir, 'docs', 'design.md'), '# the specification\n');
+    writeFileSync(join(dir, 'config', 'settings.md'), 'Task ' + '7 ' + 'ran the probes\n');
+    // A broken link under the working material, where a sibling run's scratch tree leaves one.
+    symlinkSync(join(dir, 'docs', 'planted', 'nowhere.json'), join(dir, 'docs', 'planted', 'dangling.json'));
+    // One beside a shipped file too, where the rule does not prune it: the walk has to
+    // survive an entry whose stat cannot answer.
+    symlinkSync(join(dir, 'config', 'absent.md'), join(dir, 'config', 'dangling.md'));
+    assert.deepEqual(shippedFiles(dir), ['config/settings.md', 'docs/design.md'],
+      'the walk survives a broken link and still judges the shipping set');
+    assert.deepEqual(scan(dir, PROCESS, 'names'), ['config/settings.md names a build task number'],
+      'a leak in a file that ships is still caught');
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
