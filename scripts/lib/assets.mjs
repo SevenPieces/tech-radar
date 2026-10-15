@@ -191,6 +191,11 @@ function stripCssComments(css) {
   return out;
 }
 
+// The CSS text is read exactly as attrsOf decoded it. A style attribute value has had the HTML
+// parser's one character-reference pass by then, and CSS applies no HTML character-reference
+// pass of its own: a doubly encoded 'url(&amp;#104;ttps://...)' reaches the CSS parser as the
+// literal text 'url(&#104;ttps://...)' - a relative name, not a remote one - so a second decode
+// here would invent a fetch the browser never makes and refuse a self-contained artifact.
 function cssFetches(css) {
   const text = stripCssComments(css);
   if (REMOTE_URL.test(text)) return true;

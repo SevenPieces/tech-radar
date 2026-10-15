@@ -1084,3 +1084,31 @@ test('the accepted short-label length is the configured cap, not 18', () => {
   assert.equal(readDomains(write(overCap), { short_max_chars: overCap.length }).length, 2,
     'raising the setting accepts a label the shipped cap refuses');
 });
+
+// TR-93 regression test: the gate's --html branch runs the same self-containment predicate, so
+// what the predicate says decides whether an artifact ships. The reading the row proposed - an
+// unclosed resource tag and a style value encoded twice are fetches - was rejected: the tokeniser
+// discards a tag that reaches end of file without its '>', so no element is built and nothing is
+// fetched, and a style attribute is CSS, which applies no second character-reference pass, so the
+// doubly encoded value is a relative name. The change made from that premise is reverted; both
+// artifacts are self-contained and must pass the gate, and a benign inline style must still pass.
+test('the gate passes an unclosed resource tag and a doubly encoded style URL', () => {
+  const dir = scratch();
+  const cases = [
+    ['a resource tag that is never closed before end of file',
+      '<html><body><img src=https://cdn.example.com/a.png'],
+    ['a style value only a second character-reference pass would read as remote',
+      '<html><body><div style="background:url(&amp;#104;ttps://cdn.example.com/a.png)">x</div></body></html>'],
+  ];
+  cases.forEach(([what, body], i) => {
+    const html = join(dir, 'truncated-or-encoded-' + i + '.html');
+    writeFileSync(html, body);
+    assert.deepEqual(check(good, config, plan, { htmlPath: html }).failures, [],
+      what + ' is self-contained and must not fail the gate: ' + body);
+  });
+  const benign = join(dir, 'benign.html');
+  writeFileSync(benign,
+    '<html><body><div style="background:url(data:image/png;base64,AAAA)">x</div></body></html>');
+  assert.deepEqual(check(good, config, plan, { htmlPath: benign }).failures, [],
+    'a benign inline style still passes the gate');
+});

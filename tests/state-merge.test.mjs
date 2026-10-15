@@ -1,7 +1,7 @@
 // tests/state-merge.test.mjs
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { chmodSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync, symlinkSync, utimesSync, writeFileSync } from 'node:fs';
+import { chmodSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync, symlinkSync, utimesSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, relative } from 'node:path';
 import { spawn, spawnSync } from 'node:child_process';
@@ -952,6 +952,47 @@ test('two sequential updates with different states and one shared destination ke
     }
   } finally {
     rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+// TR-95 regression test: the lock and the divergent-out comparison canonicalised through a
+// symlink, but the write did not, so the rename replaced the link inode with a regular file
+// while the file the link pointed at kept the old state: the merge landed on a path the lock
+// never protected and the operator's link was gone. Either the write lands on the link's target
+// or the run refuses; the target is never abandoned.
+test('a symlinked state destination is written through, not replaced', () => {
+  const spellings = [
+    ['the link named as both --state and --out', (real, link) => [link, link]],
+    ['the link named as --out only', (real, link) => [real, link]],
+  ];
+  for (const [what, names] of spellings) {
+    const dir = mkdtempSync(join(tmpdir(), 'tech-radar-symlink-out-'));
+    try {
+      const f = updateFixture(dir);
+      const real = join(dir, 'real.json');
+      writeFileSync(real, f.body);
+      const link = join(dir, 'link.json');
+      symlinkSync('real.json', link);
+      writeFileSync(f.itemsPath, JSON.stringify([item]));
+      const [stateName, outName] = names(real, link);
+      const res = runCli(['update', '--state', stateName, '--items', f.itemsPath,
+        '--out', outName, '--date', '2026-09-23', '--config', f.configDir]);
+      if (res.code === 0) {
+        assert.equal(lstatSync(link).isSymbolicLink(), true,
+          what + ': the run exited 0 but replaced the link with a regular file: ' + res.errs);
+        assert.equal(JSON.parse(readFileSync(real, 'utf8')).runs.length, 1,
+          what + ': the merge did not land on the link target');
+        assert.equal(JSON.parse(readFileSync(link, 'utf8')).runs.length, 1,
+          what + ': the link and its target agree');
+      } else {
+        assert.match(res.errs, /symlink|regular file|not written through/i,
+          what + ': a refusal names the link it refuses: ' + res.errs);
+        assert.equal(readFileSync(real, 'utf8'), f.body,
+          what + ': a refusal leaves the target byte-identical');
+      }
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
   }
 });
 

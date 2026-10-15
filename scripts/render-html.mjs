@@ -4,9 +4,10 @@
 // Inline CSS and JS only; the result opens correctly from file:// offline.
 import { randomBytes } from 'node:crypto';
 import {
-  accessSync, chmodSync, constants, existsSync, readFileSync, renameSync, statSync, unlinkSync,
-  writeFileSync,
+  accessSync, chmodSync, constants, existsSync, lstatSync, readFileSync, readlinkSync,
+  realpathSync, renameSync, statSync, unlinkSync, writeFileSync,
 } from 'node:fs';
+import { dirname, isAbsolute, resolve } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { readDomains, readSettings, shortCap } from './lib/mdtable.mjs';
 import { externalAssets } from './lib/assets.mjs';
@@ -552,6 +553,33 @@ export function parseArgs(argv) {
   return out;
 }
 
+// The file the write lands on, with a symlinked destination followed to its target. The
+// rename below replaces an inode, so renaming over the spelling the operator gave replaces the
+// link itself: the link becomes a regular file holding the new digest while the file it pointed
+// at keeps the old one, and a digest kept on another volume behind a link - or aimed at through
+// one - quietly goes stale. Resolving rather than refusing keeps the operator's link and
+// publishes the deliverable where they aimed it.
+//
+// realpathSync answers for a link whose target is there. A link whose final target is not there
+// yet has no real path, so the chain is walked by hand to the name it points at, which the write
+// then creates exactly as a plain write to a fresh destination would. A chain that never
+// terminates is refused rather than guessed at, before any temp file exists, so the failure
+// leaves nothing behind. This mirrors the state and collector writers, which resolve the same
+// way.
+function resolveWriteTarget(out) {
+  try { return realpathSync(out); } catch { /* absent, or a link to a path that is not there */ }
+  let current = out;
+  let stats;
+  try { stats = lstatSync(current); } catch { return current; }
+  for (let hop = 0; stats.isSymbolicLink(); hop += 1) {
+    if (hop >= 32) throw new Error(`${out} is a symlink chain that does not resolve to a file`);
+    const target = readlinkSync(current);
+    current = isAbsolute(target) ? target : resolve(dirname(current), target);
+    try { stats = lstatSync(current); } catch { return current; }
+  }
+  return current;
+}
+
 // The mode the replacement carries. The rename replaces the inode, so an existing
 // destination keeps its own permissions only if the temp is born with them: a temp created
 // with the process default silently widened a deliverable the operator had protected - a
@@ -571,8 +599,13 @@ function destinationMode(path) {
 // operator protected was silently replaced. The state writer refuses the same way, so the
 // three writers really do agree on the rule the comment above claims for them.
 function writeAtomic(path, text) {
-  const mode = destinationMode(path);
-  const tmp = `${path}.${process.pid}.${randomBytes(6).toString('hex')}.tmp`;
+  // Everything below names the resolved destination, not the spelling the operator gave: the
+  // temp has to be born beside the inode the rename replaces, or a symlinked destination on
+  // another volume would fail the rename with EXDEV, and the rename itself has to name that
+  // inode rather than the link.
+  const destination = resolveWriteTarget(path);
+  const mode = destinationMode(destination);
+  const tmp = `${destination}.${process.pid}.${randomBytes(6).toString('hex')}.tmp`;
   try {
     writeFileSync(tmp, text, { flag: 'wx', mode: mode ?? 0o666 });
     // chmod after the create, because the umask would otherwise clear bits the destination
@@ -580,8 +613,8 @@ function writeAtomic(path, text) {
     // that already existed is pinned: a fresh deliverable keeps the create's own
     // 0666 & ~umask, so a newly rendered digest is not owner-only.
     if (mode !== null) chmodSync(tmp, mode);
-    if (existsSync(path)) accessSync(path, constants.W_OK);
-    renameSync(tmp, path);
+    if (existsSync(destination)) accessSync(destination, constants.W_OK);
+    renameSync(tmp, destination);
   } catch (err) {
     try { unlinkSync(tmp); } catch { /* the temp was never created */ }
     throw err;

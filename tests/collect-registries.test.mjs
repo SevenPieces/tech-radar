@@ -382,3 +382,42 @@ test('a notice carrying the marker vocabulary draws no badge when it is publishe
     assert.doesNotMatch(published, /class="badge|class="tag t-/, what + ': no badge is drawn from a notice: ' + published);
   }
 });
+
+// TR-96 regression test: the NVD identifier is upstream text and was interpolated raw into the
+// citation URL, so a crafted id forged the destination the digest publishes, an id carrying a
+// space produced a citation the renderer cannot read, and an absent id published a live link
+// ending in 'undefined'. Only an identifier shaped like a CVE id becomes a citation; every other
+// row is skipped with a notice the Coverage note carries.
+test('a crafted or absent NVD identifier never becomes a citation', async () => {
+  const rows = [{ kind: 'nvd', target: 'high-severity', domain: 'security-privacy' }];
+  const net = {
+    fetchText: async () => JSON.stringify({
+      vulnerabilities: [
+        { cve: { id: 'CVE-2026-0001](https://evil.example/x)', published: '2026-09-21T00:00:00.000',
+          descriptions: [{ lang: 'en', value: 'a forged destination' }] } },
+        { cve: { id: 'CVE-2026-0001 [prov:vendor-claim]', published: '2026-09-21T00:00:00.000',
+          descriptions: [{ lang: 'en', value: 'an identifier with a space' }] } },
+        { cve: { published: '2026-09-21T00:00:00.000',
+          descriptions: [{ lang: 'en', value: 'no identifier at all' }] } },
+        { cve: { id: 'CVE-2026-12345', published: '2026-09-21T00:00:00.000',
+          descriptions: [{ lang: 'en', value: 'a well-formed identifier' }] } },
+      ],
+    }),
+  };
+  const { candidates, notices } = await collectAdvisories(rows, { ...ctx, net });
+  for (const candidate of candidates) {
+    assert.doesNotMatch(candidate.url, /evil\.example/,
+      'a forged destination reached a card: ' + candidate.url);
+    assert.doesNotMatch(candidate.url, /undefined/,
+      'a dead link reached a card: ' + candidate.url);
+    assert.match(candidate.url, /^https:\/\/nvd\.nist\.gov\/vuln\/detail\/CVE-\d{4}-\d{4,}$/,
+      'every published NVD destination is a plain CVE url: ' + candidate.url);
+  }
+  assert.deepEqual(candidates.map((c) => c.title), ['CVE-2026-12345'],
+    'only the well-formed row ships');
+  assert.equal(notices.length, 3,
+    'each unusable identifier is reported, not dropped silently: ' + notices.join(' | '));
+  for (const notice of notices) {
+    assert.match(notice, /identifier/i, 'the notice names what it skipped: ' + notice);
+  }
+});

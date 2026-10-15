@@ -1,7 +1,7 @@
 // tests/render-html.test.mjs
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { chmodSync, existsSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs';
+import { chmodSync, existsSync, lstatSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync, symlinkSync, writeFileSync } from 'node:fs';
 import { spawnSync } from 'node:child_process';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -934,6 +934,46 @@ test('the renderer keeps the mode of the deliverable it replaces', () => {
   }
 });
 
+// TR-100 regression test: the deliverable writer names the path the operator gave it, so a
+// rename replaces a symlink's inode rather than the file it points at - the defect the state
+// writer and the collector's pool writer were fixed for. The link becomes a regular file holding
+// the new digest while the file it pointed at keeps the old one, so the operator's link is gone
+// and the digest they aimed at is stale. Either the digest lands on the link's target or the run
+// refuses; the target is never abandoned.
+test('a symlinked render destination is written through, not replaced', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'tech-radar-symlink-render-'));
+  const errors = [];
+  const quiet = { log: () => {}, error: (m) => errors.push(String(m)) };
+  const previous = 'the previous deliverable\n';
+  try {
+    const input = join(dir, 'digest.md');
+    writeFileSync(input, md);
+    const target = join(dir, 'real.html');
+    writeFileSync(target, previous);
+    const link = join(dir, 'digest.html');
+    symlinkSync('real.html', link);
+    const code = run([input, '--out', link], quiet);
+    if (code === 0) {
+      assert.equal(lstatSync(link).isSymbolicLink(), true,
+        'the run exited 0 but replaced the link with a regular file: ' + errors.join(' '));
+      assert.match(readFileSync(target, 'utf8'), /^<!doctype html>/i,
+        'the render exited 0 but the file the link points at was not written');
+      assert.equal(readFileSync(link, 'utf8'), readFileSync(target, 'utf8'),
+        'the link and its target agree');
+    } else {
+      assert.equal(code, 4, 'a refusal is the documented output exit, got ' + code + ': ' + errors.join(' '));
+      assert.match(errors.join('\n'), /symlink|regular file|not written through/i,
+        'a refusal names the link it refuses: ' + errors.join(' '));
+      assert.equal(readFileSync(target, 'utf8'), previous,
+        'a refusal leaves the link target byte-identical');
+    }
+    const leftovers = readdirSync(dir).filter((n) => !['digest.md', 'real.html', 'digest.html'].includes(n));
+    assert.deepEqual(leftovers, [], 'no temp file is left behind: ' + leftovers.join(', '));
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 // Regression test: the tag regex stopped at the first '>', so a quoted attribute value
 // containing one hid every attribute after it; the rel list knew only stylesheet, preload and
 // icon; and an empty value was read as a URL. Each evasion must be seen, and an empty value
@@ -1236,4 +1276,65 @@ test('an authored standalone status flag still draws its tag', () => {
     /<span class="tag t-new">new<\/span>/, 'an additive flag still does not decide the tag');
   assert.doesNotMatch(card('- **A model shipped** — Why it matters. ' + src + ' #new #developing'),
     /class="tag t-developing"/, 'and it draws no developing tag');
+});
+
+// --- TR-93: a truncated tag and a twice-encoded style value are not fetches -------------------
+
+// TR-93 read these two forms as fetches the predicate missed. The stricter reading was examined
+// and rejected, because neither form reaches the network: a tag that runs into end of file
+// without its '>' is discarded by the HTML tokeniser, so the reader builds no element and
+// fetches nothing (every end-of-file-in-tag case produces no token), and a style attribute is
+// CSS, where no HTML character-reference pass is applied - the doubly encoded value stays a
+// relative name to the CSS parser. Flagging them would refuse a genuinely self-contained
+// artifact on a premise the reader's environment contradicts. The change made from that premise
+// is reverted and the tests below record the faithful behaviour. The reading was also refusing on
+// a byte the document does not contain: a file that ends inside a tag is truncated, and the
+// stricter form read that absence as a request to fetch.
+test('externalAssets does not flag a resource tag that is never closed before end of file', () => {
+  const truncated = [
+    ['an unquoted img src', '<html><body><img src=https://cdn.example.com/a.png'],
+    ['a quoted script src', '<html><body><script src="https://cdn.example.com/a.js"'],
+    ['a link stylesheet', '<html><head><link rel=stylesheet href=https://cdn.example.com/a.css'],
+    ['an iframe after other markup', '<html><body><p>prose</p><iframe src=https://cdn.example.com/f'],
+    ['a source srcset', '<picture><source srcset=https://cdn.example.com/a.png 2x'],
+  ];
+  for (const [what, html] of truncated) {
+    assert.equal(externalAssets(html), false,
+      what + ' is a tag the reader never builds an element from, so it fetches nothing: ' + html);
+  }
+  // A tag that is never closed but names no resource is still not a fetch: a citation is
+  // content, and the predicate must not turn a truncated one into a failed artifact.
+  const harmless = [
+    ['a div with a class', '<html><body><div class="x"'],
+    ['a paragraph of prose', '<html><body><p>prose that runs to the end of the file'],
+    ['a meta description', '<html><head><meta name=description content=text'],
+    ['a citation link', '<html><body><a href=https://example.com/x'],
+  ];
+  for (const [what, html] of harmless) {
+    assert.equal(externalAssets(html), false, what + ' fetches nothing: ' + html);
+  }
+});
+
+// TR-93 regression test: a style attribute is CSS, and the HTML parser has already applied its
+// one character-reference pass to the attribute value. CSS applies none, so the doubly encoded
+// value the row read as remote is a relative name - a file named '&#104;ttps://...', not a
+// fetch. Reading it as remote would fail the gate on a value the browser treats as a local name.
+test('externalAssets does not flag a style URL that is character-encoded twice', () => {
+  const cssRelative = [
+    ['a hidden scheme letter', '<div style="background:url(&amp;#104;ttps://cdn.example.com/a.png)">x</div>'],
+    ['a hidden scheme-relative opener', '<div style="background:url(&amp;#47;&amp;#47;cdn.example.com/a.png)">x</div>'],
+  ];
+  for (const [what, html] of cssRelative) {
+    assert.equal(externalAssets(html), false,
+      what + ' is a relative name to the CSS parser, so it fetches nothing: ' + html);
+  }
+  const harmless = [
+    ['a data: payload', '<div style="background:url(data:image/png;base64,AAAA)">x</div>'],
+    ['a relative name', '<div style="background:url(photo.png)">x</div>'],
+    ['plain declarations', '<div style="color:red;font-weight:bold">x</div>'],
+    ['an encoded relative name', '<div style="background:url(&amp;#112;hoto.png)">x</div>'],
+  ];
+  for (const [what, html] of harmless) {
+    assert.equal(externalAssets(html), false, what + ' is self-contained: ' + html);
+  }
 });

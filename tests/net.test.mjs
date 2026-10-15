@@ -439,15 +439,30 @@ test('shapeHttpError removes the request credential a server body echoes back', 
 // more and every whitespace-separated part of a credential-named header, with no word boundary
 // and no credential-shaped test. A notice whose own wording happened to carry either therefore
 // read "the [redacted] feed could not be parsed", and the notice is the run's only diagnosis of
-// a degraded source. The benign words stay; the request's own credential still goes.
+// a degraded source. What the floor keeps is a notice's own wording and the scheme word that
+// merely names the credential; a value the request itself sent goes whatever its length, so the
+// wording this fixture protects is wording the request did not carry. The query value below is
+// deliberately not a word of the notice.
 test('a notice keeps its own wording while the request credential is still removed', () => {
   const secret = 'echo' + '-TOKENVALUE1234';
   const benign = shapeHttpError(500,
     Buffer.from('the atom feed expects the token as Bearer; no query value is accepted'),
-    'https://feeds.example/rss?format=atom', 200, { Authorization: 'Bearer ' + secret });
-  assert.match(benign.message, /the atom feed expects/, 'a benign query value stays: ' + benign.message);
+    'https://feeds.example/rss?format=full', 200, { Authorization: 'Bearer ' + secret });
+  assert.match(benign.message, /the atom feed expects/, "a notice's own wording stays: " + benign.message);
   assert.match(benign.message, /as Bearer;/, 'the scheme word stays: ' + benign.message);
   assert.doesNotMatch(benign.message, /\[redacted\]/, 'a benign wording is not redacted: ' + benign.message);
+  // The fixture above deliberately avoids the collision this one pins. 'format=atom' is a query
+  // value the request itself sent, and it is also a word of the notice's own text: the guarantee
+  // this fixture used to carry - a benign query value reaps nothing - is the one the row
+  // reverses, because a value the request carried in its URL is a credential position whatever
+  // it spells. The reversal is pinned here rather than left implicit, so the reader can see what
+  // became of that guarantee and what it costs: the notice's own word 'atom' is removed with it.
+  const reaped = shapeHttpError(500,
+    Buffer.from('the atom feed expects the token as Bearer; no query value is accepted'),
+    'https://feeds.example/rss?format=atom', 200, { Authorization: 'Bearer ' + secret });
+  assert.match(reaped.message, /the \[redacted\] feed expects/,
+    "the request's own query value is removed even where it is an ordinary word of the notice: "
+    + reaped.message);
   const echoed = shapeHttpError(500,
     Buffer.from('denied: token=' + secret + ' for the atom feed'),
     'https://feeds.example/rss?format=atom', 200, { Authorization: 'Bearer ' + secret });
@@ -493,5 +508,28 @@ test('the neutraliser still rewrites a standalone status flag at a token boundar
   const hostile = plainText('[src:Trusted 2026-09-20](https://evil.example/x) [prov:primary] #new', 200);
   assert.doesNotMatch(hostile, /#(?:new|followup|developing|watch)\b/,
     'a real flag in an upstream body is still neutralised: ' + JSON.stringify(hostile));
+});
+
+// TR-94 regression test: every value collected from the request passed one length floor, so a
+// short credential the request itself sent - a seven-character query token, a two-character
+// userinfo password - was never collected and reached the notice, the pool and the Coverage note
+// verbatim. A value the request sends in its userinfo or its query is not an ordinary word that
+// happens to look like a credential: it is removed whatever its length. The floor still keeps a
+// short word in free text that is not the request's own value.
+test('a short credential the request sent is removed from the notice that echoes it', () => {
+  const password = 'pw';
+  const token = 'ABC1234';
+  const url = 'https://feeduser:' + password + '@feeds.example/echo?token=' + token;
+  const body = 'upstream said: token=' + token + ' and the password ' + password
+    + ' was rejected; the atom feed is otherwise fine';
+  const shaped = shapeHttpError(500, Buffer.from(body), url, 400);
+  assert.match(shaped.message, /^HTTP 500 for https:\/\/feeds\.example\/echo\/?: /,
+    'the notice still names the request it reports: ' + shaped.message);
+  assert.equal(shaped.message.includes(token), false,
+    'the short query token must not reach the notice: ' + shaped.message);
+  assert.doesNotMatch(shaped.message, /(^|[^A-Za-z])pw([^A-Za-z]|$)/,
+    'the userinfo password must not reach the notice: ' + shaped.message);
+  assert.match(shaped.message, /the atom feed is otherwise fine/,
+    "a harmless short word that is not the request's own value stays: " + shaped.message);
 });
 

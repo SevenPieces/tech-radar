@@ -261,3 +261,43 @@ test('every credential spelling is kept out of a candidate source and a notice',
     assert.match(notice, /feeds\.example/, 'the notice still names the feed host: ' + notice);
   }
 });
+
+// TR-99 regression test: the redaction set is built from the one request a notice reports, so a
+// value a different watchlist row sent is not in it. Two rows on one host break that: each carries
+// its own credential, and a shared host's error page - or any body that quotes a value back - can
+// echo the other row's, which then survives into the notice, the pool and the published Coverage
+// note. The boundary is the run, not the request: no notice may carry any watchlist row's
+// credential, however many rows share the host.
+test('no notice carries a credential another row of the same host sent', async () => {
+  const spellings = ['ROW-ALPHA-SECRET', 'ROW-BETA-SECRET'];
+  const rowsFor = () => spellings.map((token, i) => ({
+    kind: 'rss',
+    target: 'https://feeds.example/row-' + i + '.xml?token=' + token,
+    domain: 'languages-runtimes',
+    note: '',
+  }));
+  const echoes = {
+    ...ctx,
+    net: {
+      fetchText: async (target) => {
+        const sent = spellings.find((token) => target.includes(token));
+        const other = spellings.find((token) => token !== sent);
+        throw shapeHttpError(500,
+          Buffer.from('upstream gateway answered: the token ' + other + ' was rejected for this feed'),
+          target, 200);
+      },
+    },
+  };
+  const { candidates, notices } = await collectFeeds(rowsFor(), echoes);
+  assert.deepEqual(candidates, [], 'no row answered with a body, so no candidate is produced');
+  assert.equal(notices.length, spellings.length, 'one notice per row');
+  for (const notice of notices) {
+    for (const token of spellings) {
+      assert.equal(notice.includes(token), false,
+        'a credential a row sent reached a notice: ' + token + ' in ' + notice);
+    }
+  }
+  // The boundary is not bought with silence: each notice still names the request it reports.
+  assert.match(notices[0], /feeds\.example\/row-0\.xml/);
+  assert.match(notices[1], /feeds\.example\/row-1\.xml/);
+});

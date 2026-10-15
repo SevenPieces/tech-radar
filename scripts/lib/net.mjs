@@ -48,19 +48,18 @@ const SECRET_SHAPES = [
   /\bgithub_pat_[A-Za-z0-9_]{20,}\b/g,
 ];
 
-// The floor for removing a value by exact match. The earlier rule removed every query value of
-// three characters or more, so a benign '?format=atom' deleted the word 'atom' from a notice
-// ('the [redacted] feed could not be parsed') and a '?per_page=100' deleted the number: the
-// notice is the run's only diagnosis of a degraded source, and a reaper that removes ordinary
-// words and numbers costs the diagnosis its meaning. A bare number is never a credential here,
-// and a value shorter than this is not one: the shape list above is what covers the spellings a
-// curated set cannot know. Two trade-offs are deliberate. A short custom token is removed only by
-// shape. And a longer value the request itself sent (a query value of eight characters or more)
-// is still removed wherever it appears, because the stricter rule - remove only a credential-shaped
-// value or one the text presents as a credential - leaves a server's echo of the request's own
-// userinfo readable when the echo labels it 'user=' rather than a credential-named parameter. The
-// over-redaction this row is about is the removal of ordinary short words and bare numbers, and
-// that is what the floor removes.
+// The floor for removing a value by exact match, and it guards the two places where the value
+// may be ordinary text: the words a header value is split into, and the free text the shape list
+// below covers. It is not applied to a value the request itself carried in its URL -- its
+// userinfo or a query value -- because that is a credential position whatever it spells, and the
+// floor there published a seven-character token and a two-character password in the notice, the
+// pool and the coverage note. Keeping the floor for the other two paths is what keeps a notice
+// readable: a short word the request never sent is not reaped, a number in a server's prose that
+// is not one of the request's own values survives, and the scheme word 'Bearer' stays in a
+// sentence that merely names the scheme. One cost is named rather than hidden: a query value
+// that is a bare number ('?per_page=10') is removed from a notice that carries it, because a
+// numeric token ('?code=123456') is a credential like any other and no name can tell the two
+// apart. The shape list above is what covers the spellings a curated set cannot know.
 const MIN_SECRET_CHARS = 8;
 
 function looksLikeValue(value) {
@@ -83,77 +82,102 @@ function redactBasicCredentials(text) {
 
 // A 4xx/5xx body is quoted into a notice and can echo the request back -- "token=<value>
 // auth=Basic <base64>" -- so the request's own values are removed by value, not by name: no
-// shape list can know the operator's spelling. A value is removed literally (split/join, so a
-// regex metacharacter in it is not read as a pattern) and a value shorter than a credential
-// is left alone rather than replacing every occurrence of two characters in the diagnostic.
+// shape list can know the operator's spelling. A value is removed literally -- split/join above
+// the floor, an escaped pattern below it, so a regex metacharacter in a value is never read as a
+// pattern -- and the floor is applied here rather than
+// at the removal, because this is the only place that knows where the value came from: a value the
+// request carried in its URL is collected however short it is, and a header word or free text
+// keeps the floor. The empty value is never collected: removing '' would replace every position
+// in the diagnostic.
 export function requestSecrets(url, headers) {
   const out = new Set();
-  const add = (value) => {
-    if (looksLikeValue(value)) out.add(String(value));
+  const add = (value, always) => {
+    const v = String(value ?? '');
+    if (v === '') return;
+    if (always || looksLikeValue(v)) out.add(v);
   };
   // Every spelling of one value is collected: the decoded form a server would print after
   // decoding, the raw spelling curl actually put on the request line, and the percent-encoded
   // form of the decoded one. A server that echoes $request_uri republishes the raw spelling,
   // and removing only the decoded form left that spelling readable in the notice.
-  const addSpellings = (value) => {
+  const addSpellings = (value, always = false) => {
     const v = String(value ?? '');
-    add(v);
+    add(v, always);
     let decoded = null;
     try { decoded = decodeURIComponent(v); } catch { /* not percent-encoded */ }
-    if (decoded !== null && decoded !== v) add(decoded);
+    if (decoded !== null && decoded !== v) add(decoded, always);
     for (const spelling of [v, decoded, String(v).replace(/\+/g, ' ')]) {
       if (spelling === null) continue;
-      try { add(encodeURIComponent(spelling)); } catch { /* a lone surrogate */ }
+      try { add(encodeURIComponent(spelling), always); } catch { /* a lone surrogate */ }
     }
   };
   const raw = String(url ?? '');
   try {
     const parsed = new URL(raw);
-    addSpellings(parsed.username);
-    addSpellings(parsed.password);
-    for (const value of parsed.searchParams.values()) addSpellings(value);
+    addSpellings(parsed.username, true);
+    addSpellings(parsed.password, true);
+    for (const value of parsed.searchParams.values()) addSpellings(value, true);
     // URLSearchParams reports the decoded value, so 'token=oper+plus' arrives as 'oper plus'
     // and the raw pair spelling is read from the query string itself.
     for (const pair of parsed.search.replace(/^\?/, '').split('&')) {
       const eq = pair.indexOf('=');
-      if (eq !== -1) addSpellings(pair.slice(eq + 1));
+      if (eq !== -1) addSpellings(pair.slice(eq + 1), true);
     }
     // The Basic header curl would send is the base64 of the userinfo: a request with none
     // contributes nothing here rather than the base64 of a bare colon.
     if (parsed.username !== '' || parsed.password !== '') {
       const userinfo = `${parsed.username}:${parsed.password}`;
-      try { add(Buffer.from(decodeURIComponent(userinfo)).toString('base64')); } catch { add(Buffer.from(userinfo).toString('base64')); }
+      try { add(Buffer.from(decodeURIComponent(userinfo)).toString('base64'), true); } catch { add(Buffer.from(userinfo).toString('base64'), true); }
     }
   } catch {
     const userinfo = /\/\/([^/?#\s]*)@/.exec(raw);
-    if (userinfo) addSpellings(userinfo[1]);
-    for (const m of raw.matchAll(/[?&][^=&#\s]+=([^&#\s]*)/g)) addSpellings(m[1]);
+    if (userinfo) addSpellings(userinfo[1], true);
+    for (const m of raw.matchAll(/[?&][^=&#\s]+=([^&#\s]*)/g)) addSpellings(m[1], true);
   }
   // A credential the request carried in a header is the request's own secret too: the token the
   // GitHub path sends is never in the URL, so the header value is collected whole and each of
-  // its words with it -- a server that echoes only the token part still gives it up. The words
-  // pass the same floor as every other value, which is what keeps the scheme word 'Bearer' (and
-  // 'Basic', 'Token') out of the removal set: the earlier rule added them unconditionally and
-  // deleted the word from a notice that merely mentioned it.
+  // its words with it -- a server that echoes only the token part still gives it up. The value
+  // is a credential position like the URL's, so it is collected whatever its length; the words
+  // it splits into are what the floor is for, because they are ordinary text as often as they
+  // are a credential, and the floor keeps the scheme word 'Bearer' (and 'Basic', 'Token') out of
+  // the removal set so a notice that merely names the scheme keeps its wording.
   for (const [name, value] of Object.entries(headers ?? {})) {
     if (!/authorization|cookie|token|key|secret/i.test(String(name))) continue;
-    addSpellings(value);
+    addSpellings(value, true);
     for (const part of String(value).split(/\s+/)) addSpellings(part);
   }
   return [...out];
 }
 
+// A value shorter than the floor is removed only where it stands as its own token. A short value
+// the request sent is a credential wherever it is read, but below the floor it can be a letter or
+// two, and replacing every occurrence of it rewrites words the credential is not part of: a
+// request carrying '?v=on' rewrote 'content' as 'c[redacted]tent', and the notice is the run's
+// only diagnosis of a degraded source. An occurrence inside a longer word is not the value the
+// request sent, so it stays; a standalone one goes whatever its length. The boundary is the one
+// the status token uses - a word character on either side makes it part of a word.
+function boundedValue(value) {
+  const escaped = String(value).replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  return new RegExp('(?<![A-Za-z0-9_])' + escaped + '(?![A-Za-z0-9_])', 'g');
+}
+
 // The removal itself, and the second half of the boundary: every notice in the collector is
 // pushed through this, so a path that quotes a server answer cannot forget it. A value is
-// removed by exact match against the request's own values -- longest first, so a value that
-// contains another is removed whole -- and only when it passes the same floor the set was
-// built with. The shape list covers the credential classes no curated set can know.
+// removed against the request's own values -- longest first, so a value that contains another is
+// removed whole -- and the set is removed as it is given: the floor belongs to the place that
+// builds it, which is the only place that knows whether the value came from the request's URL or
+// from a header or from prose. The shape list covers the credential classes no curated set can
+// know.
 export function redactSecrets(text, secrets) {
   let out = redactBasicCredentials(String(text ?? ''));
   const values = [...new Set((secrets ?? []).map((v) => String(v ?? '')))]
-    .filter(looksLikeValue)
+    .filter((v) => v !== '')
     .sort((a, b) => b.length - a.length);
-  for (const value of values) out = out.split(value).join('[redacted]');
+  for (const value of values) {
+    out = value.length >= MIN_SECRET_CHARS
+      ? out.split(value).join('[redacted]')
+      : out.replace(boundedValue(value), '[redacted]');
+  }
   for (const shape of SECRET_SHAPES) out = out.replace(shape, '[redacted]');
   return out;
 }

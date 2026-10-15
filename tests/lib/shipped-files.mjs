@@ -30,11 +30,12 @@ function isWorkingDoc(rel) {
   return WORKING_FILES.includes(rel);
 }
 
-// Whether a directory can hold a shipped path, decided from its name alone. The rule is
-// applied before the filesystem is touched, so the walk never stats -- and never descends
-// into -- material that cannot ship. docs/ itself stays walkable because the one document
-// it ships (docs/design.md) sits directly under it; everything below it is a working
-// document and cannot hold a shipped file.
+// Whether a directory can hold a shipped path, decided from its name alone. Only the name is
+// read here, and the walk has already read the entry's kind by the time it asks: an entry that
+// cannot ship is still stat'ed, and this rule is what then keeps the walk from descending into
+// such a directory and keeps a working file from reaching a guard. docs/ itself stays walkable
+// because the one document it ships (docs/design.md) sits directly under it; everything below
+// it is a working document and cannot hold a shipped file.
 function canHoldShipped(rel) {
   if (rel === 'docs') return true;
   return !isWorkingDoc(rel);
@@ -84,9 +85,11 @@ export function shippedFiles(root = SKILL_ROOT) {
       const rel = relative(root, path);
       const kind = entryKind(path);
       if (kind === null || kind === 'other') continue;
-      // The publication rule first: a path that cannot ship is skipped before any further
-      // filesystem call, so a dangling link or a vanished file under the working material
-      // never reaches a guard, and the walk never descends into it either.
+      // The kind is read first, above: the entry is stat'ed before this rule is consulted, and
+      // a vanished path or a dangling link has already answered null. The publication rule is
+      // applied here -- after that call and before the path is pushed to a guard or descended
+      // into -- so a path that cannot ship never reaches a guard, and the walk never descends
+      // into it either.
       if (kind === 'dir') {
         if (canHoldShipped(rel)) walk(path);
       } else if (!isWorkingDoc(rel)) {

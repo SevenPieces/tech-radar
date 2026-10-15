@@ -4,11 +4,11 @@
 // the watchlist and per-domain watermarks. Zero dependencies.
 import { createHash, randomBytes } from 'node:crypto';
 import {
-  accessSync, chmodSync, constants, existsSync, lstatSync, readFileSync, realpathSync, renameSync,
-  statSync, unlinkSync, writeFileSync,
+  accessSync, chmodSync, constants, existsSync, lstatSync, readFileSync, readlinkSync, realpathSync,
+  renameSync, statSync, unlinkSync, writeFileSync,
 } from 'node:fs';
 import { hostname } from 'node:os';
-import { basename, dirname, join, resolve } from 'node:path';
+import { basename, dirname, isAbsolute, join, resolve } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { readConfig } from './lib/mdtable.mjs';
 import { hostOf } from './lib/net.mjs';
@@ -454,6 +454,34 @@ export function findRecordedRun(state, date, domainKeys) {
   ) ?? null;
 }
 
+// The file the write lands on, with a symlinked destination followed to its target. The
+// lock (canonicalPath), the divergent-out comparison and the mode copy (statSync) already
+// canonicalise through a link, so the write has to as well. Renaming over the spelling the
+// operator gave replaces the link inode itself: the link becomes a regular file holding the
+// new state while the file it pointed at keeps the old one - stale content - and the merge
+// is written to a path the lock never protected. Resolving rather than refusing keeps both
+// the operator's link and their run: the merge lands on the file they aimed it at.
+//
+// realpathSync answers for a link whose target is there (the 'state lives on another volume
+// behind a symlink' case). A link whose final target is not there yet has no real path, so
+// the chain is walked by hand to the name it points at, which the write then creates exactly
+// as a plain write to a fresh destination would. A chain that never terminates is refused
+// with the documented write failure rather than guessed at, and the caller's failure path
+// unlinks the temp this write created, so nothing is left behind.
+function resolveWriteTarget(out) {
+  try { return realpathSync(out); } catch { /* absent, or a link to a path that is not there */ }
+  let current = out;
+  let stats;
+  try { stats = lstatSync(current); } catch { return current; }
+  for (let hop = 0; stats.isSymbolicLink(); hop += 1) {
+    if (hop >= 32) throw fail(`${out} is a symlink chain that does not resolve to a file`, 4);
+    const target = readlinkSync(current);
+    current = isAbsolute(target) ? target : resolve(dirname(current), target);
+    try { stats = lstatSync(current); } catch { return current; }
+  }
+  return current;
+}
+
 // The mode the replacement carries. The rename replaces the inode, so an existing
 // destination keeps its own permissions only if the temp is born with them: a temp created
 // with the process default silently widened a state the operator had protected - a 0600
@@ -489,16 +517,20 @@ function tempPathFor(out) {
 // created is removed on every failure path, and the caller still reports the documented
 // exit 4.
 function writeStateAtomic(out, body) {
-  const mode = destinationMode(out);
-  const tmp = tempPathFor(out);
+  // Everything below names the resolved destination, not the spelling: the temp has to be
+  // born beside the inode the rename replaces, or a symlinked destination on another volume
+  // would fail the rename with EXDEV, and the rename itself has to name that inode.
+  const destination = resolveWriteTarget(out);
+  const mode = destinationMode(destination);
+  const tmp = tempPathFor(destination);
   try {
     writeFileSync(tmp, body, { flag: 'wx', mode: mode ?? 0o666 });
     // chmod after the create, because the umask would otherwise clear bits the
     // destination held (a 0664 state under a 022 umask is the common case). Only a
     // destination that already existed is pinned; a fresh one keeps 0666 & ~umask.
     if (mode !== null) chmodSync(tmp, mode);
-    if (existsSync(out)) accessSync(out, constants.W_OK);
-    renameSync(tmp, out);
+    if (existsSync(destination)) accessSync(destination, constants.W_OK);
+    renameSync(tmp, destination);
   } catch (err) {
     // Unconditionally: the flag this used to carry was set only after writeFileSync
     // returned, so a write that failed part way through - a size limit, a full disk, an

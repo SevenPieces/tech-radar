@@ -6,10 +6,10 @@
 // notice, never a thrown error and never a silent skip.
 import { randomBytes } from 'node:crypto';
 import {
-  accessSync, chmodSync, constants, existsSync, mkdirSync, renameSync, statSync, unlinkSync,
-  writeFileSync,
+  accessSync, chmodSync, constants, existsSync, lstatSync, mkdirSync, readlinkSync, realpathSync,
+  renameSync, statSync, unlinkSync, writeFileSync,
 } from 'node:fs';
-import { dirname, join } from 'node:path';
+import { dirname, isAbsolute, join, resolve } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { readConfig } from './lib/mdtable.mjs';
 import {
@@ -49,6 +49,30 @@ function sanitizeNotice(text) {
 }
 function pushNotice(notices, text, secrets) {
   notices.push(sanitizeNotice(redactSecrets(text, secrets)));
+}
+
+// TR-99: a notice is redacted at the push against the request that produced it, and a shared
+// host can echo a value that a different watchlist row sent. The union below is the secrets of
+// every row a collector issues requests for, built with the same requestSecrets the per-request
+// push uses, so the floor that keeps a harmless word of free text readable still applies. A row
+// that never produces a notice of its own still protects its value in a notice another row
+// pushes.
+function rowsSecrets(rows, headers) {
+  const out = new Set();
+  for (const row of rows) {
+    for (const secret of requestSecrets(row.target, headers)) out.add(secret);
+  }
+  return [...out];
+}
+
+// The notices as they are published: each one redacted against the union above as well as
+// against its own request's secrets, which the push already removed. Applying it again is
+// idempotent - a value that is gone stays gone - and the notice keeps the host and the reason
+// it exists, so it stays diagnosable.
+function redactNotices(notices, secrets) {
+  const out = [];
+  for (const notice of notices) pushNotice(out, notice, secrets);
+  return out;
 }
 
 // A response that will not parse is shaped here rather than quoted: Node's SyntaxError carries
@@ -291,11 +315,11 @@ export async function collectGithub(rows, ctx) {
     budget = coreBudget(parseJson(await get(probeUrl), probeUrl));
   } catch (err) {
     pushNotice(notices, `github: rate limit could not be checked (${err.message}); ${uncheckedPhraseFor(rows)}`, secretsFor(probeUrl));
-    return { candidates, notices };
+    return { candidates, notices: redactNotices(notices, rowsSecrets(rows, headers)) };
   }
   if (budget.remaining === null) {
     pushNotice(notices, `github: rate limit could not be checked (the probe reported no core budget); ${uncheckedPhraseFor(rows)}`);
-    return { candidates, notices };
+    return { candidates, notices: redactNotices(notices, rowsSecrets(rows, headers)) };
   }
   // The budget is spent in requests, in a fixed order: one listing per organisation,
   // then one releases request per repository, then one tags request for each
@@ -431,7 +455,7 @@ export async function collectGithub(rows, ctx) {
     const reported = tracked ? { ...budget, reserve, spent: charged.count, refused: refusals.count } : budget;
     pushNotice(notices, budgetNotice(reported, shortfall, Boolean(token)));
   }
-  return { candidates, notices };
+  return { candidates, notices: redactNotices(notices, rowsSecrets(rows, headers)) };
 }
 
 export async function collectArxiv(rows, ctx) {
@@ -471,7 +495,7 @@ export async function collectArxiv(rows, ctx) {
       pushNotice(notices, `arxiv ${row.target}: ${err.message}`, requestSecrets(url, {}));
     }
   }
-  return { candidates, notices };
+  return { candidates, notices: redactNotices(notices, rowsSecrets(rows, {})) };
 }
 
 // A watchlist target is configuration, and curl honours whatever it is handed: file://
@@ -523,11 +547,25 @@ export async function collectFeeds(rows, ctx) {
       pushNotice(notices, `rss ${redactUrl(target)}: ${err.message}`, requestSecrets(target, {}));
     }
   }
-  return { candidates, notices };
+  return { candidates, notices: redactNotices(notices, rowsSecrets(rows, {})) };
 }
 
 export function nvdStamp(iso) {
   return new Date(iso).toISOString().replace(/Z$/, '');
+}
+
+// The shape a CVE identifier has: the year, then the sequence number, four digits or
+// more (NVD uses four for the classic scheme and seven for the 2024-onward one). The NVD
+// answer is upstream text, and the identifier is the one field of an advisory card that is
+// interpolated into a URL, so it is checked against this shape before a citation is built
+// rather than trusted, encoded or not.
+const CVE_ID = /^CVE-\d{4}-\d{4,}$/;
+
+// What a skipped identifier is called in the notice. The id is upstream text of arbitrary
+// length and content, so it is JSON-quoted (bounded by sanitizeNotice) rather than pasted
+// in: a reader has to see what was rejected without the notice itself becoming a carrier.
+function unnamedAdvisory(id) {
+  return JSON.stringify(id.length > 120 ? `${id.slice(0, 120)}...` : id);
 }
 
 // Every reader answers one question: when was the version we are about to report
@@ -700,13 +738,17 @@ export async function collectRegistries(rows, ctx) {
       pushNotice(notices, `${row.kind} ${row.target}: ${err.message}`, requestSecrets(url, {}));
     }
   }
-  return { candidates, notices };
+  return { candidates, notices: redactNotices(notices, rowsSecrets(rows, {})) };
 }
 
 export async function collectAdvisories(rows, ctx) {
   const candidates = [];
   const notices = [];
   const token = process.env.GITHUB_TOKEN || process.env.GH_TOKEN;
+  // The GHSA header is built once, so the union the notices are finally redacted against
+  // (rowsSecrets, TR-99) cannot drift from the header the requests actually send.
+  const ghsaHeaders = { Accept: 'application/vnd.github+json' };
+  if (token) ghsaHeaders.Authorization = `Bearer ${token}`;
   for (const row of rows) {
     // The request in flight, for the notice boundary: the GHSA path sends a credential and the
     // NVD path a window, and a failure that quotes the server's answer needs its own request's
@@ -714,8 +756,7 @@ export async function collectAdvisories(rows, ctx) {
     let secrets = [];
     try {
       if (row.kind === 'ghsa') {
-        const headers = { Accept: 'application/vnd.github+json' };
-        if (token) headers.Authorization = `Bearer ${token}`;
+        const headers = ghsaHeaders;
         const url = `${GITHUB_API}/advisories`
           + `?per_page=${encodeURIComponent(ctx.settings.ghsa_page_size)}`
           + `&published=${(ctx.since ?? '').slice(0, 10)}..${(ctx.until ?? '').slice(0, 10)}`;
@@ -745,11 +786,26 @@ export async function collectAdvisories(rows, ctx) {
           const publishedAt = toIso(cve.published);
           if (ctx.since && publishedAt && publishedAt < ctx.since) continue;
           if (ctx.until && publishedAt && publishedAt > ctx.until) continue;
+          // The identifier is upstream text and the only field interpolated into a URL, so it
+          // is required to have the shape of a CVE id before the citation is built. Unchecked,
+          // a crafted id ('CVE-2026-0001](https://evil.example/x)') forges the destination the
+          // digest renders, an id carrying a space yields a citation the renderer cannot read
+          // at all, and an absent id publishes a live link ending in 'undefined'. A row that
+          // fails the shape is skipped with a notice the Coverage note carries, never guessed
+          // at; the window filters above run first, so only a row that would have shipped is
+          // reported.
+          const id = String(cve.id ?? '');
+          if (!CVE_ID.test(id)) {
+            pushNotice(notices, `${row.kind}: skipped an advisory whose identifier is not a CVE id: ${unnamedAdvisory(id)}`, secrets);
+            continue;
+          }
           candidates.push({
-            // The identifier is upstream text too: the title and the detail URL both carry it.
             domain: row.domain, kind: 'advisory',
-            title: plainText(String(cve.id ?? ''), ctx.settings.summary_max_chars),
-            url: neutraliseUrl(`https://nvd.nist.gov/vuln/detail/${cve.id}`),
+            title: plainText(id, ctx.settings.summary_max_chars),
+            // Encoded even though the shape rule already excludes every character the
+            // encoding would change: the citation destination is never built from unencoded
+            // upstream text, so relaxing the rule cannot reintroduce the injection.
+            url: neutraliseUrl(`https://nvd.nist.gov/vuln/detail/${encodeURIComponent(id)}`),
             publishedAt, source: 'nvd', tierHint: 'primary',
             summary: plainText(en?.value ?? '', ctx.settings.summary_max_chars),
           });
@@ -761,16 +817,32 @@ export async function collectAdvisories(rows, ctx) {
       pushNotice(notices, `${row.kind}: ${err.message}`, secrets);
     }
   }
-  return { candidates, notices };
+  return { candidates, notices: redactNotices(notices, rowsSecrets(rows, ghsaHeaders)) };
 }
 
 export async function collectAll(config, opts) {
+  // TR-99: redaction was per request, so a notice published a value another row sent whenever
+  // several rows share a host and its answer echoes the other row's request. Every request the
+  // run issues registers its own secrets here as it is issued - a row that pushes no notice of
+  // its own still protects its value in a notice another row pushed - and the notices are
+  // redacted once more, after every source has run, against that whole union rather than one
+  // request's list. The union holds exactly what the per-request pass held (a URL's userinfo or
+  // query value, a credential header and the words it splits into, all through requestSecrets),
+  // so the floor that keeps a harmless word of free text readable still applies.
+  const issuedSecrets = new Set();
+  const baseNet = opts.net ?? { fetchText, hostOf, isDiscoveryOnly };
   const ctx = {
     // Normalised here as well as at parse time, so a direct caller passing an
     // offset-bearing spelling cannot filter differently from its Z spelling.
     since: toIso(opts.since), until: toIso(opts.until), settings: config.settings,
     timeout: resolveTimeout({ timeout: opts.timeout ?? null }, config.settings),
-    net: opts.net ?? { fetchText, hostOf, isDiscoveryOnly },
+    net: {
+      ...baseNet,
+      fetchText: (url, timeout, headers, ...rest) => {
+        for (const secret of requestSecrets(url, headers)) issuedSecrets.add(secret);
+        return baseNet.fetchText(url, timeout, headers, ...rest);
+      },
+    },
     domains: opts.domains ?? null,
   };
   const rows = (kind) => config.watchlist.filter(
@@ -790,12 +862,18 @@ export async function collectAll(config, opts) {
     (c) => (!ctx.since || !c.publishedAt || c.publishedAt >= ctx.since)
       && (!ctx.until || !c.publishedAt || c.publishedAt <= ctx.until),
   );
+  // The union pass TR-99 asks for: every notice the run produced, from every source and every
+  // row, is redacted once more against the secrets of every request the run issued. The
+  // per-request redaction stays as it is (and is what makes the notice readable at the point it
+  // is built); this pass closes the cross-row echo the per-request pass cannot see.
+  const notices = [];
+  for (const notice of acc.notices) pushNotice(notices, notice, [...issuedSecrets]);
   return {
     version: 1,
     generatedAt: new Date().toISOString(),
     window: { since: ctx.since, until: ctx.until },
     candidates,
-    notices: acc.notices,
+    notices,
   };
 }
 
@@ -822,6 +900,32 @@ function operatorWarning(notices) {
   return line;
 }
 
+// The file the write lands on, with a symlinked destination followed to its target. A pool
+// named through a symlink - a pool kept on another volume behind one - was replaced by the
+// rename itself: the link became a regular file holding the new pool while the file it
+// pointed at kept the old one, so the operator's pool quietly went stale. Resolving rather
+// than refusing keeps the operator's link and publishes the pool where they aimed it.
+//
+// realpathSync answers for a link whose target is there; a link whose final target is not
+// there yet has no real path, so the chain is walked by hand to the name it points at, which
+// the write then creates exactly as a plain write to a fresh destination would. A chain that
+// never terminates is refused rather than guessed at, and the failure path below unlinks the
+// temp, so nothing is left behind. This mirrors the state writer's rule, which resolves its
+// destination the same way.
+function resolveWriteTarget(out) {
+  try { return realpathSync(out); } catch { /* absent, or a link to a path that is not there */ }
+  let current = out;
+  let stats;
+  try { stats = lstatSync(current); } catch { return current; }
+  for (let hop = 0; stats.isSymbolicLink(); hop += 1) {
+    if (hop >= 32) throw new Error(`${out} is a symlink chain that does not resolve to a file`);
+    const target = readlinkSync(current);
+    current = isAbsolute(target) ? target : resolve(dirname(current), target);
+    try { stats = lstatSync(current); } catch { return current; }
+  }
+  return current;
+}
+
 // The mode the replacement carries. The rename replaces the inode, so an existing
 // destination keeps its own permissions only if the temp is born with them: a temp created
 // with the process default silently widened a pool the operator had protected - a 0600 pool
@@ -840,18 +944,22 @@ function destinationMode(out) {
 // itself needs only the directory, so without this check a pool the operator had protected
 // was silently replaced. The state writer refuses the same way.
 function writeAtomic(out, text) {
-  const mode = destinationMode(out);
-  const dir = dirname(out);
+  // Everything below names the resolved destination: the temp has to be born beside the inode
+  // the rename replaces, or a symlinked destination on another volume would fail with EXDEV,
+  // and the rename itself has to name that inode.
+  const destination = resolveWriteTarget(out);
+  const mode = destinationMode(destination);
+  const dir = dirname(destination);
   if (dir) mkdirSync(dir, { recursive: true });
-  const tmp = `${out}.${process.pid}.${randomBytes(6).toString('hex')}.tmp`;
+  const tmp = `${destination}.${process.pid}.${randomBytes(6).toString('hex')}.tmp`;
   try {
     writeFileSync(tmp, text, { flag: 'wx', mode: mode ?? 0o666 });
     // chmod after the create, because the umask would otherwise clear bits the destination
     // held (a 0664 pool under a 022 umask is the common case). Only a destination that
     // already existed is pinned: a fresh one keeps the create's own 0666 & ~umask.
     if (mode !== null) chmodSync(tmp, mode);
-    if (existsSync(out)) accessSync(out, constants.W_OK);
-    renameSync(tmp, out);
+    if (existsSync(destination)) accessSync(destination, constants.W_OK);
+    renameSync(tmp, destination);
   } catch (err) {
     try { unlinkSync(tmp); } catch { /* the temp was never created */ }
     throw err;
