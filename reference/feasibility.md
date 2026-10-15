@@ -242,10 +242,12 @@ contradicted — the blocked member is recorded here instead.
 ## Feed-only rows with a collector target
 
 The 39 `feed-only` rows are not fetched by the per-row probe; they are reached through
-`config/watchlist.md`. 22 of them have a target that was exercised live on the probe date and answered 200:
-every arXiv category the collector watches — now one registry row each (cs.AI, cs.CL, cs.LG, cs.CV, cs.DC,
-cs.GR, cs.HC, cs.LO, cs.PL, cs.RO, cs.AR, cs.CR, eess.AS, eess.SP, quant-ph, cond-mat.mtrl-sci,
-astro-ph.IM) — and LWN’s headline feed. The other 17 `feed-only` rows name outlets such as trade
+`config/watchlist.md`. 22 of them have a target that was exercised live on the probe date and answered 200: 21
+arXiv rows — the 17 per-category rows named for the categories the collector watches (cs.AI, cs.CL, cs.LG, cs.CV,
+cs.DC, cs.GR, cs.HC, cs.LO, cs.PL, cs.RO, cs.AR, cs.CR, eess.AS, eess.SP, quant-ph, cond-mat.mtrl-sci,
+astro-ph.IM) plus four combined-category rows carried in the registry alongside them (`arXiv cs.CL and cs.AI
+listings`, `arXiv cs.LO and cs.SE listings`, `arXiv astro-ph, hep-th and math listings`, `arXiv eess.AS and
+cs.SD listings`) — and LWN’s headline feed. The other 17 `feed-only` rows name outlets such as trade
 press, conference proceedings or mailing lists that no collector target covers; they are recorded as
 `not addressed` rather than guessed at.
 
@@ -295,11 +297,15 @@ per hour from one address, measured directly: `GET https://api.github.com/rate_l
 `used 60, remaining 0` during the first full run of 2026-09-23, and `used 0, remaining 60` immediately
 before the second.
 
-A full run is sized right at the edge of that budget: `config/watchlist.md` holds 55 `github-repo`
-targets, and the collector issues one release request per target plus one request for
-`GitHub Security Advisories` — 56 requests against the 58 spendable once the configured reserve of 2 is held
-back, two requests of headroom. Both outcomes
-were observed on the probe date:
+A full run's releases and advisory block is sized right at the edge of that budget: `config/watchlist.md` holds
+55 `github-repo` targets, and the collector issues one release request per target plus one request for
+`GitHub Security Advisories` — a floor of 56 requests against the 58 spendable once the configured reserve of 2
+is held back, two requests of headroom. The tags phase is opportunistic and separate: whenever a repository's
+releases yield no in-window candidate the collector also asks for that repository's tags, one request each and
+up to 55 more, so a quiet week with no release inside the window wants 111 GitHub requests in all — 55 releases,
+the advisory listing and 55 tag listings. Of those, 59 are charged (the 55 releases, the advisory and 3 of the
+tag listings) and the remaining 52 tag listings go unchecked, which forces a rate-limit notice into the coverage
+note. Both outcomes were observed on the probe date:
 
 - **From a partly spent budget the tail fails.** The first full run met an hour whose budget was already
   consumed. It printed `HTTP 403` notices carrying `API rate limit exceeded` for the trailing repositories

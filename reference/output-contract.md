@@ -63,8 +63,9 @@ and the digest loses it entirely. The citation, the marker, the flags and the re
 the first line or on any continuation.
 
 The renderer joins an indented continuation into the same list item, so a wrapped item renders exactly like a
-one-line one. A violation is reported against the item's **last** line: the bullet line for the one-line form,
-the final continuation line for the wrapped form.
+one-line one. A violation is reported against the item's **first** line: the bullet line, whether the item is
+written on one line or wrapped across several, because the parser captures that line before it consumes the
+indented continuations.
 
 The shapes the gate matches:
 
@@ -130,12 +131,9 @@ rule for when a claim may be written as a result.
 
 ## The three rules the gate enforces across sections
 
-1. **Coverage note repeats the label verbatim, and says what the cap skipped.** The section whose `## ` heading
-   contains `coverage note` must contain `plan.label` character for character. The header line is *not* what is
-   checked — a label that drifted in the header alone is still caught here, because the note must carry it
-   independently. The note must also quote the skipped amount from the plan (`plan.skippedMs`, with `plan.declared`
-   as the floor the run asked for and the same pair per domain under `plan.perDomain`), not recompute it; when
-   `skippedMs` is 0 the note says the cap removed nothing.
+1. **Coverage note repeats the label verbatim.** The section whose `## ` heading contains `coverage note` must
+   contain `plan.label` character for character. The header line is *not* what is checked — a label that drifted in
+   the header alone is still caught here, because the note must carry it independently.
 
    **The collector-notice line is part of the note as well.** Whenever the pool carries at least one `notices`
    entry, the note must contain the line `Collector notices: <n>`, where `<n>` is the length of the pool's
@@ -155,6 +153,12 @@ rule for when a claim may be written as a result.
    `domain` string in the section whose heading contains `quiet`. Use the English catalogue name
    (`Quantum technologies`), not the key (`quantum`) and not only the Chinese label. A focus run is not failed for
    the watch domains it did not cover.
+
+**The skipped amount is a writer obligation, not a gate check.** The note must quote what the cap removed from the
+plan (`plan.skippedMs`, with `plan.declared` as the floor the run asked for and the same pair per domain under
+`plan.perDomain`), never recompute it; when `skippedMs` is 0 the note says the cap removed nothing. The gate
+verifies neither this amount nor the header counts, so a note that claims nothing was skipped while the plan says
+otherwise still passes — it is still false, and the note is the reader's only account of the window.
 
 ## The header
 
@@ -234,7 +238,7 @@ The per-domain ceilings are not targets. The total budget binds, so the synthesi
 
 ```markdown
 # Tech Radar — 2026-09-23
-_Covering 2026-09-16 08:00 to 2026-09-23 08:00 (Asia/Shanghai) · cap not hit · 42 domains scanned · 38 items_
+_Covering 2026-09-16 08:00 to 2026-09-23 08:00 (Asia/Shanghai) · cap not hit · 43 domains scanned · 38 items_
 
 ## Core domains
 ### AI / LLM · 人工智能 / 大模型

@@ -83,8 +83,11 @@ node scripts/update-state.mjs update --state "$DIR/tech-radar-state.json" \
 path. `update` writes the merged state, prints `{ updated, results }` where each result is `new` or `followup`,
 advances the watermarks of the domains the run covered, and logs the run. It refuses (exit 2, nothing merged) a
 run whose date and covered domain set are already in the run log — that is a re-delivery of the same run, not a
-new one; use a different `--date`, or `--domains` for a focus run. `reference/state-schema.md` has the exact
-shape.
+new one; use a different `--date`, or `--domains` for a focus run. It also refuses (exit 2, nothing merged) while
+another update holds the state's or the output's lock — `<state>.lock` or `<out>.lock`, since `update` locks both
+the state it reads and the destination it writes — naming the lock it could not take; a lock whose holder is gone
+is reclaimed, but a file at a lock path that is not a holder record written by `update-state.mjs` is refused
+rather than removed. `reference/state-schema.md` has the exact shape.
 
 ## Run steps
 
@@ -295,10 +298,11 @@ both the section and the line fails. `never` treats a featured section as a warn
 the stand-in line is there, not that the choice was a good one.
 
 **The completeness floor scales to the run's scope while the ceiling stays global.** The floor is `total_min_items`
-scaled by the share of the catalogue the run covers, rounded up, and clamped to at least one and at most
-`total_min_items`: a single-domain run is a probe with a floor of one, a scoped run is not failed for the domains it
-never took on, an unscoped or whole-catalogue run keeps the configured floor, and near the top of the range the
-clamp is what holds the floor at `total_min_items`. `total_max_items` never scales. The two cases read
+scaled by the share of the catalogue the run covers, rounded up, clamped to at least one and at most
+`total_min_items`, and for a multi-domain run also at least one item per covered domain plus one as far as
+`total_min_items` allows: a single-domain run is a probe with a floor of one, a scoped run is not failed for the
+domains it never took on, an unscoped or whole-catalogue run keeps the configured floor, and near the top of the
+range the clamp is what holds the floor at `total_min_items`. `total_max_items` never scales. The two cases read
 differently in the output — `below the scoped floor of N for a run covering X of Y domains` when the run has a
 scope, and the original `below total_min_items N` when it does not — so the message tells you which floor you
 missed. **A failing gate means the digest does not ship** — re-cut the items, the caps, the quiet line or the

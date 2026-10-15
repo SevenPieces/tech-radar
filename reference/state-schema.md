@@ -182,7 +182,11 @@ update-state.mjs update --state <path> --items <path> --out <path> --date YYYY-M
 - `--config <dir>` overrides the configuration directory; the default is the `config/` directory beside the
   script, so these commands work from any working directory.
 - Exit codes: `0` OK; `2` usage error, unknown flag, invalid `--since`, unknown domain key, an unreadable config,
-  state or items file, or a run that is already recorded for that date and domain set; `3` the items file is not an
-  array, or an item failed validation (its `domain` is neither a catalogue key nor a catalogue name); `4` the
-  output could not be written. The usage also documents `1` as fatal, but the CLI as built never returns it —
-  every handled failure is 2, 3 or 4.
+  state or items file, a run that is already recorded for that date and domain set, or another update holding the
+  state's or the output's lock — `<state>.lock` or `<out>.lock`, since `update` locks both the state it reads
+  and the destination it writes (nothing is merged; a lock whose holder is gone is reclaimed, but a file at a lock
+  path that is not a holder record written by `update-state.mjs` is refused rather than removed); `3` the items
+  file is not an array, or an item failed validation (a `title` or `primaryUrl` that is not a non-empty string, or
+  a `domain` that is neither a catalogue key nor a catalogue name, or an item whose domain is outside a focus
+  run's scope); `4` the output could not be written. The usage also documents `1` as fatal, but the CLI as built
+  never returns it — every handled failure is 2, 3 or 4.
