@@ -6,7 +6,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
-import { decodeBuffer, decodeEntities, field, atomLink, splitItems, neutraliseMarkers, plainText, isDiscoveryOnly, hostOf, shapeHttpError, shapeTransportError, splitCurlOutput, redactUrl, fetchText, neutraliseUrl } from '../scripts/lib/net.mjs';
+import { decodeBuffer, decodeEntities, field, atomLink, splitItems, neutraliseMarkers, plainText, isDiscoveryOnly, hostOf, shapeHttpError, shapeTransportError, splitCurlOutput, redactUrl, fetchText, neutraliseUrl, requestSecrets, redactSecrets } from '../scripts/lib/net.mjs';
 
 test('decodeBuffer passes UTF-8 through', () => {
   assert.equal(decodeBuffer(Buffer.from('中文 test', 'utf8')), '中文 test');
@@ -564,5 +564,87 @@ test('a short credential the request sent is removed from the notice that echoes
     'the userinfo password must not reach the notice: ' + shaped.message);
   assert.match(shaped.message, /the atom feed is otherwise fine/,
     "a harmless short word that is not the request's own value stays: " + shaped.message);
+});
+
+// TR-109 regression test: the batch-8 parameter test required the credential stem to begin
+// where a word begins, so every fused spelling (apikey, apiKey, accesstoken, refreshtoken,
+// clientsecret, privatekey, subscriptionkey, bearer, jwt) matched nothing, and the value under
+// it was collected by neither rule because it also failed the length floor. The name is
+// lower-cased and stripped of every non-alphanumeric before the stem test, and the stem is a
+// substring of that form, so a fused spelling is the same parameter as its hyphenated one.
+test('a fused credential parameter name protects a short value', () => {
+  const fused = [
+    ['apikey', '1234'],
+    ['apiKey', '9911'],
+    ['accesstoken', 'ABC12'],
+    ['bearer', 'abc'],
+    ['clientsecret', 'pw22'],
+    ['subscriptionkey', '4321'],
+    ['privatekey', 'pk9'],
+    ['refreshtoken', 'rt1'],
+  ];
+  for (const [name, value] of fused) {
+    const url = 'https://feeds.example/rss.xml?' + name + '=' + value;
+    const shaped = shapeHttpError(500,
+      Buffer.from('upstream rejected /rss.xml?' + name + '=' + value), url, 200);
+    assert.equal(shaped.message.includes(value), false,
+      'the fused spelling ' + name + ' leaked its value: ' + shaped.message);
+  }
+  // The hyphenated, underscored, mixed-case and prefixed spellings keep matching too.
+  for (const name of ['api_key', 'private-key', 'X-Amz-Signature', 'AWSAccessKeyId']) {
+    const value = 'SENTINELVALUE42';
+    const url = 'https://feeds.example/rss.xml?' + name + '=' + value;
+    const shaped = shapeHttpError(500, Buffer.from('echo ' + value), url, 200);
+    assert.equal(shaped.message.includes(value), false,
+      name + ' leaked its value: ' + shaped.message);
+  }
+});
+
+// TR-110 regression test: a query value was collected whenever it cleared the length floor, so
+// the collector's own arXiv request (search_query=cat:cs.AI, sortBy=submittedDate,
+// sortOrder=descending, max_results=40) put ordinary words into the run-wide union, which was
+// then applied to the candidate fields and reaped a published word. A query value is collected
+// only from a credential-named parameter; no other query value is collected at all.
+test('an ordinary query parameter value is not collected, however long it is', () => {
+  const url = 'https://export.arxiv.org/api/query?search_query=cat%3Acs.AI'
+    + '&sortBy=submittedDate&sortOrder=descending&max_results=40';
+  const secrets = requestSecrets(url, {});
+  assert.deepEqual(secrets, [], 'an ordinary request contributes no value: ' + JSON.stringify(secrets));
+  const text = 'We sort the results in descending order and report the outcome.';
+  assert.equal(redactSecrets(text, secrets), text,
+    'a published word is not reaped: ' + redactSecrets(text, secrets));
+});
+
+// TR-111 regression test: a credential-named parameter whose value is an ordinary short word
+// reaped that word from every published field, so a notice reading 'Python on Windows' became
+// 'Python [redacted] Windows'. A credential-named value is collected from three characters up;
+// the userinfo stays a credential position whatever its length.
+test('a credential-named value below three characters is not collected', () => {
+  assert.deepEqual(requestSecrets('https://feeds.example/rss.xml?code=on', {}), [],
+    'a two-character credential-named value is not collected');
+  const shaped = shapeHttpError(500, Buffer.from('Python on Windows is supported'),
+    'https://feeds.example/rss.xml?code=on', 200);
+  assert.equal(shaped.message, 'HTTP 500 for https://feeds.example/rss.xml: Python on Windows is supported',
+    'the notice keeps its own wording: ' + shaped.message);
+  // Three characters is the floor the other side of the same boundary.
+  assert.equal(requestSecrets('https://feeds.example/rss.xml?code=new', {}).includes('new'), true,
+    'a three-character credential-named value is collected');
+  // The userinfo is a credential position whatever its length.
+  assert.equal(requestSecrets('https://u:pw@feeds.example/rss.xml', {}).includes('pw'), true,
+    'a two-character userinfo password is still collected');
+});
+
+// TR-112 regression test: the markdown link seam was applied by the same neutraliser candidate
+// prose uses, so a legitimate upstream Markdown link in a release body was defaced in the pool
+// ('[the migration guide] (https://example.com/migrate)'). The seam belongs to the notice path,
+// which is the published Coverage note; candidate prose keeps the link it was written with.
+test('a legitimate markdown link survives candidate prose while a notice ends the link grammar', () => {
+  const link = 'Fixes a crash. See [the migration guide](https://example.com/migrate) and [docs](https://example.com/d).';
+  assert.equal(plainText(link, 400), link, 'candidate prose keeps its markdown link byte-identical');
+  assert.equal(neutraliseMarkers(link), link, 'the candidate neutraliser leaves the seam alone');
+  const shaped = shapeHttpError(500, Buffer.from(link), 'https://feeds.example/rss.xml', 400);
+  assert.doesNotMatch(shaped.message, /\]\(/, 'the notice carries no live link seam: ' + shaped.message);
+  assert.match(shaped.message, /\[the migration guide\] \(https:\/\/example\.com\/migrate\)/,
+    'the notice keeps the label and the destination legible: ' + shaped.message);
 });
 

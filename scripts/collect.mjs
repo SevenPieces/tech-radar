@@ -14,7 +14,8 @@ import { fileURLToPath, pathToFileURL } from 'node:url';
 import { readConfig } from './lib/mdtable.mjs';
 import {
   fetchText, hostOf, isDiscoveryOnly, splitItems, field, atomLink, plainText, redactUrl,
-  neutraliseMarkers, neutraliseUrl, redactSecrets, requestSecrets,
+  neutraliseMarkers, neutraliseLinkSeams, neutraliseUrl, redactSecrets, requestSecrets,
+  requestSecretSets,
 } from './lib/net.mjs';
 
 // The collector must work from any working directory, so the default configuration
@@ -43,9 +44,12 @@ const GITHUB_API = 'https://api.github.com';
 const NOTICE_CONTROLS = /[\u0000-\u001f\u007f-\u009f]/g;
 const NOTICE_MAX_CHARS = 1000;
 function sanitizeNotice(text) {
-  return neutraliseMarkers(
+  // The markdown link seam belongs to this path and not to the neutraliser a candidate field
+  // uses: a notice is published verbatim in the Coverage note, while a release body's links are
+  // ordinary Markdown that the pool has to keep.
+  return neutraliseLinkSeams(neutraliseMarkers(
     String(text).replace(NOTICE_CONTROLS, (ch) => (/\s/.test(ch) ? ' ' : '')),
-  ).slice(0, NOTICE_MAX_CHARS);
+  )).slice(0, NOTICE_MAX_CHARS);
 }
 function pushNotice(notices, text, secrets) {
   notices.push(sanitizeNotice(redactSecrets(text, secrets)));
@@ -826,10 +830,17 @@ export async function collectAll(config, opts) {
   // run issues registers its own secrets here as it is issued - a row that pushes no notice of
   // its own still protects its value in a notice another row pushed - and the notices are
   // redacted once more, after every source has run, against that whole union rather than one
-  // request's list. The union holds exactly what the per-request pass held (a URL's userinfo or
-  // query value, a credential header and the words it splits into, all through requestSecrets),
-  // so the floor that keeps a harmless word of free text readable still applies.
+  // request's list. The union holds exactly what the per-request pass held (a URL's userinfo, a
+  // credential-named query value from three characters up, and a credential header, all through
+  // requestSecretSets), so the floor that keeps a harmless word of free text readable still
+  // applies.
+  //
+  // TR-110: a second set holds the credential positions alone. The candidate fields are redacted
+  // against that one, never against the whole union: a value that is merely ordinary
+  // configuration - the collector's own '?sortOrder=descending', '?max_results=40' - is not a
+  // credential and must not be able to rewrite a published word in the pool.
   const issuedSecrets = new Set();
+  const issuedCredentialSecrets = new Set();
   const baseNet = opts.net ?? { fetchText, hostOf, isDiscoveryOnly };
   const ctx = {
     // Normalised here as well as at parse time, so a direct caller passing an
@@ -839,7 +850,9 @@ export async function collectAll(config, opts) {
     net: {
       ...baseNet,
       fetchText: (url, timeout, headers, ...rest) => {
-        for (const secret of requestSecrets(url, headers)) issuedSecrets.add(secret);
+        const { all, credentials } = requestSecretSets(url, headers);
+        for (const secret of all) issuedSecrets.add(secret);
+        for (const secret of credentials) issuedCredentialSecrets.add(secret);
         return baseNet.fetchText(url, timeout, headers, ...rest);
       },
     },
@@ -863,23 +876,27 @@ export async function collectAll(config, opts) {
       && (!ctx.until || !c.publishedAt || c.publishedAt <= ctx.until),
   );
   // The union pass TR-99 asks for: every notice the run produced, from every source and every
-  // row, is redacted once more against the secrets of every request the run issued. The
+  // row, is redacted once more against every value of every request the run issued. The
   // per-request redaction stays as it is (and is what makes the notice readable at the point it
   // is built); this pass closes the cross-row echo the per-request pass cannot see.
   const union = [...issuedSecrets];
+  const credentialUnion = [...issuedCredentialSecrets];
   const notices = [];
   for (const notice of acc.notices) pushNotice(notices, notice, union);
-  // TR-106: the same union covers the candidate fields, which the notices' redaction never did. A
-  // source that answered 200 and echoed the request's own credential into the text it feeds - an
-  // item title, an item summary - published that value in the pool, and the pool is what the
-  // digest is written from, so a credential was a field of the published pool. Every string field
-  // of every candidate crosses the same redaction the notices do, against the same union; the
+  // TR-106: the candidate fields, which the notices' redaction never covered, cross the same
+  // redaction here. A source that answered 200 and echoed the request's own credential into the
+  // text it feeds - an item title, an item summary - published that value in the pool, and the
+  // pool is what the digest is written from, so a credential was a field of the published pool.
+  // TR-110: the set is the credential positions only. Applying the whole union here reaped
+  // ordinary words that merely happened to be a configured request value, so a shipped run
+  // published a candidate summary of 'We sort the results in [redacted] order'; a value that is
+  // ordinary configuration is not a credential and never rewrites published prose. The
   // per-source pass above stays as it is, and the redaction is skipped entirely when the run
-  // issued no request (nothing can have been echoed).
-  const redactedCandidates = union.length === 0 ? candidates : candidates.map((candidate) => {
+  // issued no credential at all (nothing can have been echoed).
+  const redactedCandidates = credentialUnion.length === 0 ? candidates : candidates.map((candidate) => {
     const out = { ...candidate };
     for (const [field, value] of Object.entries(out)) {
-      if (typeof value === 'string') out[field] = redactSecrets(value, union);
+      if (typeof value === 'string') out[field] = redactSecrets(value, credentialUnion);
     }
     return out;
   });

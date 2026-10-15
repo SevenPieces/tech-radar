@@ -712,3 +712,60 @@ test('the run-wide redaction keeps configured values and still removes credentia
   assert.equal(published.includes('pw1'), false,
     'the userinfo password reached the pool: ' + published.slice(0, 400));
 });
+
+// TR-110 regression test: the union applied to the candidate fields held every ordinary query
+// value above the floor, so the collector's own arXiv request (sortOrder=descending,
+// search_query=cat:cs.AI) reaped a published word from a candidate summary in the shipped
+// configuration. Candidate fields are redacted against the credential-only union, never
+// against a value that is merely ordinary configuration.
+test('an ordinary request value does not reap a candidate summary', async () => {
+  const settings = {
+    timezone: 'Asia/Shanghai', window_cap_weeks: 4, first_run_days: 7,
+    discovery_hosts: 'news.ycombinator.com', user_agent: 'tech-radar/1.0',
+    request_timeout_ms: 20000, title_max_chars: 200, summary_max_chars: 400,
+    error_snippet_max_chars: 200,
+    github_org_repos: 10, github_releases_per_repo: 10, github_tags_per_repo: 5,
+    github_rate_limit_reserve: 0, arxiv_max_results: 40, ghsa_page_size: 50, nvd_severity: 'HIGH',
+  };
+  const watchlist = [
+    { kind: 'arxiv-category', target: 'cs.AI', domain: 'ai-llm', note: '' },
+    { kind: 'rss', target: 'https://blog.example/feed.xml', domain: 'ai-llm', note: '' },
+  ];
+  const summary = 'We sort the results in descending order and report the outcome.';
+  const net = {
+    hostOf: (url) => new URL(url).host,
+    isDiscoveryOnly: () => false,
+    fetchText: async (url) => {
+      if (url.includes('/rate_limit')) {
+        return JSON.stringify({ resources: { core: { limit: 60, remaining: 60, reset: 0 } } });
+      }
+      if (url.startsWith('https://export.arxiv.org/api/query')) {
+        return '<feed><entry><title>Paper</title>'
+          + '<link rel="alternate" href="http://arxiv.org/abs/2609.01234v1"/>'
+          + '<published>2026-09-20T01:00:00Z</published><summary>' + summary + '</summary></entry></feed>';
+      }
+      if (url.includes('blog.example')) {
+        return '<rss><channel><item><title>Post</title><link>https://blog.example/p</link>'
+          + '<pubDate>Sun, 20 Sep 2026 12:00:00 GMT</pubDate>'
+          + '<description>' + summary + '</description></item></channel></rss>';
+      }
+      throw new Error('unexpected request: ' + url);
+    },
+  };
+  const previous = process.env.GITHUB_TOKEN;
+  delete process.env.GITHUB_TOKEN;
+  let pool;
+  try {
+    pool = await collectAll({ settings, watchlist },
+      { since: '2026-09-16T00:00:00Z', until: '2026-09-23T00:00:00Z', net });
+  } finally {
+    if (previous !== undefined) process.env.GITHUB_TOKEN = previous;
+  }
+  const sources = pool.candidates.map((c) => c.source);
+  const rss = pool.candidates.find((c) => c.source.startsWith('rss:'));
+  const arxiv = pool.candidates.find((c) => c.source.startsWith('arxiv:'));
+  assert.ok(rss, 'the feed candidate is published: ' + JSON.stringify(sources));
+  assert.ok(arxiv, 'the arxiv candidate is published: ' + JSON.stringify(sources));
+  assert.equal(rss.summary, summary, 'the ordinary word survives in the feed summary: ' + rss.summary);
+  assert.equal(arxiv.summary, summary, 'the ordinary word survives in the arxiv summary: ' + arxiv.summary);
+});

@@ -126,6 +126,10 @@ does not exist yet: the collector makes it, so `--out <new>/deep/.pool.json` suc
 `update-state` refuse a missing directory with exit `4`. The three writers disagree, and only the collector creates
 what it is given.
 
+**A symlinked destination is resolved to the file it names.** A `--out` or `--state` that is a symlink is
+followed to its target: the write lands on that file rather than replacing the link, and `update-state` takes its
+lock on the resolved file (`<target>.lock`), so naming a link and naming its target contend for one lock.
+
 The collector does not rank or score: judgement stays with you. It never throws on a failing source — a source
 that fails becomes one `notices` entry and the rest of the pool is still written — so read the notices and carry
 them into the Coverage note. **When a run is degraded the collector prints a one-line warning to stderr and still
@@ -141,10 +145,14 @@ be re-probed before the next run, because `fetchable` in `config/sources.md` is 
 than a guarantee.
 
 **Know a notice's redaction boundary.** A URL in a notice keeps its scheme, host and path and loses its userinfo and
-its whole query string — a parameter cannot be told from a benign one by name — so a secret embedded in a path
-survives redaction and reaches the notice and the candidate's published `source`. That is a known boundary rather
-than an oversight: the path is what keeps the notice diagnosable, so read a notice as a diagnostic, not as proof
-that no secret is in it.
+its whole query string, so a secret embedded in a path survives redaction and reaches the notice and the candidate's
+published `source`. The text a notice quotes is scrubbed by value, and there a parameter name does tell a credential
+from a benign one: the request's userinfo is removed however short it is, and the value of a parameter whose name is
+credential-shaped (a name carrying a stem such as `token`, `key`, `secret` or `auth`, however it is spelled) from
+three characters up. Nothing else the request put in its URL is removed — a value under a benign parameter name is
+kept however long it is, so the notice keeps its own wording — and a server's echo in a spelling none of that covers
+is still published. That is a known boundary rather than an oversight: the path is what keeps the notice diagnosable,
+so read a notice as a diagnostic, not as proof that no secret is in it.
 
 **The GitHub budget is the one notice with a documented remedy.** The collector discovers the live limit at run
 time by probing `/rate_limit`, which GitHub documents as not consuming the core budget, so the probe is **free**

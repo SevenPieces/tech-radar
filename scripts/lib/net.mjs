@@ -13,12 +13,13 @@ export const DEFAULT_UA = 'tech-radar/1.0';
 // transfer on an unknown-option error.
 const WRITE_OUT = '\n%{http_code}';
 
-// A URL reaches a notice, and a notice reaches stdout, the pool and the digest. Userinfo and
-// a query parameter are where a secret lives, and a parameter cannot be told from a benign
-// one by name: api-key, client_secret, X-Amz-Signature and AWSAccessKeyId are only four of
-// the spellings a target may use. The whole query is therefore dropped with the userinfo,
-// while the scheme, the host and the path stay, so the notice still names the request it
-// reports. Pure and offline-testable.
+// A URL reaches a notice, and a notice reaches stdout, the pool and the digest. Userinfo and a
+// query parameter are where a secret lives, and a notice prints the request only to name it: the
+// whole query is therefore dropped with the userinfo, whichever name carries it, while the
+// scheme, the host and the path stay. Collection is narrower - a query value is collected only
+// when its name is credential-shaped - but a URL printed into a notice drops every parameter
+// rather than deciding which one is safe, so no spelling of api-key, client_secret,
+// X-Amz-Signature or AWSAccessKeyId can reach it. Pure and offline-testable.
 export function redactUrl(url) {
   const raw = String(url ?? '');
   try {
@@ -48,42 +49,65 @@ const SECRET_SHAPES = [
   /\bgithub_pat_[A-Za-z0-9_]{20,}\b/g,
 ];
 
-// The floor for removing a value by exact match. It applies wherever a URL-carried value is
-// ordinary text rather than a credential position: the words a header value is split into, the
-// free text the shape list below covers, and a query parameter whose name is not
-// credential-shaped. It is not applied to the request's userinfo or to a credential-named query
-// value, because those are credential positions whatever they spell -- the floor there published
-// a seven-character token and a two-character password in the notice, the pool and the coverage
-// note. Keeping the floor for the rest is what keeps a notice readable: a short word the request
-// never sent is not reaped, and the collector's own prose survives. Removing the floor from every
-// URL-carried value instead reaped the collector's own diagnostics: the configured page sizes
-// ('?per_page=10', '?max_results=40') and a severity name counted as credentials, so a production
-// pool published 'resets 2026-[redacted]-15T18:18:21.000Z' and 'listing capped at [redacted]
-// entries' where the previous run carried both intact. The shape list above covers the spellings a
-// curated set cannot know; CREDENTIAL_PARAM below is what tells a credential position from a query
-// value that is ordinary configuration.
+// The floor for removing a value by exact match. It applies to the free text the shape list
+// above covers and to the words a header value splits into -- the runs of text that are ordinary
+// as often as they are a credential. It is not applied to the request's userinfo, to a
+// credential-named query value at or above its own floor, or to a header value collected whole,
+// because those are credential positions whatever they spell; the floor there published a
+// seven-character token and a two-character password in the notice, the pool and the coverage
+// note. Keeping the floor for the rest is what keeps a notice readable: removing it from every
+// URL-carried value reaped the collector's own diagnostics, so a production pool published
+// 'resets 2026-[redacted]-15T18:18:21.000Z' and 'listing capped at [redacted] entries' where the
+// previous run carried both intact. A query value whose name is not credential-shaped is not
+// collected at all -- the collector's own '?sortOrder=descending' and '?max_results=40' are
+// exactly what that keeps out -- and the shape list above covers the credential classes a curated
+// set cannot know.
 const MIN_SECRET_CHARS = 8;
+
+// A credential-named query parameter is a credential position, but a value of one or two
+// characters is an ordinary word as often as it is a credential: a feed whose target carried
+// '?code=on' reaped the word 'on' from every published field and turned 'Python on Windows' into
+// 'Python [redacted] Windows'. Three characters is the floor for collecting one. The request's
+// userinfo is the one credential position with no floor at all, because a userinfo value is never
+// ordinary configuration.
+const MIN_CREDENTIAL_VALUE_CHARS = 3;
 
 function looksLikeValue(value) {
   const v = String(value ?? '');
   return v.length >= MIN_SECRET_CHARS && !/^\d+$/.test(v);
 }
 
-// A query parameter whose name is credential-shaped holds a credential whatever its value spells,
-// so the length floor does not apply to it. This is a shape rather than a list of names, because
-// no curated list can know the operator's spelling: api-key, auth_token, access-token,
-// client_secret, pwd, private_token, X-Amz-Signature, AWSAccessKeyId, session and code all have to
-// match. The stem has to begin where a word begins, so an ordinary configured name such as 'page',
-// 'sort' or 'published' is untouched; a rare ordinary name that happens to carry a stem (for
-// example 'keyword' carries 'key') takes the credential rule, which is the safe direction.
-const CREDENTIAL_PARAM = /(?:^|[^a-z])(?:pass|pwd|secret|token|auth|key|sig|session|code|credential|cookie)/i;
+// A query parameter whose name is credential-shaped holds a credential, and no other query
+// parameter's value is collected at all. The name is lower-cased with every non-alphanumeric
+// character removed before the stem test, and the stem is matched as a substring of that form,
+// because a fused spelling is the same parameter to the server and no curated list can know the
+// operator's spelling: api-key, apiKey, apikey, auth_token, access-token, accesstoken,
+// client_secret, clientsecret, pwd, private_token, X-Amz-Signature, AWSAccessKeyId,
+// subscriptionkey, bearer, jwt, session and code all have to match. Removing the separators
+// costs the word boundary the earlier shape relied on, so a rare ordinary name that happens to
+// carry a stem (for example 'keyword' carries 'key') takes the credential rule; that is the safe
+// direction, and the three-character value floor below keeps an ordinary short value under such a
+// name out of the removal set.
+const CREDENTIAL_STEM = /pass|pwd|secret|token|auth|key|sig|session|code|credential|cookie|bearer|jwt/;
+
+// The name in the form the stem test is defined on.
+function normalizedParamName(name) {
+  return String(name ?? '').toLowerCase().replace(/[^a-z0-9]/g, '');
+}
 
 // The name as the server reads it: a percent-encoded spelling of a credential name is the same
 // parameter to the server, so it is the same parameter here.
 function credentialParam(name) {
   const raw = String(name ?? '');
-  if (CREDENTIAL_PARAM.test(raw)) return true;
-  try { return CREDENTIAL_PARAM.test(decodeURIComponent(raw.replace(/\+/g, ' '))); } catch { return false; }
+  if (CREDENTIAL_STEM.test(normalizedParamName(raw))) return true;
+  try { return CREDENTIAL_STEM.test(normalizedParamName(decodeURIComponent(raw.replace(/\+/g, ' ')))); } catch { return false; }
+}
+
+// How long a value is once the server has decoded it, which is the value the floor is about: a
+// two-character value spelled out as percent-encoded pairs is still a two-character value.
+function decodedLength(value) {
+  const raw = String(value ?? '');
+  try { return decodeURIComponent(raw.replace(/\+/g, ' ')).length; } catch { return raw.length; }
 }
 
 // A Basic credential is the base64 of 'user:password', so it is recognised as one: the token
@@ -103,17 +127,26 @@ function redactBasicCredentials(text) {
 // auth=Basic <base64>" -- so the request's own values are removed by value, not by name: no
 // shape list can know the operator's spelling. A value is removed literally -- split/join above
 // the floor, an escaped pattern below it, so a regex metacharacter in a value is never read as a
-// pattern -- and the floor is applied here rather than
-// at the removal, because this is the only place that knows where the value came from: the
-// request's userinfo and the value of a credential-named query parameter are collected however
-// short they are, while every other query value, header word or free text keeps the floor. The
-// empty value is never collected: removing '' would replace every position in the diagnostic.
-export function requestSecrets(url, headers) {
-  const out = new Set();
-  const add = (value, always) => {
+// pattern -- and the floor is applied here rather than at the removal, because this is the only
+// place that knows where the value came from. Exactly what is collected:
+//   - the request's userinfo, whatever its length: it is never ordinary configuration;
+//   - the value of a credential-named query parameter, from MIN_CREDENTIAL_VALUE_CHARS up;
+//   - a credential header's value whole, and above the floor the words it splits into;
+//   - no other value at all, so an ordinary configured query value ('?sortOrder=descending',
+//     '?max_results=40') can never rewrite a published word.
+// The empty value is never collected: removing '' would replace every position in the diagnostic.
+// A credential position is also returned on its own, because the pool's candidate fields are
+// redacted against the credential values only, while a notice is redacted against every value.
+export function requestSecretSets(url, headers) {
+  const all = new Set();
+  const credentials = new Set();
+  const add = (value, credentialPosition) => {
     const v = String(value ?? '');
     if (v === '') return;
-    if (always || looksLikeValue(v)) out.add(v);
+    if (credentialPosition || looksLikeValue(v)) {
+      all.add(v);
+      if (credentialPosition) credentials.add(v);
+    }
   };
   // Every spelling of one value is collected: the decoded form a server would print after
   // decoding, the raw spelling curl actually put on the request line, and the percent-encoded
@@ -135,12 +168,21 @@ export function requestSecrets(url, headers) {
     const parsed = new URL(raw);
     addSpellings(parsed.username, true);
     addSpellings(parsed.password, true);
-    for (const [name, value] of parsed.searchParams) addSpellings(value, credentialParam(name));
+    for (const [name, value] of parsed.searchParams) {
+      if (!credentialParam(name)) continue;
+      if (value.length < MIN_CREDENTIAL_VALUE_CHARS) continue;
+      addSpellings(value, true);
+    }
     // URLSearchParams reports the decoded value, so 'token=oper+plus' arrives as 'oper plus'
-    // and the raw pair spelling is read from the query string itself.
+    // and the raw pair spelling is read from the query string itself. The floor is read from the
+    // decoded value, because that is the value the server holds.
     for (const pair of parsed.search.replace(/^\?/, '').split('&')) {
       const eq = pair.indexOf('=');
-      if (eq !== -1) addSpellings(pair.slice(eq + 1), credentialParam(pair.slice(0, eq)));
+      if (eq === -1) continue;
+      if (!credentialParam(pair.slice(0, eq))) continue;
+      const rawValue = pair.slice(eq + 1);
+      if (decodedLength(rawValue) < MIN_CREDENTIAL_VALUE_CHARS) continue;
+      addSpellings(rawValue, true);
     }
     // The Basic header curl would send is the base64 of the userinfo: a request with none
     // contributes nothing here rather than the base64 of a bare colon.
@@ -151,7 +193,11 @@ export function requestSecrets(url, headers) {
   } catch {
     const userinfo = /\/\/([^/?#\s]*)@/.exec(raw);
     if (userinfo) addSpellings(userinfo[1], true);
-    for (const m of raw.matchAll(/[?&]([^=&#\s]+)=([^&#\s]*)/g)) addSpellings(m[2], credentialParam(m[1]));
+    for (const m of raw.matchAll(/[?&]([^=&#\s]+)=([^&#\s]*)/g)) {
+      if (!credentialParam(m[1])) continue;
+      if (decodedLength(m[2]) < MIN_CREDENTIAL_VALUE_CHARS) continue;
+      addSpellings(m[2], true);
+    }
   }
   // A credential the request carried in a header is the request's own secret too: the token the
   // GitHub path sends is never in the URL, so the header value is collected whole and each of
@@ -165,13 +211,18 @@ export function requestSecrets(url, headers) {
     addSpellings(value, true);
     for (const part of String(value).split(/\s+/)) addSpellings(part);
   }
-  return [...out];
+  return { all: [...all], credentials: [...credentials] };
+}
+
+// Every value the request carried: what a notice is redacted against.
+export function requestSecrets(url, headers) {
+  return requestSecretSets(url, headers).all;
 }
 
 // A value shorter than the floor is removed only where it stands as its own token. A short value
 // the request sent is a credential wherever it is read, but below the floor it can be a letter or
 // two, and replacing every occurrence of it rewrites words the credential is not part of: a
-// request carrying '?v=on' rewrote 'content' as 'c[redacted]tent', and the notice is the run's
+// userinfo password of 'ab' would rewrite 'cabin' as 'c[redacted]in', and the notice is the run's
 // only diagnosis of a degraded source. An occurrence inside a longer word is not the value the
 // request sent, so it stays; a standalone one goes whatever its length. The boundary is the one
 // the status token uses - a word character on either side makes it part of a word.
@@ -248,8 +299,10 @@ function requirePositive(value, what) {
 // notice cannot become an unbounded server dump.
 export function shapeHttpError(status, body, url, limit, headers) {
   const source = Buffer.isBuffer(body) ? body : Buffer.from(String(body ?? ''));
+  // The snippet is notice text, and a notice is published verbatim into the Coverage note, so
+  // the markdown link seam belongs here with the rest of the notice normalisation.
   const snippet = redactSecrets(
-    plainText(decodeBuffer(source), requirePositive(limit, 'the error snippet limit in characters')),
+    neutraliseLinkSeams(plainText(decodeBuffer(source), requirePositive(limit, 'the error snippet limit in characters'))),
     requestSecrets(url, headers),
   );
   const shaped = new Error(`HTTP ${status} for ${redactUrl(url)}: ${snippet || 'no response body'}`);
@@ -439,17 +492,34 @@ const BOLD = /\*\*/g;
 const LINK_SEAM = /\]\(/g;
 
 // The vocabulary the renderer trusts, as one step with one contract: upstream text must not
-// draw a badge, a status tag, emphasis or a link on a published card. A candidate field is
-// normalised with this, and so is every notice - a notice is published text in the coverage
-// note.
+// draw a badge, a status tag or emphasis on a published card. A candidate field is normalised
+// with this. The markdown link seam below is deliberately not part of it: candidate prose is the
+// pool the digest is written from, and a GitHub release body is Markdown by construction, so its
+// links are the normal case rather than a hostile spelling.
 export function neutraliseMarkers(text) {
   return String(text)
     .replace(MARKER, ' $1 $2 ')
     .replace(MARKER_OPENER, ' $1 ')
     .replace(MARKER_OPEN, ' ')
     .replace(STATUS_FLAG, ' ')
-    .replace(BOLD, ' ')
-    .replace(LINK_SEAM, '] (');
+    .replace(BOLD, ' ');
+}
+
+// The markdown link seam, applied where notices are sanitised and nowhere else. The comment above
+// the marker vocabulary explains why the syntax has to go: a notice is published verbatim into
+// the Coverage note, a bracketed label immediately followed by a parenthesised destination is a
+// link in every markdown reader, and upstream text that merely spells the syntax would draw a
+// live anchor pointing wherever the upstream value chose. One space between the two halves ends
+// the link grammar while the rejected value stays legible - the reader still sees the brackets
+// and the destination - and nothing else moves, because only the '](' seam is rewritten: an
+// ordinary bracketed word, a parenthetical remark, and every other mark of punctuation in a
+// legitimate server message survive byte-identical. The marker rules run first, and they already
+// consume a citation's closer with its opener, so the seam a legitimate '[src:OUTLET DATE](url)'
+// carries is never reached here. A reference-style link is not a live link on its own - it needs
+// a definition line - and every caller has already turned the control bytes, newline included,
+// into a space, so the text normalised here cannot carry one.
+export function neutraliseLinkSeams(text) {
+  return String(text ?? '').replace(LINK_SEAM, '] (');
 }
 
 // The same vocabulary, in the one candidate field that is a URL rather than prose. The

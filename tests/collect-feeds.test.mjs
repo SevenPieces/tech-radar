@@ -365,3 +365,69 @@ test('a 200 answer that echoes the request credential cannot put it in a pool fi
   assert.match(pool.candidates[0].source, /^rss:https:\/\/feeds\.example\/rss\.xml/,
     'the source still labels the feed: ' + pool.candidates[0].source);
 });
+
+// TR-112 at the collector: a feed item whose description is a legitimate Markdown link is
+// published in the pool with that link intact, because a summary is candidate prose; a notice
+// built from the same collector still ends the link grammar, because a notice is published
+// verbatim into the Coverage note.
+test('a feed item keeps its markdown link in the pool while a notice carries none', async () => {
+  const body = 'Fixes a crash. See [the migration guide](https://example.com/migrate).';
+  const answering = {
+    ...ctx,
+    net: {
+      fetchText: async () => '<rss><channel><item><title>Release</title>'
+        + '<link>https://blog.example/post</link>'
+        + '<description>' + body + '</description></item></channel></rss>',
+    },
+  };
+  const { candidates } = await collectFeeds(rows, answering);
+  assert.equal(candidates[0].summary, body,
+    'the candidate summary keeps the upstream link: ' + candidates[0].summary);
+  const failing = {
+    ...ctx,
+    net: {
+      fetchText: async () => {
+        throw shapeHttpError(500, Buffer.from(body), 'https://blog.example/feed.xml', 400);
+      },
+    },
+  };
+  const { notices } = await collectFeeds(rows, failing);
+  assert.equal(notices.length, 1, 'the failed row produced one notice: ' + JSON.stringify(notices));
+  assert.doesNotMatch(notices[0], /\]\(/, 'the notice ends the link grammar: ' + notices[0]);
+  assert.match(notices[0], /\[the migration guide\] \(https:\/\/example\.com\/migrate\)/,
+    'the notice keeps the label and destination legible: ' + notices[0]);
+});
+
+// TR-109 at the collector: the six fused spellings the second sweep published verbatim, driven
+// through the real collector path with a body that echoes the query pair back.
+test('the six fused credential names keep their value out of a notice', async () => {
+  const fused = [
+    ['apikey', '1234'],
+    ['apiKey', '9911'],
+    ['accesstoken', 'ABC12'],
+    ['bearer', 'abc'],
+    ['clientsecret', 'pw22'],
+    ['subscriptionkey', '4321'],
+  ];
+  const rowsFor = fused.map(([name, value]) => ({
+    kind: 'rss',
+    target: 'https://feeds.example/rss.xml?' + name + '=' + value,
+    domain: 'languages-runtimes',
+    note: '',
+  }));
+  const failing = {
+    ...ctx,
+    net: {
+      fetchText: async (target) => {
+        const pair = new URL(target).search.slice(1);
+        throw shapeHttpError(500, Buffer.from('upstream rejected /rss.xml?' + pair), target, 400);
+      },
+    },
+  };
+  const { notices } = await collectFeeds(rowsFor, failing);
+  assert.equal(notices.length, fused.length, 'one notice per row: ' + JSON.stringify(notices));
+  for (let i = 0; i < fused.length; i++) {
+    assert.equal(notices[i].includes(fused[i][1]), false,
+      fused[i][0] + ' leaked its value into the notice: ' + notices[i]);
+  }
+});
