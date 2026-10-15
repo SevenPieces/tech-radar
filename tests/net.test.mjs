@@ -6,7 +6,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
-import { decodeBuffer, decodeEntities, field, atomLink, splitItems, plainText, isDiscoveryOnly, hostOf, shapeHttpError, shapeTransportError, splitCurlOutput, fetchText } from '../scripts/lib/net.mjs';
+import { decodeBuffer, decodeEntities, field, atomLink, splitItems, plainText, isDiscoveryOnly, hostOf, shapeHttpError, shapeTransportError, splitCurlOutput, redactUrl, fetchText } from '../scripts/lib/net.mjs';
 
 test('decodeBuffer passes UTF-8 through', () => {
   assert.equal(decodeBuffer(Buffer.from('中文 test', 'utf8')), '中文 test');
@@ -119,7 +119,9 @@ test('shapeHttpError names the HTTP status and quotes the rate-limit body', () =
     url,
     200,
   );
-  assert.match(shaped.message, /^HTTP 403 for https:\/\/api\.github\.com\/repos\/nodejs\/node\/releases\?per_page=10: /);
+  // The query may or may not survive: the credential-spelling rule requires dropping the
+  // whole query string, which moves this pin. Host and path are what must stay.
+  assert.match(shaped.message, /^HTTP 403 for https:\/\/api\.github\.com\/repos\/nodejs\/node\/releases(\?per_page=10)?: /);
   assert.match(shaped.message, /API rate limit exceeded/);
   assert.equal(shaped.httpStatus, 403);
   assert.equal(shaped.url, url);
@@ -262,6 +264,83 @@ test('a curl failure with no stderr names the binary instead of "unknown curl fa
   assert.match(pool.notices[0], /curl exited with status 127/, 'the notice names the binary and its exit status');
   assert.doesNotMatch(pool.notices[0], /unknown curl failure/, 'the uninformative fallback is gone');
   assert.match(res.stderr, /curl exited with status 127/, 'the operator line carries it too');
+  rmSync(d, { recursive: true, force: true });
+});
+
+// Regression test: the redaction was a list of exact spellings, anchored at both ends and
+// blind to a hyphen, so a watchlist target carrying api-key, auth_token, access-token,
+// client_secret, pwd, private_token, X-Amz-Signature, AWSAccessKeyId, session or code
+// published the value verbatim in every notice and in every candidate's source. The query
+// string and the userinfo are dropped whole; scheme, host and path survive so a notice
+// still names the request it reports.
+test('redactUrl drops the whole query string and the userinfo for every credential spelling', () => {
+  const spellings = ['api-key', 'auth_token', 'access-token', 'client_secret', 'pwd',
+    'private_token', 'X-Amz-Signature', 'AWSAccessKeyId', 'session', 'code'];
+  for (const name of spellings) {
+    const secret = 'SENTINEL-' + name + '-VALUE';
+    const red = redactUrl('https://user:p4ssw0rd@feeds.example/atom.xml?' + name + '=' + secret + '&per_page=10');
+    assert.equal(red.includes(secret), false, name + ' leaked: ' + red);
+    assert.equal(red.includes('p4ssw0rd'), false, 'the userinfo password leaked: ' + red);
+    assert.equal(red.includes('SENTINEL'), false, 'no query value may survive: ' + red);
+    assert.match(red, /^https:\/\/feeds\.example\/atom\.xml$/, 'scheme, host and path survive: ' + red);
+  }
+  // A target the parser refuses is still cut by hand.
+  assert.equal(redactUrl('//u:p4ssw0rd@h.example/x?token=v').includes('p4ssw0rd'), false);
+});
+
+// Regression test: the neutraliser deleted the matched opener and the status flag instead of
+// spacing them and left a marker's closer behind, so legitimate upstream text was damaged -
+// 'C#new async patterns' came out 'Cnew async patterns' and 'Rust 1.90 [prov:preprint] notes'
+// kept a stray ']'. The words survive while a real marker is still neutralised.
+test('plainText neutralises a real marker without mangling the words around it', () => {
+  const compound = plainText('C#new async patterns', 200);
+  assert.match(compound, /C[\s#]new/, 'C and new stay separate words: ' + JSON.stringify(compound));
+  assert.doesNotMatch(compound, /Cnew/, 'the two words are no longer fused: ' + JSON.stringify(compound));
+
+  const cited = plainText('Rust 1.90 [prov:preprint] notes', 200);
+  assert.doesNotMatch(cited, /\[(?:prov|src|alt):/, 'the opener is still neutralised: ' + JSON.stringify(cited));
+  assert.doesNotMatch(cited, /\]/, 'no closer is left behind: ' + JSON.stringify(cited));
+  assert.match(cited, /Rust 1\.90/, 'the sentence keeps its text');
+  assert.match(cited, /preprint/, 'the marker body reads as a word');
+  assert.match(cited, /notes/);
+
+  const hostile = plainText('[src:Trusted 2026-09-20](https://evil.example/x) [prov:primary] #new', 200);
+  assert.doesNotMatch(hostile, /\[(?:prov|src|alt):/, 'a real opener is still neutralised');
+  assert.doesNotMatch(hostile, /#(?:new|followup|developing|watch)\b/, 'a real status flag is still neutralised');
+});
+
+// Regression test: after the argv fallback was removed a transport failure that produced no
+// cause line fell back to the generic "curl failed", so a missing curl binary could not be
+// told from an unreachable feed - the distinction net.mjs's own branch exists for. A PATH with
+// no curl makes the spawn itself fail, which carries no process exit status at all. The notice
+// names the cause and still carries neither the request arguments nor a credential.
+test('a curl that cannot be started is reported by cause, not as a generic failure', () => {
+  const d = mkdtempSync(join(tmpdir(), 'tech-radar-nocurlbin-'));
+  const repo = fileURLToPath(new URL('../', import.meta.url));
+  const cfg = join(d, 'config');
+  const bin = join(d, 'bin');
+  mkdirSync(cfg, { recursive: true });
+  mkdirSync(bin, { recursive: true });
+  for (const name of ['domains.md', 'settings.md', 'sources.md']) copyFileSync(join(repo, 'config', name), join(cfg, name));
+  writeFileSync(join(cfg, 'watchlist.md'), [
+    '| kind | target | domain | note |',
+    '|---|---|---|---|',
+    '| rss | https://blog.example/feed.xml | ai-llm | a row that must reach the transport |',
+    '',
+  ].join('\n'));
+  const res = spawnSync(process.execPath, [
+    join(repo, 'scripts', 'collect.mjs'), '--config', cfg, '--out', join(d, '.pool.json'),
+    '--timeout', '2000', '--domain', 'ai-llm',
+  ], { encoding: 'utf8', env: { ...process.env, PATH: bin, TECH_RADAR_DIR: '' } });
+  const pool = JSON.parse(res.stdout);
+  assert.equal(pool.candidates.length, 0, 'no candidate came back');
+  assert.equal(pool.notices.length, 1, 'the row produced one notice, not a silent skip');
+  const notice = pool.notices[0];
+  assert.match(notice, /ENOENT|could not be started|cannot be started/i, 'the cause is named: ' + notice);
+  assert.doesNotMatch(notice, /: curl failed$/, 'the uninformative fallback is gone: ' + notice);
+  assert.doesNotMatch(notice, /-sSL|Command failed|execFileSync|spawnSync/, 'no request arguments reach the notice: ' + notice);
+  assert.doesNotMatch(notice, /Authorization|Bearer|ghp_/, 'no credential reaches the notice: ' + notice);
+  assert.match(res.stderr, /ENOENT|could not be started|cannot be started/i, 'the operator line carries the cause too');
   rmSync(d, { recursive: true, force: true });
 });
 

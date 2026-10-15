@@ -207,3 +207,36 @@ test('a credentialised watchlist target never reaches a candidate source', async
     assert.match(c.source, /^rss:.*feeds\.example/, 'the source still names the feed it came from: ' + c.source);
   }
 });
+
+// Regression test: the redaction that was added for a candidate's source was a list of exact
+// spellings, anchored at both ends and blind to a hyphen, so a target carrying api-key,
+// auth_token, access-token, client_secret, pwd, private_token, X-Amz-Signature,
+// AWSAccessKeyId, session or code reached the candidate source and the notice verbatim. The
+// query string and the userinfo are dropped whole; the host still labels the feed.
+test('every credential spelling is kept out of a candidate source and a notice', async () => {
+  const spellings = ['api-key', 'auth_token', 'access-token', 'client_secret', 'pwd',
+    'private_token', 'X-Amz-Signature', 'AWSAccessKeyId', 'session', 'code'];
+  const rowsFor = () => spellings.map((name, i) => ({
+    kind: 'rss',
+    target: 'https://feeds.example/atom.xml?' + name + '=SENTINEL-' + i + '-VALUE',
+    domain: 'languages-runtimes',
+    note: '',
+  }));
+  const answering = {
+    ...ctx,
+    net: { fetchText: async () => '<rss><channel><item><title>T</title><link>https://blog.example/a</link></item></channel></rss>' },
+  };
+  const { candidates } = await collectFeeds(rowsFor(), answering);
+  assert.equal(candidates.length, spellings.length, 'one candidate per row');
+  for (const c of candidates) {
+    assert.equal(JSON.stringify(c).includes('SENTINEL'), false, 'a query secret reached the pool: ' + JSON.stringify(c));
+    assert.match(c.source, /^rss:https:\/\/feeds\.example\/atom\.xml/, 'the source still names the host: ' + c.source);
+  }
+  const failing = { ...ctx, net: { fetchText: async () => { throw new Error('curl: (7) refused'); } } };
+  const { notices } = await collectFeeds(rowsFor(), failing);
+  assert.equal(notices.length, spellings.length, 'one notice per row');
+  for (const notice of notices) {
+    assert.equal(notice.includes('SENTINEL'), false, 'a query secret reached the notice: ' + notice);
+    assert.match(notice, /feeds\.example/, 'the notice still names the feed host: ' + notice);
+  }
+});

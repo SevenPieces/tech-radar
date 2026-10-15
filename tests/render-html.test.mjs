@@ -1,7 +1,7 @@
 // tests/render-html.test.mjs
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { existsSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
+import { chmodSync, existsSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { spawnSync } from 'node:child_process';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -769,6 +769,96 @@ test('the renderer usage names the script-relative config default', () => {
 // examples/sample-digest.html was never regenerated, so the shipped artifact still
 // demonstrated the old bug. Rendering the shipped Markdown with the shipped renderer
 // must reproduce the shipped HTML byte for byte.
+
+// --- the status tag, the artifact's atomicity and the self-containment predicate ---------
+
+// Regression test: the status tag took the last token of any kind while the gate and the
+// state merge take the last new|followup token, so a #new item carrying an additive flag was
+// published with a "developing" tag that contradicted the digest it renders.
+test('the status tag is the last #new or #followup token, in either order', () => {
+  const digestWith = (tags) => [
+    '# Tech Radar — 2026-09-23',
+    '_Covering 2026-09-16 08:00 to 2026-09-23 08:00 (Asia/Shanghai) · cap not hit_',
+    '',
+    '## Core domains',
+    '### AI / LLM · 人工智能 / 大模型',
+    '- **A model shipped** — Why it matters. [src:Hugging Face blog 2026-09-20](https://huggingface.co/blog/x) [prov:primary] ' + tags,
+    '',
+    '## Watch domains — quiet',
+    'Quantum technologies (scanned, nothing notable)',
+  ].join('\n');
+  const shown = (tags) => {
+    const html = render(digestWith(tags), config);
+    return { fresh: /class="tag t-new"/.test(html), developing: /class="tag t-developing"/.test(html) };
+  };
+  const additiveAfter = shown('#new #developing');
+  assert.equal(additiveAfter.fresh, true, 'a #new item keeps its new tag');
+  assert.equal(additiveAfter.developing, false, 'an additive flag does not win the tag');
+  const additiveBefore = shown('#developing #new');
+  assert.equal(additiveBefore.fresh, true, 'the flag resolves the same in either order');
+  assert.equal(additiveBefore.developing, false, 'an additive flag does not win the tag');
+});
+
+// Regression test: the renderer wrote its deliverable in place, so a failed or interrupted
+// write destroyed the previous digest - the atomic temp-then-rename the state writer uses had
+// never reached this writer. A replacement is published by a rename, and a refused write
+// leaves the previous artifact intact with no temp behind.
+test('the renderer replaces its deliverable atomically', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'tech-radar-atomic-render-'));
+  const quiet = { log: () => {}, error: () => {} };
+  try {
+    const input = join(dir, 'digest.md');
+    const out = join(dir, 'digest.html');
+    writeFileSync(input, md);
+    writeFileSync(out, 'the previous deliverable\n');
+    const before = statSync(out).ino;
+    assert.equal(run([input, '--out', out], quiet), 0, 'the render succeeds');
+    assert.notEqual(statSync(out).ino, before,
+      'the deliverable is published by a rename, not truncated in place');
+    const published = readFileSync(out, 'utf8');
+    chmodSync(out, 0o444);
+    try {
+      const refused = run([input, '--out', out], quiet);
+      if (refused !== 0) {
+        assert.equal(refused, 4, 'a refused write is the documented output exit');
+        assert.equal(readFileSync(out, 'utf8'), published, 'the previous deliverable survives intact');
+      }
+    } finally {
+      chmodSync(out, 0o644);
+    }
+    const leftovers = readdirSync(dir).filter((name) => name !== 'digest.md' && name !== 'digest.html');
+    assert.deepEqual(leftovers, [], 'no temp file is left behind: ' + leftovers.join(', '));
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+// Regression test: the tag regex stopped at the first '>', so a quoted attribute value
+// containing one hid every attribute after it; the rel list knew only stylesheet, preload and
+// icon; and an empty value was read as a URL. Each evasion must be seen, and an empty value
+// must not be - an empty URL fetches the document itself.
+test('externalAssets sees what a quoted value, a longer rel list and an empty value hide', () => {
+  const evasions = [
+    ['a quoted value containing ">" before src', '<img alt="x>" src="//evil.example/x.png">'],
+    ['a quoted value containing ">" before a script src', '<script data-x="a>b" src="//evil.example/a.js"></script>'],
+    ['rel=apple-touch-icon', '<link rel="apple-touch-icon" href="//evil.example/a.png">'],
+    ['rel=modulepreload', '<link rel="modulepreload" href="//evil.example/a.js">'],
+    ['rel=mask-icon', '<link rel="mask-icon" href="//evil.example/a.svg">'],
+    ['rel=manifest', '<link rel="manifest" href="//evil.example/a.webmanifest">'],
+  ];
+  for (const [what, html] of evasions) {
+    assert.equal(externalAssets(html), true, what + ' must count as an external asset: ' + html);
+  }
+  for (const benign of [
+    '<img src="" alt="x">',
+    '<img src alt="x">',
+    '<link rel="canonical" href="https://h.example/x">',
+    '<a class="src" href="https://h.example/x">a citation</a>',
+  ]) {
+    assert.equal(externalAssets(benign), false, 'an empty value or a citation is not an asset: ' + benign);
+  }
+});
+
 test('the shipped example renders byte for byte to the shipped artifact', () => {
   const writes = [];
   const errors = [];

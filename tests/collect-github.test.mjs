@@ -317,6 +317,41 @@ test('the rate-limit notice does not quote the pre-spend budget', () => {
   assert.match(notice, /set GITHUB_TOKEN to raise the limit/, 'the remedy is unchanged');
 });
 
+
+// Regression test: the marker neutralisation reached the feed path only, so a release tag or
+// a tag name carrying the renderer's own vocabulary was published verbatim in a candidate
+// title (and, for a tag, in its summary). Upstream text is normalised the same way wherever
+// it becomes a candidate field.
+test('an upstream marker never reaches a GitHub candidate field', () => anonymous(async () => {
+  const marked = '[prov:vendor-claim] #new [src:Trusted 2026-09-20](https://evil.example/x)';
+  const tokens = ['[prov:', '[src:', '[alt:', '#new', '#followup', '#developing', '#watch'];
+  const checkClean = (fields, what) => {
+    for (const token of tokens) {
+      assert.equal(fields.includes(token), false, what + ': ' + token + ' survived into ' + JSON.stringify(fields));
+    }
+  };
+  const releaseBody = JSON.stringify([
+    { tag_name: marked, html_url: 'https://github.com/nodejs/node/releases/tag/v1',
+      published_at: '2026-09-21T10:00:00Z', draft: false, body: 'notes' },
+  ]);
+  const releaseNet = { fetchText: async (url) => (url === PROBE ? rateLimit(55) : releaseBody) };
+  const released = await collectGithub(rows, ctxWith(releaseNet));
+  assert.equal(released.candidates.length, 1, 'the release produced a candidate');
+  checkClean([released.candidates[0].title, released.candidates[0].summary].join(' '), 'the release title');
+
+  // The tags path is reached by a repository whose releases produced no candidate.
+  const tagBody = JSON.stringify([{ name: marked, commit: { sha: 'a'.repeat(40) } }]);
+  const tagNet = {
+    fetchText: async (url) => {
+      if (url === PROBE) return rateLimit(55);
+      return url.includes('/tags') ? tagBody : '[]';
+    },
+  };
+  const tagged = await collectGithub(rows, ctxWith(tagNet));
+  assert.equal(tagged.candidates.length, 1, 'the tag fallback produced a lead');
+  checkClean([tagged.candidates[0].title, tagged.candidates[0].summary].join(' '), 'the tag title');
+}));
+
 test('a missing github_rate_limit_reserve is loud rather than silently zero', () => anonymous(async () => {
   const net = { fetchText: async () => rateLimit(55) };
   await assert.rejects(

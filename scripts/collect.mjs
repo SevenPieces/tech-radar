@@ -4,7 +4,8 @@
 // Produces the candidate pool of design §4.1 from config/watchlist.md. It never
 // ranks or scores: judgement stays with the agent. A failing source becomes a
 // notice, never a thrown error and never a silent skip.
-import { mkdirSync, writeFileSync } from 'node:fs';
+import { randomBytes } from 'node:crypto';
+import { mkdirSync, renameSync, unlinkSync, writeFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { readConfig } from './lib/mdtable.mjs';
@@ -20,11 +21,28 @@ const DEFAULT_CONFIG = fileURLToPath(new URL('../config/', import.meta.url));
 // One base for every GitHub endpoint the collector uses, the rate-limit probe included.
 const GITHUB_API = 'https://api.github.com';
 
+// An upstream body is arbitrary bytes, and Node quotes the offending character in the
+// message it raises for a JSON parse failure, so a notice built from that message used to
+// carry a raw ESC (or NUL, or BS) into stdout, stderr and the published pool. Every notice
+// is normalised at the single push: a whitespace control becomes a space, every other C0,
+// C1 and DEL byte is dropped, and the text is bounded so one hostile response cannot become
+// an unbounded notice.
+const NOTICE_CONTROLS = /[\u0000-\u001f\u007f-\u009f]/g;
+const NOTICE_MAX_CHARS = 1000;
+function sanitizeNotice(text) {
+  return String(text)
+    .replace(NOTICE_CONTROLS, (ch) => (/\s/.test(ch) ? ' ' : ''))
+    .slice(0, NOTICE_MAX_CHARS);
+}
+function pushNotice(notices, text) {
+  notices.push(sanitizeNotice(text));
+}
+
 // The Go module proxy protocol case-encodes a module path: every uppercase letter is
 // written as '!' followed by its lowercase form, so github.com/BurntSushi/toml is
 // requested as github.com/!burnt!sushi/toml. Probed live: unescaped 404 "invalid
 // escaped module path", escaped 200.
-export function goModulePath(path) {
+function goModulePath(path) {
   return String(path).replace(/[A-Z]/g, (ch) => `!${ch.toLowerCase()}`);
 }
 
@@ -88,7 +106,7 @@ export function parseArgs(argv) {
   return out;
 }
 
-export function flag(argv, name) {
+function flag(argv, name) {
   return argv.includes(name);
 }
 
@@ -101,8 +119,8 @@ export function flag(argv, name) {
 const SOURCE_SETTINGS = {
   rss: ['title_max_chars', 'summary_max_chars', 'error_snippet_max_chars'],
   'arxiv-category': ['arxiv_max_results', 'title_max_chars', 'summary_max_chars', 'error_snippet_max_chars'],
-  'github-repo': ['github_releases_per_repo', 'github_tags_per_repo', 'summary_max_chars', 'error_snippet_max_chars'],
-  'github-org': ['github_org_repos', 'github_releases_per_repo', 'github_tags_per_repo', 'summary_max_chars', 'error_snippet_max_chars'],
+  'github-repo': ['github_releases_per_repo', 'github_tags_per_repo', 'title_max_chars', 'summary_max_chars', 'error_snippet_max_chars'],
+  'github-org': ['github_org_repos', 'github_releases_per_repo', 'github_tags_per_repo', 'title_max_chars', 'summary_max_chars', 'error_snippet_max_chars'],
   ghsa: ['ghsa_page_size', 'summary_max_chars', 'error_snippet_max_chars'],
   nvd: ['summary_max_chars', 'error_snippet_max_chars'],
   npm: ['error_snippet_max_chars'],
@@ -114,7 +132,7 @@ const SOURCE_SETTINGS = {
 // The keys this run will read: what main resolves before it dispatches, plus what the
 // selected rows' sources read. A configuration that carries only the settings its own rows
 // need stays legal.
-export function requiredSettingKeys(rows, options) {
+function requiredSettingKeys(rows, options) {
   const keys = new Set();
   if (!options.since) keys.add('window_cap_weeks');
   if (!options.timeout) keys.add('request_timeout_ms');
@@ -124,7 +142,7 @@ export function requiredSettingKeys(rows, options) {
   return keys;
 }
 
-export function validateSettings(settings, rows, options) {
+function validateSettings(settings, rows, options) {
   for (const key of requiredSettingKeys(rows, options)) {
     const n = Number(settings?.[key]);
     if (!Number.isInteger(n) || n <= 0) {
@@ -145,15 +163,17 @@ export function validateSettings(settings, rows, options) {
 // from configuration instead of a literal.
 export function resolveOut(options, settings) {
   if (options.out) return options.out;
-  // A settings file without output_dir reached join() as undefined and left main() as an
-  // uncaught TypeError: a bare exit 1 with a stack trace instead of the named exit 2 every
-  // other missing setting produces. The environment override decides the directory, never
-  // whether the configuration is valid, so it cannot mask a missing setting.
+  // The documented precedence: the environment override decides the directory, then
+  // output_dir from the configuration. An exported-but-empty variable is not a usable
+  // directory, so it falls through, and only then is a missing output_dir the named exit 2
+  // that every other missing setting produces (a settings file without the row reached
+  // join() as undefined and left main() with an uncaught TypeError and a stack trace).
+  const override = String(process.env.TECH_RADAR_DIR ?? '').trim();
+  if (override !== '') return join(override, '.pool.json');
   if (settings.output_dir === undefined || String(settings.output_dir).trim() === '') {
     throw new Error('output_dir is missing or invalid in config/settings.md');
   }
-  const dir = process.env.TECH_RADAR_DIR || settings.output_dir;
-  return join(dir, '.pool.json');
+  return join(settings.output_dir, '.pool.json');
 }
 
 // The per-request timeout is configuration too: an explicit --timeout wins, otherwise
@@ -200,7 +220,7 @@ async function runSource(name, rows, fn, ctx, acc) {
     acc.candidates.push(...res.candidates);
     acc.notices.push(...(res.notices ?? []));
   } catch (err) {
-    acc.notices.push(`${name}: ${err.message}`);
+    acc.notices.push(sanitizeNotice(`${name}: ${err.message}`));
   }
 }
 
@@ -228,11 +248,11 @@ export async function collectGithub(rows, ctx) {
   try {
     budget = coreBudget(JSON.parse(await get(`${GITHUB_API}/rate_limit`)));
   } catch (err) {
-    notices.push(`github: rate limit could not be checked (${err.message}); ${uncheckedPhraseFor(rows)}`);
+    pushNotice(notices, `github: rate limit could not be checked (${err.message}); ${uncheckedPhraseFor(rows)}`);
     return { candidates, notices };
   }
   if (budget.remaining === null) {
-    notices.push(`github: rate limit could not be checked (the probe reported no core budget); ${uncheckedPhraseFor(rows)}`);
+    pushNotice(notices, `github: rate limit could not be checked (the probe reported no core budget); ${uncheckedPhraseFor(rows)}`);
     return { candidates, notices };
   }
   // The budget is spent in requests, in a fixed order: one listing per organisation,
@@ -261,7 +281,7 @@ export async function collectGithub(rows, ctx) {
       if (!Array.isArray(body)) throw new Error('unexpected response shape');
       for (const repo of body) if (repo.full_name) targets.push({ target: repo.full_name, domain: row.domain });
     } catch (err) {
-      notices.push(`github ${row.target}: ${err.message}`);
+      pushNotice(notices, `github ${row.target}: ${err.message}`);
     }
   }
 
@@ -285,7 +305,7 @@ export async function collectGithub(rows, ctx) {
         candidates.push({
           domain: t.domain,
           kind: 'github-release',
-          title: `${t.target} ${rel.tag_name}`,
+          title: plainText(`${t.target} ${rel.tag_name}`, s.title_max_chars),
           url: rel.html_url,
           publishedAt,
           source: `github:${t.target}`,
@@ -294,7 +314,7 @@ export async function collectGithub(rows, ctx) {
         });
       }
     } catch (err) {
-      notices.push(`github ${t.target}: ${err.message}`);
+      pushNotice(notices, `github ${t.target}: ${err.message}`);
       continue;
     }
     if (candidates.length === before) tagFallbacks.push(t);
@@ -317,23 +337,23 @@ export async function collectGithub(rows, ctx) {
         candidates.push({
           domain: t.domain,
           kind: 'github-tag',
-          title: `${t.target} ${tag.name}`,
+          title: plainText(`${t.target} ${tag.name}`, s.title_max_chars),
           url: `https://github.com/${t.target}/releases/tag/${encodeURIComponent(tag.name)}`,
           publishedAt: null,
           undated: true, // a lead, never a window match: the tags payload has no date
           source: `github-tags:${t.target}`,
           tierHint: 'primary',
-          summary: `Tag ${tag.name} at commit ${tag.commit.sha}; the tags API carries no date`,
+          summary: plainText(`Tag ${tag.name} at commit ${tag.commit.sha}; the tags API carries no date`, s.summary_max_chars),
         });
         tagLeads += 1;
       }
     } catch (err) {
-      notices.push(`github-tags ${t.target}: ${err.message}`);
+      pushNotice(notices, `github-tags ${t.target}: ${err.message}`);
     }
   }
 
   if (tagLeads > 0) {
-    notices.push(`github-tags: ${tagLeads} undated tag ${tagLeads === 1 ? 'lead' : 'leads'} carried `
+    pushNotice(notices, `github-tags: ${tagLeads} undated tag ${tagLeads === 1 ? 'lead' : 'leads'} carried `
       + '(the tags API has no date, so they cannot be window-filtered)');
   }
   if (shortfall.repos || shortfall.orgs || shortfall.tags) {
@@ -343,7 +363,7 @@ export async function collectGithub(rows, ctx) {
     // that already reports a partial budget keeps its reading.
     const fresh = budget.limit !== null && budget.remaining === budget.limit;
     const reported = fresh ? { ...budget, reserve, spent: charged.count } : budget;
-    notices.push(budgetNotice(reported, shortfall, Boolean(token)));
+    pushNotice(notices, budgetNotice(reported, shortfall, Boolean(token)));
   }
   return { candidates, notices };
 }
@@ -362,7 +382,7 @@ export async function collectArxiv(rows, ctx) {
       // A capped listing is not a complete one: the window cannot be enforced for this
       // source past the cap, so the run says so instead of looking complete.
       if (entries.length >= cap) {
-        notices.push(`arxiv ${row.target}: listing capped at ${cap} entries; older items inside the window may be missing`);
+        pushNotice(notices, `arxiv ${row.target}: listing capped at ${cap} entries; older items inside the window may be missing`);
       }
       for (const entry of entries) {
         const link = atomLink(entry);
@@ -382,7 +402,7 @@ export async function collectArxiv(rows, ctx) {
         });
       }
     } catch (err) {
-      notices.push(`arxiv ${row.target}: ${err.message}`);
+      pushNotice(notices, `arxiv ${row.target}: ${err.message}`);
     }
   }
   return { candidates, notices };
@@ -392,7 +412,7 @@ export async function collectArxiv(rows, ctx) {
 // answers with a local file at exit 0 and status 200, and a target beginning with '-' is
 // read as an option. Only http and https are fetched, so every other row becomes a notice
 // instead of a candidate and never reaches the fetcher.
-export function fetchableTarget(target) {
+function fetchableTarget(target) {
   const value = String(target ?? '').trim();
   if (value === '' || value.startsWith('-')) return false;
   try {
@@ -407,7 +427,7 @@ export async function collectFeeds(rows, ctx) {
   for (const row of rows) {
     const target = String(row.target ?? '').trim();
     if (!fetchableTarget(target)) {
-      notices.push(`rss ${redactUrl(target) || '(empty target)'}: unsupported scheme (only http and https are fetched)`);
+      pushNotice(notices, `rss ${redactUrl(target) || '(empty target)'}: unsupported scheme (only http and https are fetched)`);
       continue;
     }
     try {
@@ -434,7 +454,7 @@ export async function collectFeeds(rows, ctx) {
         });
       }
     } catch (err) {
-      notices.push(`rss ${redactUrl(target)}: ${err.message}`);
+      pushNotice(notices, `rss ${redactUrl(target)}: ${err.message}`);
     }
   }
   return { candidates, notices };
@@ -561,7 +581,7 @@ export async function collectRegistries(rows, ctx) {
   const notices = [];
   for (const row of rows) {
     const spec = REGISTRY[row.kind];
-    if (!spec) { notices.push(`registry unknown kind ${row.kind}`); continue; }
+    if (!spec) { pushNotice(notices, `registry unknown kind ${row.kind}`); continue; }
     try {
       const json = JSON.parse(await ctx.net.fetchText(spec.url(row.target), ctx.timeout, {}, ctx.settings.user_agent, ctx.settings.error_snippet_max_chars));
       const { version, at } = spec.read(json);
@@ -569,7 +589,7 @@ export async function collectRegistries(rows, ctx) {
       // A registry release whose release time cannot be established is a notice, not an
       // undated "release" that passes every window.
       if (!publishedAt) {
-        notices.push(`${row.kind} ${row.target}: no release time for ${version || 'the latest version'}; candidate skipped`);
+        pushNotice(notices, `${row.kind} ${row.target}: no release time for ${version || 'the latest version'}; candidate skipped`);
         continue;
       }
       if (ctx.since && publishedAt < ctx.since) continue;
@@ -585,7 +605,7 @@ export async function collectRegistries(rows, ctx) {
         summary: `New ${row.kind} release ${version}`,
       });
     } catch (err) {
-      notices.push(`${row.kind} ${row.target}: ${err.message}`);
+      pushNotice(notices, `${row.kind} ${row.target}: ${err.message}`);
     }
   }
   return { candidates, notices };
@@ -609,7 +629,8 @@ export async function collectAdvisories(rows, ctx) {
           if (ctx.since && publishedAt && publishedAt < ctx.since) continue;
           if (ctx.until && publishedAt && publishedAt > ctx.until) continue;
           candidates.push({
-            domain: row.domain, kind: 'advisory', title: a.ghsa_id || a.summary,
+            domain: row.domain, kind: 'advisory',
+            title: plainText(String(a.ghsa_id || a.summary || ''), ctx.settings.summary_max_chars),
             url: a.html_url, publishedAt, source: 'ghsa', tierHint: 'primary',
             summary: plainText(a.summary ?? '', ctx.settings.summary_max_chars),
           });
@@ -635,7 +656,7 @@ export async function collectAdvisories(rows, ctx) {
         }
       }
     } catch (err) {
-      notices.push(`${row.kind}: ${err.message}`);
+      pushNotice(notices, `${row.kind}: ${err.message}`);
     }
   }
   return { candidates, notices };
@@ -685,16 +706,34 @@ export function noticeWarning(count) {
     + `the digest's Coverage note must report them; Collector notices: ${count}`;
 }
 
-// The one line an operator sees for a degraded run. A notice that ends in curl's own exit
-// status is a transport failure that produced no diagnostic of its own -- curl never ran --
-// so the line repeats that reason: a broken dependency should not require reading the pool.
-export function operatorWarning(notices) {
+// The one line an operator sees for a degraded run. A transport failure that produced no
+// diagnostic of its own -- curl never started, or curl ran and said nothing -- ends in its
+// cause, so the line repeats that reason: a broken dependency should not require reading the
+// pool to be seen.
+const TRANSPORT_TAIL = /(curl exited with status \d+|curl could not be started \([^)]+\))$/;
+function operatorWarning(notices) {
   const line = noticeWarning(notices.length);
   for (const notice of notices) {
-    const m = /curl exited with status \d+$/.exec(String(notice));
+    const m = TRANSPORT_TAIL.exec(String(notice));
     if (m) return `${line} (${m[0]})`;
   }
   return line;
+}
+
+// A replacement is published by a rename, so a refused or interrupted write leaves the
+// previous pool intact rather than truncated. The temp name is unique and created
+// exclusively, so a pre-planted path is never followed, and it is removed on every failure.
+function writeAtomic(out, text) {
+  const dir = dirname(out);
+  if (dir) mkdirSync(dir, { recursive: true });
+  const tmp = `${out}.${process.pid}.${randomBytes(6).toString('hex')}.tmp`;
+  try {
+    writeFileSync(tmp, text, { flag: 'wx' });
+    renameSync(tmp, out);
+  } catch (err) {
+    try { unlinkSync(tmp); } catch { /* the temp was never created */ }
+    throw err;
+  }
 }
 
 export function humanSummary(pool) {
@@ -790,9 +829,7 @@ export async function main(argv = process.argv.slice(2)) {
     return 1;
   }
   try {
-    const dir = dirname(out);
-    if (dir) mkdirSync(dir, { recursive: true });
-    writeFileSync(out, `${JSON.stringify(pool, null, 2)}\n`);
+    writeAtomic(out, `${JSON.stringify(pool, null, 2)}\n`);
   } catch (err) {
     console.error(`collect: cannot write ${out}: ${err.message}`);
     process.exitCode = 4;

@@ -1,7 +1,7 @@
 // tests/state-merge.test.mjs
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { chmodSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, utimesSync, writeFileSync } from 'node:fs';
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync, symlinkSync, utimesSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { spawn } from 'node:child_process';
@@ -101,8 +101,11 @@ test('the run log records the clamped catch-up window, not the raw floor', () =>
   const state = JSON.parse(readFileSync(statePath, 'utf8'));
   const window = state.runs[0].window;
   assert.ok(window.since > '2026-01-01T00:00:00.000Z', 'the raw floor must not be recorded');
-  const capFloor = new Date(Date.now() - 28 * 864e5).toISOString();
-  assert.equal(window.since.slice(0, 10), capFloor.slice(0, 10), 'clamped by window_cap_weeks like plan');
+  // The run's own clock, not the test's: the merge stamped window.until, so the floor it
+  // clamped to is that instant minus the cap. Reading Date.now() here could land on the
+  // other side of UTC midnight from the instant the merge used.
+  const capFloor = new Date(Date.parse(window.until) - 28 * 864e5).toISOString();
+  assert.equal(window.since, capFloor, 'clamped by window_cap_weeks like plan');
 });
 // Regression test: the cap was inert unless the value happened to
 // be a number, and nothing asserted that it trims anything.
@@ -669,6 +672,124 @@ test('an update killed while it holds the lock does not block the next one', asy
     assert.deepEqual(state.runs.map((r) => r.date), ['2026-09-23'], 'only the surviving run is merged');
   } finally {
     rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+// --- the state is a file on disk: mode, temp path, and the lock's real subject ----------
+
+// Regression test: the atomic write created its temp file with the process default and
+// renamed it over the destination, so a state the operator had protected came back with the
+// default mode - the plain write it replaced preserved the file's own permissions.
+test('an update preserves the mode of the state file it replaces', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'tech-radar-mode-'));
+  try {
+    const f = updateFixture(dir);
+    writeFileSync(f.itemsPath, JSON.stringify([item]));
+    chmodSync(f.statePath, 0o600);
+    assert.equal(statSync(f.statePath).mode & 0o777, 0o600, 'the fixture starts at 0600');
+    const res = runCli(['update', '--state', f.statePath, '--items', f.itemsPath,
+      '--out', f.statePath, '--date', '2026-09-23', '--config', f.configDir]);
+    assert.equal(res.code, 0, res.errs);
+    assert.equal(statSync(f.statePath).mode & 0o777, 0o600, 'a 0600 state stays 0600 after an update');
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+// Regression test: the temp path was the destination plus a fixed suffix, and the write
+// followed whatever path was already there. A symlink planted at <out>.tmp made the update
+// write the merged state into the link's target, destroying a file it was never pointed at.
+// The temp has to be created exclusively, under a name nothing can pre-plant.
+test('a symlink planted at the temp path is not followed', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'tech-radar-symlink-'));
+  try {
+    const f = updateFixture(dir);
+    writeFileSync(f.itemsPath, JSON.stringify([item]));
+    const victim = join(dir, 'victim.txt');
+    const victimBody = 'a file the update was never pointed at\n';
+    writeFileSync(victim, victimBody);
+    symlinkSync(victim, f.statePath + '.tmp');
+    const res = runCli(['update', '--state', f.statePath, '--items', f.itemsPath,
+      '--out', f.statePath, '--date', '2026-09-23', '--config', f.configDir]);
+    assert.equal(readFileSync(victim, 'utf8'), victimBody, 'the symlink target is untouched');
+    assert.equal(readFileSync(f.statePath, 'utf8'), f.body,
+      'neither did the write land on the state: ' + res.errs);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+// Regression test: the lock was taken on --state while the merge writes --out, so two
+// updates naming different states and one shared destination did not exclude each other and
+// the later write silently dropped the earlier run. The lock has to guard the file that is
+// written.
+test('the update lock guards the destination it writes, not only --state', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'tech-radar-out-lock-'));
+  try {
+    const f = updateFixture(dir);
+    writeFileSync(f.itemsPath, JSON.stringify([item]));
+    const shared = join(dir, 'shared.json');
+    const lock = plantLock(shared, { pid: process.pid });
+    assert.equal(alive(process.pid), true, 'the lock names this live test process');
+    const res = runCli(['update', '--state', f.statePath, '--items', f.itemsPath,
+      '--out', shared, '--date', '2026-09-23', '--config', f.configDir]);
+    assert.equal(res.code, 2, 'a lock on the destination must refuse the update: ' + res.errs);
+    assert.match(res.errs, new RegExp(lock.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')),
+      'the refusal names the lock it found: ' + res.errs);
+    assert.equal(existsSync(shared), false, 'nothing is written to the locked destination');
+    assert.equal(readFileSync(f.statePath, 'utf8'), f.body, 'the state file is untouched');
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+// Regression test: the lock was created before the state was read, and creating it under a
+// directory that does not exist failed with ENOENT, so an update naming a state in a missing
+// directory exited 2 blaming the lock - where the write it really could not do is what the
+// baseline reported. Nothing needs serialising when the directory is not there.
+test('an update whose state directory does not exist reports the real cause, not the lock', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'tech-radar-missing-dir-'));
+  try {
+    const configDir = writeConfig(dir);
+    const itemsPath = join(dir, 'items.json');
+    writeFileSync(itemsPath, '[]');
+    const missing = join(dir, 'no-such-dir', 'state.json');
+    const res = runCli(['update', '--state', missing, '--items', itemsPath,
+      '--out', missing, '--date', '2026-09-23', '--config', configDir]);
+    assert.doesNotMatch(res.errs, /cannot lock/, 'the lock must not be blamed: ' + res.errs);
+    assert.equal(res.code, 4, 'the missing directory is an output that could not be written: ' + res.errs);
+    assert.match(res.errs, /cannot write/, 'the refusal names the write that failed: ' + res.errs);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+// Regression test: only the four containers and the runs entries were validated, so a null
+// watchlist entry died with a raw TypeError, an empty watchlist entry was dropped in silence
+// at exit 0, a null items entry died the same way, and a watermark that is not a date made
+// plan die with "Invalid time value" while update rewrote the value it could not read. Every
+// entry is validated with a named message now, before anything is written.
+test('malformed state entries are refused with a named message and no rewrite', () => {
+  const cases = [
+    ['a null watchlist entry', '{"watchlist":[null]}', /watchlist/i],
+    ['an empty watchlist entry', '{"watchlist":[{}]}', /watchlist/i],
+    ['a null items entry', '{"items":{"k":null}}', /items/i],
+    ['a watermark that is not a date', '{"domains":{"ai-llm":{"lastCoveredAt":"nonsense"}}}', /lastCoveredAt|domains/i],
+  ];
+  for (const [name, body, named] of cases) {
+    const dir = mkdtempSync(join(tmpdir(), 'tech-radar-entries-'));
+    try {
+      const f = updateFixture(dir, body);
+      writeFileSync(f.itemsPath, '[]');
+      const res = runCli(['update', '--state', f.statePath, '--items', f.itemsPath,
+        '--out', f.statePath, '--date', '2026-09-23', '--config', f.configDir]);
+      assert.equal(res.code, 2, name + ': ' + res.errs);
+      assert.match(res.errs, named, name + ': the refusal names what is malformed: ' + res.errs);
+      assert.doesNotMatch(res.errs, /TypeError|Invalid time value/, name + ': no raw JS error: ' + res.errs);
+      assert.equal(readFileSync(f.statePath, 'utf8'), f.body, name + ': the state is not rewritten');
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
   }
 });
 

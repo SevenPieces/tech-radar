@@ -222,6 +222,53 @@ test('a PyPI release with no files has no release time and is skipped with a not
   assert.match(notices[0], /^pypi ghost: no release time for 3\.0\.0/);
 });
 
+// Regression test: the registry and advisory collectors push a JSON parse error straight into
+// a notice, and Node quotes the offending character in that message, so a response body of
+// control bytes put a raw ESC (and NUL, and BS) into the notice, the pool, stderr and the
+// --human output. The single notice push strips and bounds the controls now, whatever
+// produced the message.
+test('a response of control bytes yields no control code point in any notice', async () => {
+  const hostile = '\u001b[2K\u001b[31mFORGED-ALERT-LINE\u001b[0m\u0000\u0008';
+  const spy = { ...ctx, net: { fetchText: async () => hostile } };
+  const registries = await collectRegistries(
+    [{ kind: 'npm', target: 'typescript', domain: 'languages-runtimes' }], spy,
+  );
+  const advisories = await collectAdvisories(
+    [{ kind: 'ghsa', target: 'all', domain: 'security-privacy' }], spy,
+  );
+  const notices = [...registries.notices, ...advisories.notices];
+  assert.ok(notices.length >= 2, 'both paths reported the failure: ' + JSON.stringify(notices));
+  for (const notice of notices) {
+    const offenders = [...notice].filter((ch) => {
+      const cp = ch.codePointAt(0);
+      return cp < 0x20 || (cp >= 0x7f && cp <= 0x9f);
+    });
+    assert.deepEqual(offenders, [], 'control code points survived: ' + JSON.stringify(notice));
+  }
+});
+
+// Regression test: the GHSA candidate title was built from the advisory's own text with no
+// neutralisation, so an advisory summary carrying the renderer's vocabulary reached the
+// published pool as a title that could draw badges on the rendered card.
+test('an advisory title carrying the marker vocabulary is neutralised', async () => {
+  const marked = '[prov:vendor-claim] #new [src:Trusted 2026-09-20](https://evil.example/x)';
+  const spy = {
+    ...ctx,
+    net: {
+      fetchText: async () => JSON.stringify([
+        { ghsa_id: '', html_url: 'https://github.com/advisories/GHSA-aaaa-bbbb-cccc',
+          published_at: '2026-09-21T12:00:00Z', summary: marked },
+      ]),
+    },
+  };
+  const { candidates } = await collectAdvisories([{ kind: 'ghsa', target: 'all', domain: 'security-privacy' }], spy);
+  assert.equal(candidates.length, 1, 'the advisory produced a candidate');
+  const fields = [candidates[0].title, candidates[0].summary].join(' ');
+  for (const token of ['[prov:', '[src:', '[alt:', '#new', '#followup', '#developing', '#watch']) {
+    assert.equal(fields.includes(token), false, token + ' survived into ' + JSON.stringify(fields));
+  }
+});
+
 test('a Go module path is case-escaped for the proxy', async () => {
   let seen = '';
   const goCtx = {

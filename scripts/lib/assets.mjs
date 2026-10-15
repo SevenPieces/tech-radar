@@ -19,6 +19,11 @@ const REMOTE_URL = /\burl\(\s*["']?(?:https?:)?\/\//i;
 // value. Worth a full tokeniser because '/' separates attributes just as whitespace does.
 const ATTR = /([^\s/=>]+)(?:\s*=\s*(?:"([^"]*)"|'([^']*)'|([^\s>]*)))?/g;
 
+// A tag: a name, then everything up to the first '>' that closes it. A quoted value may
+// contain a '>' of its own, so a quoted run is consumed as a unit; an unquoted value ends at
+// the first '>', exactly as a browser ends the tag.
+const TAG = /<([a-z][a-z0-9-]*)((?:"[^"]*"|'[^']*'|[^>"'])*)>/gi;
+
 // A tag whose attribute loads a network resource: the element name decides which
 // attributes are resource references.
 const RESOURCE_ATTRS = {
@@ -39,8 +44,10 @@ const RESOURCE_ATTRS = {
 };
 
 // A link fetches only when its rel names something the browser pulls in. canonical,
-// alternate and preconnect name relationships, not resources, so they stay content.
-const LINK_RELS = new Set(['stylesheet', 'preload', 'icon']);
+// alternate and preconnect name relationships, not resources, so they stay content. An
+// installed-page icon and a preloaded module are fetches like any other.
+const LINK_RELS = new Set(['stylesheet', 'preload', 'modulepreload', 'icon',
+  'apple-touch-icon', 'mask-icon', 'manifest']);
 
 function attrsOf(region) {
   const out = {};
@@ -82,7 +89,7 @@ function refreshTarget(value) {
 
 export function externalAssets(html) {
   const text = String(html);
-  for (const tag of text.matchAll(/<([a-z][a-z0-9-]*)([^>]*)>/gi)) {
+  for (const tag of text.matchAll(TAG)) {
     const name = tag[1].toLowerCase();
     const attrs = attrsOf(tag[2]);
 
@@ -90,7 +97,9 @@ export function externalAssets(html) {
     if (resourceAttrs) {
       for (const attr of resourceAttrs) {
         const value = attrs[attr];
-        if (value === undefined) continue;
+        // An absent attribute, and an empty one, name no resource: a bare src="" fetches the
+        // document itself, so it is not an external asset.
+        if (value === undefined || value === '') continue;
         if (attr === 'srcset') { if (!srcsetIsInline(value)) return true; }
         else if (!isInline(value)) return true;
       }
@@ -98,7 +107,7 @@ export function externalAssets(html) {
 
     if (name === 'link' && relOf(attrs).some((rel) => LINK_RELS.has(rel))) {
       const href = attrs.href;
-      if (href !== undefined && !isInline(href)) return true;
+      if (href !== undefined && href !== '' && !isInline(href)) return true;
     }
 
     if (name === 'meta' && (attrs['http-equiv'] ?? '').toLowerCase() === 'refresh') {

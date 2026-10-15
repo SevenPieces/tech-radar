@@ -4,6 +4,9 @@ Thumbs.db
 
 # Run artifacts
 .tech-radar-state.lock
+# Any state file's lock, not only the two documented spellings: a lock names the state it
+# guards, so it sits beside whatever the state file is called.
+*.json.lock
 *.tmp
 .plan.json
 .pool.json

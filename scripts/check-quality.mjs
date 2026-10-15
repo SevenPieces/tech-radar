@@ -44,7 +44,7 @@ const STATUS = /#(new|followup|developing|watch)\b/g;
 // A digest written on another platform carries CRLF line endings; every parser
 // normalises them, because \r left in place makes the heading and item anchors match
 // nothing at all.
-export function normalizeNewlines(md) {
+function normalizeNewlines(md) {
   return String(md ?? '').replace(/\r\n?/g, '\n');
 }
 
@@ -52,16 +52,16 @@ export function normalizeNewlines(md) {
 // domains' and '## Watch domains - notable this week'. The featured deep dive, the
 // quiet line, '## Coming up', the coverage note and '## Sources' are prose, so a
 // catalogue heading that reappears there does not turn its bullets into items.
-export function isCoreSection(heading) {
+function isCoreSection(heading) {
   return /^core\s+domains\b/i.test(String(heading ?? '').trim());
 }
 
-export function isWatchNotableSection(heading) {
+function isWatchNotableSection(heading) {
   const h = String(heading ?? '').trim();
   return /^watch\s+domains\b/i.test(h) && !/\bquiet\b/i.test(h);
 }
 
-export function isDomainSection(heading) {
+function isDomainSection(heading) {
   return isCoreSection(heading) || isWatchNotableSection(heading);
 }
 
@@ -84,7 +84,7 @@ function itemProse(body) {
 // heading. It is read line by line because a section body may legitimately start
 // with a blank line, which a lazy regex over '$' swallows.
 // Every level-2 heading, in order.
-export function sectionHeadings(md) {
+function sectionHeadings(md) {
   return normalizeNewlines(md).split('\n')
     .map((line) => /^##\s+(.*)$/.exec(line))
     .filter(Boolean)
@@ -92,7 +92,7 @@ export function sectionHeadings(md) {
 }
 
 // The first section whose heading matches a predicate, as { heading, text }.
-export function findSection(md, predicate) {
+function findSection(md, predicate) {
   const lines = normalizeNewlines(md).split('\n');
   let heading = null;
   let start = -1;
@@ -109,7 +109,7 @@ export function findSection(md, predicate) {
 // separated by any whitespace: '## Coverage  note' and '## Coverage\tnote' are the
 // same heading as '## Coverage note'. A section body may legitimately start with a
 // blank line, so sections are read line by line rather than with a lazy regex.
-export function sectionText(md, name) {
+function sectionText(md, name) {
   const words = String(name).trim().split(/\s+/)
     .map((w) => w.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'))
     .join('\\s+');
@@ -121,7 +121,7 @@ export function sectionText(md, name) {
 // before the bilingual separator. The section matters: a heading under '## Coming up'
 // is not a domain heading, and a deep-dive headline that happens to contain a
 // catalogue name is not one either.
-export function parseHeadingRecords(md) {
+function parseHeadingRecords(md) {
   const records = [];
   let section = '';
   normalizeNewlines(md).split('\n').forEach((line, i) => {
@@ -142,7 +142,7 @@ export function parseHeadingRecords(md) {
 }
 
 // The level-3 heading labels, in order.
-export function parseHeadings(md) {
+function parseHeadings(md) {
   return parseHeadingRecords(md).map((r) => r.label);
 }
 
@@ -201,7 +201,7 @@ export function parseItems(md) {
 // Bullets that look like items - a bullet marker followed by a bold headline - but do
 // not match the grammar are otherwise invisible: silently not an item, uncounted, and
 // with no signal that the digest lost a line.
-export function malformedItemLines(md) {
+function malformedItemLines(md) {
   const out = [];
   let collect = false;
   normalizeNewlines(md).split('\n').forEach((line, i) => {
@@ -256,7 +256,7 @@ function tokenIn(text, token) {
 // the number itself must be exact.
 const NOTICE_LINE = /collector\s+notices\s*:?\s*[*_`"'(\[]*\s*(\d+)/i;
 
-export function reportedNoticeCount(text) {
+function reportedNoticeCount(text) {
   const m = NOTICE_LINE.exec(String(text ?? ''));
   return m ? Number(m[1]) : null;
 }
@@ -266,15 +266,15 @@ export function reportedNoticeCount(text) {
 // URL path let two items that share a story key ship through the gate; the merge then
 // stored one entry and labelled the brand-new one a followup. Design 4.4 makes a shared
 // story key a gate failure, so the gate must key on the same thing the merge does.
-export function dedupeKey(title, url) {
+function dedupeKey(title, url) {
   return storyKey(title, url);
 }
 
 // The documented enum. A value outside it - a typo, a capital variance, an empty
 // string - used to disable the featured-section rule with no signal at all.
-export const DEEP_DIVE_VALUES = ['when-warranted', 'always', 'never'];
+const DEEP_DIVE_VALUES = ['when-warranted', 'always', 'never'];
 
-export function deepDiveProblem(settings) {
+function deepDiveProblem(settings) {
   const value = String(settings?.deep_dive ?? '');
   if (DEEP_DIVE_VALUES.includes(value)) return null;
   return `deep_dive is ${JSON.stringify(settings?.deep_dive)}, which is not one of ${DEEP_DIVE_VALUES.join(', ')}`;
@@ -283,7 +283,7 @@ export function deepDiveProblem(settings) {
 // The plan JSON is an input like any other: a missing or malformed window or a label
 // that is not a string would silently disable the window and label rules, so the CLI
 // names the reason and exits 2 instead.
-export function planProblem(plan) {
+function planProblem(plan) {
   if (!plan || typeof plan !== 'object' || Array.isArray(plan)) return 'the plan is not an object';
   if (!plan.window || typeof plan.window !== 'object' || Array.isArray(plan.window)) return 'the plan has no window object';
   for (const key of ['since', 'until']) {
@@ -312,9 +312,9 @@ export function planProblem(plan) {
 // gate still prints QUALITY: PASS. Five budget rules and the discovery-host rule were
 // disabled that way. Like update-state's positiveInt, the gate refuses the configuration
 // and names the key instead of reporting a clean run.
-export const GATE_QUANTITIES = ['core_max_items', 'watch_max_items', 'watch_notable_max', 'total_min_items', 'total_max_items'];
+const GATE_QUANTITIES = ['core_max_items', 'watch_max_items', 'watch_notable_max', 'total_min_items', 'total_max_items'];
 
-export function settingsProblem(settings) {
+function settingsProblem(settings) {
   for (const key of GATE_QUANTITIES) {
     const raw = settings?.[key];
     const n = Number(raw);

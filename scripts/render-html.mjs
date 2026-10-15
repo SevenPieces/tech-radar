@@ -2,7 +2,8 @@
 // scripts/render-html.mjs
 // Markdown digest -> one self-contained HTML file. Zero dependencies.
 // Inline CSS and JS only; the result opens correctly from file:// offline.
-import { readFileSync, writeFileSync } from 'node:fs';
+import { randomBytes } from 'node:crypto';
+import { readFileSync, renameSync, unlinkSync, writeFileSync } from 'node:fs';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { readDomains, readSettings, shortCap } from './lib/mdtable.mjs';
 import { externalAssets } from './lib/assets.mjs';
@@ -23,7 +24,7 @@ const USAGE = `usage: render-html.mjs <input.md> --out <path> [--config <dir>]
 Exit codes: 0 OK, 2 input or config not found or unreadable, 4 the output could
 not be written, 5 the rendered document would reference an external asset.`;
 
-export function esc(text) {
+function esc(text) {
   return String(text)
     .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
     .replace(/"/g, '&quot;').replace(/'/g, '&#39;');
@@ -281,7 +282,10 @@ export function render(md, config) {
     for (const m of text.matchAll(/\[prov:([a-z-]+)\]/g)) {
       bits.push(`<span class="badge prov-${esc(m[1])}">${esc(m[1])}</span>`);
     }
-    const status = [...stripCitations(text).matchAll(/#(new|followup|developing|watch)\b/g)];
+    // The status tag is the item's new-or-follow-up state, which the gate and the state
+    // merge both read as the last #new|#followup token. An additive flag such as
+    // #developing does not decide it, wherever the author wrote it.
+    const status = [...stripCitations(text).matchAll(/#(new|followup)\b/g)];
     if (status.length) {
       const flag = status[status.length - 1][1];
       bits.push(`<span class="tag t-${flag}">${flag}</span>`);
@@ -501,13 +505,27 @@ export function parseArgs(argv) {
   return out;
 }
 
+// A replacement is published by a rename, so a refused or interrupted write leaves the
+// previous deliverable intact rather than truncated. The temp name is unique and created
+// exclusively, so a pre-planted path is never followed, and it is removed on every failure.
+function writeAtomic(path, text) {
+  const tmp = `${path}.${process.pid}.${randomBytes(6).toString('hex')}.tmp`;
+  try {
+    writeFileSync(tmp, text, { flag: 'wx' });
+    renameSync(tmp, path);
+  } catch (err) {
+    try { unlinkSync(tmp); } catch { /* the temp was never created */ }
+    throw err;
+  }
+}
+
 // io is a test seam: the CLI is exercised with an injected renderer so that the
 // write/no-write decision on a self-containment failure is observable.
 export function run(argv, io = {}) {
   const readFile = io.readFile ?? ((p) => readFileSync(p, 'utf8'));
   const readDomainsOf = io.readDomains ?? ((path) => readDomains(path));
   const renderFn = io.render ?? render;
-  const writeFile = io.writeFile ?? ((p, s) => writeFileSync(p, s));
+  const writeFile = io.writeFile ?? writeAtomic;
   const log = io.log ?? ((m) => console.log(m));
   const error = io.error ?? ((m) => console.error(m));
 
@@ -572,7 +590,7 @@ export function run(argv, io = {}) {
   return 0;
 }
 
-export function main(argv = process.argv.slice(2)) {
+function main(argv = process.argv.slice(2)) {
   const code = run(argv);
   if (code) process.exitCode = code;
   return code;

@@ -1,7 +1,7 @@
 // tests/collect-core.test.mjs
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { chmodSync, copyFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { chmodSync, copyFileSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { spawnSync } from 'node:child_process';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -422,15 +422,51 @@ test('the collect CLI exits 2 for an empty --config even when the cwd holds a co
   rmSync(dir, { recursive: true, force: true });
 });
 
-// Regression test: resolveOut gives TECH_RADAR_DIR precedence over settings.output_dir, and
-// this case never cleared the variable the way its sibling does. With TECH_RADAR_DIR exported
-// the missing-output_dir case degraded from the named configuration error to a full live
-// watchlist collection that exits 0 and writes its pool into the override - 211 seconds and
-// an 853 KB pool in the run that found it. The spawn sets the override to a scratch
-// directory and proves no source request happens: a stub curl answers one empty feed, so any
-// real fetch is a call the stub records and no pool may appear under the override.
-test('the no-output_dir case is hermetic against an exported TECH_RADAR_DIR', () => {
-  const dir = mkdtempSync(join(tmpdir(), 'tech-radar-envdir-'));
+// Regression test: the case that asserted the missing-output_dir error was not hermetic -
+// it never cleared the variable its sibling saves and restores. With TECH_RADAR_DIR exported,
+// a full live watchlist collection ran instead: 211 seconds and an 853 KB pool written into
+// the override. The repair is to make the case hermetic, not to change which value decides.
+// SKILL.md and design 3.4/6 give the environment variable precedence over the configured
+// directory, so the two branches are pinned separately.
+//
+// (a) No output_dir and no usable override: the named configuration error, and no request.
+test('a settings file with no output_dir and no usable override is a named exit 2', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'tech-radar-envunset-'));
+  for (const name of ['domains.md', 'sources.md', 'watchlist.md', 'settings.md']) {
+    copyFileSync(join(SKILL_CONFIG, name), join(dir, name));
+  }
+  const settings = readFileSync(join(SKILL_CONFIG, 'settings.md'), 'utf8')
+    .split('\n').filter((l) => !/^\|\s*output_dir\s*\|/.test(l)).join('\n');
+  writeFileSync(join(dir, 'settings.md'), settings);
+  assert.equal(/output_dir/.test(settings), false, 'the fixture really omits it');
+  const mark = join(dir, 'curl-was-called');
+  writeFileSync(join(dir, 'watchlist.md'), [
+    '| kind | target | domain | note |',
+    '|---|---|---|---|',
+    '| rss | https://example.invalid/feed.xml | ai-llm | the stub answers this |',
+    '',
+  ].join('\n'));
+  const { bin } = curlStub(dir, mark);
+  const cli = fileURLToPath(new URL('../scripts/collect.mjs', import.meta.url));
+  const started = Date.now();
+  const res = spawnSync(process.execPath, [cli, '--config', dir], {
+    encoding: 'utf8',
+    // An exported empty variable is this test's own environment, not configuration.
+    env: { ...process.env, TECH_RADAR_DIR: '', PATH: bin + ':' + process.env.PATH },
+  });
+  assert.equal(res.status, 2, 'the missing setting is a named error: ' + res.stderr.slice(0, 200));
+  assert.match(res.stderr, /output_dir is missing or invalid/);
+  assert.equal(existsSync(join(dir, '.pool.json')), false, 'no pool is written');
+  assert.equal(existsSync(mark), false, 'no source request was made');
+  assert.ok(Date.now() - started < 15000, 'the case is offline and bounded');
+  rmSync(dir, { recursive: true, force: true });
+});
+
+// (b) The override is set, so it decides: the run proceeds and the pool lands under it, which
+// is what SKILL.md and design 3.4/6 document. A stub curl answers one empty feed, so the run
+// is offline and its one request is recorded.
+test('a settings file with no output_dir still runs under a set TECH_RADAR_DIR', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'tech-radar-envset-'));
   for (const name of ['domains.md', 'sources.md', 'watchlist.md', 'settings.md']) {
     copyFileSync(join(SKILL_CONFIG, name), join(dir, name));
   }
@@ -441,23 +477,23 @@ test('the no-output_dir case is hermetic against an exported TECH_RADAR_DIR', ()
   writeFileSync(join(dir, 'watchlist.md'), [
     '| kind | target | domain | note |',
     '|---|---|---|---|',
-    '| rss | https://example.invalid/feed.xml | ai-llm | the stub answers this |',
+    '| rss | https://blog.example/feed.xml | ai-llm | the stub answers this |',
     '',
   ].join('\n'));
   const { bin } = curlStub(dir, mark);
   const override = join(dir, 'radar-dir');
   mkdirSync(override, { recursive: true });
   const cli = fileURLToPath(new URL('../scripts/collect.mjs', import.meta.url));
-  const started = Date.now();
   const res = spawnSync(process.execPath, [cli, '--config', dir], {
     encoding: 'utf8',
     env: { ...process.env, TECH_RADAR_DIR: override, PATH: bin + ':' + process.env.PATH },
   });
-  assert.equal(res.status, 2, 'the missing setting is the named error even with the override set: ' + res.stderr.slice(0, 200));
-  assert.match(res.stderr, /output_dir is missing or invalid/);
-  assert.equal(existsSync(join(override, '.pool.json')), false, 'nothing is written into the override');
-  assert.equal(existsSync(mark), false, 'no source request was made');
-  assert.ok(Date.now() - started < 15000, 'the case is offline and bounded');
+  assert.equal(res.status, 0, 'the override decides the directory: ' + res.stderr.slice(0, 300));
+  const pool = JSON.parse(readFileSync(join(override, '.pool.json'), 'utf8'));
+  assert.deepEqual(pool.candidates, [], 'the stub answered an empty feed');
+  assert.deepEqual(pool.notices, []);
+  assert.equal(existsSync(mark), true, 'the run really collected, under the override');
+  assert.equal(existsSync(join(dir, '.pool.json')), false, 'nothing lands beside the configuration');
   rmSync(dir, { recursive: true, force: true });
 });
 
@@ -511,5 +547,37 @@ test('--human prints the summary instead of the JSON pool', () => {
   assert.doesNotMatch(res.stdout, /^\{/, 'the JSON pool is not printed with --human');
   const pool = JSON.parse(readFileSync(out, 'utf8'));
   assert.deepEqual(pool.candidates, [], 'the pool file is still written');
+  rmSync(dir, { recursive: true, force: true });
+});
+
+// Regression test: the collector wrote its pool in place, so a failed or interrupted write
+// destroyed the previous pool - the atomic temp-then-rename the state writer uses had never
+// reached this writer. A replacement is published by a rename, and a refused write leaves the
+// previous pool intact with no temp behind.
+test('the collector replaces its pool atomically', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'tech-radar-atomic-pool-'));
+  const out = join(dir, '.pool.json');
+  const cli = fileURLToPath(new URL('../scripts/collect.mjs', import.meta.url));
+  const args = [cli, '--config', FIXTURE_CONFIG, '--domain', 'ai-llm', '--timeout', '20000',
+    '--since', '2026-09-16T00:00:00Z', '--out', out];
+  writeFileSync(out, 'the previous pool\n');
+  const before = statSync(out).ino;
+  const first = spawnSync(process.execPath, args, { encoding: 'utf8' });
+  assert.equal(first.status, 0, first.stderr);
+  assert.notEqual(statSync(out).ino, before,
+    'the pool is published by a rename, not truncated in place');
+  const published = readFileSync(out, 'utf8');
+  chmodSync(out, 0o444);
+  try {
+    const refused = spawnSync(process.execPath, args, { encoding: 'utf8' });
+    if (refused.status !== 0) {
+      assert.equal(refused.status, 4, 'a refused write is the documented output exit: ' + refused.stderr);
+      assert.equal(readFileSync(out, 'utf8'), published, 'the previous pool survives intact');
+    }
+  } finally {
+    chmodSync(out, 0o644);
+  }
+  const leftovers = readdirSync(dir).filter((name) => name !== '.pool.json');
+  assert.deepEqual(leftovers, [], 'no temp file is left behind: ' + leftovers.join(', '));
   rmSync(dir, { recursive: true, force: true });
 });
