@@ -202,8 +202,9 @@ gate applies it in both directions:
 first `[src:OUTLET DATE](url)` becomes the card's linked headline and its origin pill, and its `[prov:…]`
 markers become the provenance badges - the first of them also colours the marker dot - exactly as they do on an
 ordinary item; all of them are removed from the sentences so a citation never reads as prose. A
-`#new`/`#followup`/`#developing`/`#watch` token in the prose becomes the status tag, the last token on the line
-being the one that is read, so a deep dive can show the same labels an item card shows. A deep dive that carries neither still renders, with a neutral dot, an unlinked
+`#new` or `#followup` token in the prose becomes the status tag, the last such token on the line being the one that
+is read; `#developing` and `#watch` are additive and never become the tag, so a deep dive shows the same status
+label an item card shows. A deep dive that carries neither still renders, with a neutral dot, an unlinked
 headline and no origin pill — which is why a real deep dive is expected to name its primary source: the card can
 only show what the prose cites. The gate does not police this; it is a property of the rendered card, not a rule
 the Markdown must satisfy.

@@ -110,12 +110,21 @@ request names a gap, plus `--domains a,b` for a focus run — and keep its JSON 
 the only source of the window, the label and the per-domain starts, and the quality gate is later given the same
 file so the header, the coverage note and the gate can never disagree.
 
+**Plan and collect the same domains.** A run whose collection is scoped with `--domain` has to be planned with the
+same `--domains` set, because the gate takes the run's scope from the plan's `perDomain` keys and not from the
+collector: a plan wider than the collection fails a focused digest that is entirely correct.
+
 ### 3. Collect
 
 ```sh
 node scripts/collect.mjs --since "<plan.since>" --until "<plan.until>" --out "$DIR/.pool.json"
 # add --domain a,b to restrict collection to the keys a focus run covers
 ```
+
+**The collector creates its destination; the other writers do not.** `--out` may name a path whose directory tree
+does not exist yet: the collector makes it, so `--out <new>/deep/.pool.json` succeeds. `render-html` and
+`update-state` refuse a missing directory with exit `4`. The three writers disagree, and only the collector creates
+what it is given.
 
 The collector does not rank or score: judgement stays with you. It never throws on a failing source — a source
 that fails becomes one `notices` entry and the rest of the pool is still written — so read the notices and carry
@@ -130,6 +139,12 @@ because each one is isolated and degrades to a notice. On `3`,
 research from what you have and say so in the digest; do not silently thin it. A source that fails twice should
 be re-probed before the next run, because `fetchable` in `config/sources.md` is a record of a past probe rather
 than a guarantee.
+
+**Know a notice's redaction boundary.** A URL in a notice keeps its scheme, host and path and loses its userinfo and
+its whole query string — a parameter cannot be told from a benign one by name — so a secret embedded in a path
+survives redaction and reaches the notice and the candidate's published `source`. That is a known boundary rather
+than an oversight: the path is what keeps the notice diagnosable, so read a notice as a diagnostic, not as proof
+that no secret is in it.
 
 **The GitHub budget is the one notice with a documented remedy.** The collector discovers the live limit at run
 time by probing `/rate_limit`, which GitHub documents as not consuming the core budget, so the probe is **free**
