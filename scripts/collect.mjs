@@ -1,0 +1,696 @@
+#!/usr/bin/env node
+// scripts/collect.mjs
+// Collector CLI and orchestration for the tech-radar skill.
+// Produces the candidate pool of design §4.1 from config/watchlist.md. It never
+// ranks or scores: judgement stays with the agent. A failing source becomes a
+// notice, never a thrown error and never a silent skip.
+import { mkdirSync, writeFileSync } from 'node:fs';
+import { dirname, join } from 'node:path';
+import { fileURLToPath, pathToFileURL } from 'node:url';
+import { readConfig } from './lib/mdtable.mjs';
+import {
+  fetchText, hostOf, isDiscoveryOnly, splitItems, field, atomLink, plainText,
+} from './lib/net.mjs';
+
+// The collector must work from any working directory, so the default configuration
+// is the skill's own config/ beside this script, not a path relative to the caller's
+// cwd. --config still overrides it.
+const DEFAULT_CONFIG = fileURLToPath(new URL('../config/', import.meta.url));
+
+// One base for every GitHub endpoint the collector uses, the rate-limit probe included.
+const GITHUB_API = 'https://api.github.com';
+
+// The Go module proxy protocol case-encodes a module path: every uppercase letter is
+// written as '!' followed by its lowercase form, so github.com/BurntSushi/toml is
+// requested as github.com/!burnt!sushi/toml. Probed live: unescaped 404 "invalid
+// escaped module path", escaped 200.
+export function goModulePath(path) {
+  return String(path).replace(/[A-Z]/g, (ch) => `!${ch.toLowerCase()}`);
+}
+
+const USAGE = `usage: collect.mjs [options]
+
+  --config <dir>    configuration directory (default: the skill's own config/)
+  --since <DATE>    window start, inclusive (default: now - window_cap_weeks)
+  --until <DATE>    window end, inclusive (default: now)
+  --out <path>      candidate pool JSON (default: $TECH_RADAR_DIR/.pool.json,
+                    else <output_dir>/.pool.json from config/settings.md)
+  --domain a,b      restrict collection to these domain keys
+  --timeout <ms>    per-request timeout (default: request_timeout_ms from
+                    config/settings.md)
+  --human           print a one-screen summary instead of the JSON
+  -h, --help        print this usage and exit
+
+Exit codes: 0 OK, 2 config not found, invalid or empty, 3 the pool came back empty
+and at least one notice was recorded, 4 output could not be written. 1 is reserved for an
+unexpected failure inside the collector; no shipped source path reaches it.`;
+
+export function parseArgs(argv) {
+  const known = new Set(['--config', '--since', '--until', '--out', '--domain', '--human', '--timeout']);
+  const out = {
+    config: DEFAULT_CONFIG, since: null, until: null, out: null,
+    domain: null, human: false, timeout: null,
+  };
+  for (let i = 0; i < argv.length; i += 1) {
+    const a = argv[i];
+    if (!known.has(a)) throw new Error(`unknown flag: ${a}`);
+    if (a === '--human') { out.human = true; continue; }
+    const v = argv[i + 1];
+    if (v === undefined) throw new Error(`missing value for ${a}`);
+    i += 1;
+    if (a === '--config') out.config = v;
+    else if (a === '--since' || a === '--until') {
+      const at = new Date(v);
+      if (Number.isNaN(at.getTime())) throw new Error(`invalid ${a}: ${v}`);
+      // Stored normalised: the window is compared as instants, never as raw strings, so
+      // an offset-bearing spelling cannot filter differently from its Z spelling.
+      out[a === '--since' ? 'since' : 'until'] = at.toISOString();
+    }
+    else if (a === '--out') {
+      if (String(v).trim() === '') throw new Error('invalid --out: expected a path');
+      out.out = v;
+    }
+    else if (a === '--domain') {
+      const domains = v.split(',').map((s) => s.trim()).filter(Boolean);
+      if (domains.length === 0) throw new Error('invalid --domain: expected at least one domain key');
+      out.domain = domains;
+    } else if (a === '--timeout') {
+      const ms = v.trim() === '' ? NaN : Number(v);
+      if (!Number.isFinite(ms) || ms <= 0) throw new Error(`invalid --timeout: ${v}`);
+      out.timeout = ms;
+    }
+  }
+  return out;
+}
+
+export function flag(argv, name) {
+  return argv.includes(name);
+}
+
+// The pool lands beside the digest. The environment override wins over the
+// configured directory; an empty TECH_RADAR_DIR is not a usable directory, hence
+// || rather than ??. Resolving this after readConfig is what lets the default come
+// from configuration instead of a literal.
+export function resolveOut(options, settings) {
+  if (options.out) return options.out;
+  const dir = process.env.TECH_RADAR_DIR || settings.output_dir;
+  // A settings file without output_dir reached join() as undefined and left main() as an
+  // uncaught TypeError: a bare exit 1 with a stack trace instead of the named exit 2 every
+  // other missing setting produces.
+  if (dir === undefined || String(dir).trim() === '') {
+    throw new Error('output_dir is missing or invalid in config/settings.md');
+  }
+  return join(dir, '.pool.json');
+}
+
+// The per-request timeout is configuration too: an explicit --timeout wins, otherwise
+// request_timeout_ms decides, and a settings file that omits it is a configuration
+// error rather than a silent twenty seconds.
+export function resolveTimeout(options, settings) {
+  if (options.timeout) return options.timeout;
+  const ms = Number(settings.request_timeout_ms);
+  if (!Number.isFinite(ms) || ms <= 0) {
+    throw new Error('request_timeout_ms is missing or invalid in config/settings.md');
+  }
+  return ms;
+}
+
+// The default reach-back is configuration, never a literal: window_cap_weeks is the
+// only source of it, so a settings file that omits it is a configuration error
+// rather than a silent four weeks.
+export function windowStart(settings, now) {
+  const weeks = Number(settings.window_cap_weeks);
+  if (!Number.isFinite(weeks) || weeks <= 0) {
+    throw new Error('window_cap_weeks is missing or invalid in config/settings.md');
+  }
+  return new Date(now.getTime() - weeks * 7 * 24 * 3600 * 1000).toISOString();
+}
+
+export function sortCandidates(list) {
+  const seen = new Set();
+  return list
+    .filter((c) => c && c.url && !seen.has(c.url) && seen.add(c.url))
+    // Dated candidates first, newest first, undated leads last: String(null) sorts after
+    // every ISO date, which used to put the least informative material at the head of the pool.
+    .sort((a, b) => {
+      if (!a.publishedAt && !b.publishedAt) return 0;
+      if (!a.publishedAt) return 1;
+      if (!b.publishedAt) return -1;
+      return String(b.publishedAt).localeCompare(String(a.publishedAt));
+    });
+}
+
+async function runSource(name, rows, fn, ctx, acc) {
+  if (rows.length === 0) return;
+  try {
+    const res = await fn(rows, ctx);
+    acc.candidates.push(...res.candidates);
+    acc.notices.push(...(res.notices ?? []));
+  } catch (err) {
+    acc.notices.push(`${name}: ${err.message}`);
+  }
+}
+
+function toIso(value) {
+  if (!value) return null;
+  const d = new Date(value);
+  return Number.isNaN(d.getTime()) ? null : d.toISOString();
+}
+
+export async function collectGithub(rows, ctx) {
+  const candidates = [];
+  const notices = [];
+  const token = process.env.GITHUB_TOKEN || process.env.GH_TOKEN;
+  const headers = { Accept: 'application/vnd.github+json' };
+  if (token) headers.Authorization = `Bearer ${token}`;
+  const s = ctx.settings;
+  const reserve = Number(s.github_rate_limit_reserve);
+  if (!Number.isFinite(reserve) || reserve < 0) {
+    throw new Error('github_rate_limit_reserve is missing or invalid in config/settings.md');
+  }
+  const get = (url) => ctx.net.fetchText(url, ctx.timeout, headers, s.user_agent, s.error_snippet_max_chars);
+  // Probe the budget once, before the block: one free call instead of discovering an
+  // exhausted limit once per row, 55 times over.
+  let budget;
+  try {
+    budget = coreBudget(JSON.parse(await get(`${GITHUB_API}/rate_limit`)));
+  } catch (err) {
+    notices.push(`github: rate limit could not be checked (${err.message}); ${uncheckedPhraseFor(rows)}`);
+    return { candidates, notices };
+  }
+  if (budget.remaining === null) {
+    notices.push(`github: rate limit could not be checked (the probe reported no core budget); ${uncheckedPhraseFor(rows)}`);
+    return { candidates, notices };
+  }
+  // The budget is spent in requests, in a fixed order: one listing per organisation,
+  // then one releases request per repository, then one tags request for each
+  // repository whose releases produced nothing.
+  const left = { value: Math.max(0, budget.remaining - reserve) };
+  const spend = () => { if (left.value <= 0) return false; left.value -= 1; return true; };
+  const shortfall = { repos: 0, orgs: 0, tags: 0 };
+
+  // Phase 0 -- organisations. /orgs/{org}/releases does not exist (probe 2026-09-23:
+  // 404 Not Found where the repo endpoint answers 200), so an organisation is
+  // collected through its repositories, most recently updated first and bounded by
+  // github_org_repos.
+  const targets = [];
+  for (const row of rows) {
+    if (row.kind === 'github-repo') targets.push({ target: row.target, domain: row.domain });
+  }
+  for (const row of rows) {
+    if (row.kind !== 'github-org') continue;
+    if (!spend()) { shortfall.orgs += 1; continue; }
+    try {
+      const url = `${GITHUB_API}/orgs/${row.target}/repos`
+        + `?per_page=${encodeURIComponent(s.github_org_repos)}&sort=updated`;
+      const body = JSON.parse(await get(url));
+      if (!Array.isArray(body)) throw new Error('unexpected response shape');
+      for (const repo of body) if (repo.full_name) targets.push({ target: repo.full_name, domain: row.domain });
+    } catch (err) {
+      notices.push(`github ${row.target}: ${err.message}`);
+    }
+  }
+
+  // Phase 1 -- releases for every repository now known.
+  const tagFallbacks = [];
+  let tagLeads = 0;
+  for (let i = 0; i < targets.length; i += 1) {
+    if (!spend()) { shortfall.repos = targets.length - i; break; }
+    const t = targets[i];
+    const before = candidates.length;
+    const url = `${GITHUB_API}/repos/${t.target}/releases`
+      + `?per_page=${encodeURIComponent(s.github_releases_per_repo)}`;
+    try {
+      const body = JSON.parse(await get(url));
+      if (!Array.isArray(body)) throw new Error('unexpected response shape');
+      for (const rel of body) {
+        if (rel.draft || !rel.tag_name || !rel.html_url) continue;
+        const publishedAt = toIso(rel.published_at);
+        if (ctx.since && publishedAt && publishedAt < ctx.since) continue;
+        if (ctx.until && publishedAt && publishedAt > ctx.until) continue;
+        candidates.push({
+          domain: t.domain,
+          kind: 'github-release',
+          title: `${t.target} ${rel.tag_name}`,
+          url: rel.html_url,
+          publishedAt,
+          source: `github:${t.target}`,
+          tierHint: 'primary',
+          summary: plainText(rel.body ?? '', s.summary_max_chars),
+        });
+      }
+    } catch (err) {
+      notices.push(`github ${t.target}: ${err.message}`);
+      continue;
+    }
+    if (candidates.length === before) tagFallbacks.push(t);
+  }
+
+  // Phase 2 -- tags for repositories that published no candidate, so a project that
+  // tags without publishing Releases still contributes a lead. The tags payload
+  // carries no date (probe 2026-09-23: name, commit.sha and archive urls only), so
+  // the candidate is undated and the agent dates it from the commit.
+  for (let i = 0; i < tagFallbacks.length; i += 1) {
+    if (!spend()) { shortfall.tags = tagFallbacks.length - i; break; }
+    const t = tagFallbacks[i];
+    const url = `${GITHUB_API}/repos/${t.target}/tags`
+      + `?per_page=${encodeURIComponent(s.github_tags_per_repo)}`;
+    try {
+      const body = JSON.parse(await get(url));
+      if (!Array.isArray(body)) throw new Error('unexpected response shape');
+      for (const tag of body) {
+        if (!tag.name || !tag.commit || !tag.commit.sha) continue;
+        candidates.push({
+          domain: t.domain,
+          kind: 'github-tag',
+          title: `${t.target} ${tag.name}`,
+          url: `https://github.com/${t.target}/releases/tag/${encodeURIComponent(tag.name)}`,
+          publishedAt: null,
+          undated: true, // a lead, never a window match: the tags payload has no date
+          source: `github-tags:${t.target}`,
+          tierHint: 'primary',
+          summary: `Tag ${tag.name} at commit ${tag.commit.sha}; the tags API carries no date`,
+        });
+        tagLeads += 1;
+      }
+    } catch (err) {
+      notices.push(`github-tags ${t.target}: ${err.message}`);
+    }
+  }
+
+  if (tagLeads > 0) {
+    notices.push(`github-tags: ${tagLeads} undated tag ${tagLeads === 1 ? 'lead' : 'leads'} carried `
+      + '(the tags API has no date, so they cannot be window-filtered)');
+  }
+  if (shortfall.repos || shortfall.orgs || shortfall.tags) {
+    notices.push(budgetNotice(budget, shortfall, Boolean(token)));
+  }
+  return { candidates, notices };
+}
+
+export async function collectArxiv(rows, ctx) {
+  const candidates = [];
+  const notices = [];
+  for (const row of rows) {
+    const url = 'https://export.arxiv.org/api/query'
+      + `?search_query=${encodeURIComponent(`cat:${row.target}`)}`
+      + `&sortBy=submittedDate&sortOrder=descending&max_results=${encodeURIComponent(ctx.settings.arxiv_max_results)}`;
+    try {
+      const xml = await ctx.net.fetchText(url, ctx.timeout, {}, ctx.settings.user_agent, ctx.settings.error_snippet_max_chars);
+      const entries = splitItems(xml);
+      const cap = Number(ctx.settings.arxiv_max_results);
+      // A capped listing is not a complete one: the window cannot be enforced for this
+      // source past the cap, so the run says so instead of looking complete.
+      if (entries.length >= cap) {
+        notices.push(`arxiv ${row.target}: listing capped at ${cap} entries; older items inside the window may be missing`);
+      }
+      for (const entry of entries) {
+        const link = atomLink(entry);
+        if (!link) continue;
+        const publishedAt = toIso(field(entry, 'published') || field(entry, 'updated'));
+        if (ctx.since && publishedAt && publishedAt < ctx.since) continue;
+        if (ctx.until && publishedAt && publishedAt > ctx.until) continue;
+        candidates.push({
+          domain: row.domain,
+          kind: 'arxiv',
+          title: plainText(field(entry, 'title'), ctx.settings.title_max_chars),
+          url: link,
+          publishedAt,
+          source: `arxiv:${row.target}`,
+          tierHint: 'preprint',
+          summary: plainText(field(entry, 'summary'), ctx.settings.summary_max_chars),
+        });
+      }
+    } catch (err) {
+      notices.push(`arxiv ${row.target}: ${err.message}`);
+    }
+  }
+  return { candidates, notices };
+}
+
+export async function collectFeeds(rows, ctx) {
+  const candidates = [];
+  const notices = [];
+  for (const row of rows) {
+    try {
+      const xml = await ctx.net.fetchText(row.target, ctx.timeout, {}, ctx.settings.user_agent, ctx.settings.error_snippet_max_chars);
+      for (const item of splitItems(xml)) {
+        const url = field(item, 'link') || atomLink(item);
+        if (!url) continue;
+        const publishedAt = toIso(field(item, 'pubDate') || field(item, 'published') || field(item, 'updated'));
+        if (publishedAt && ctx.since && publishedAt < ctx.since) continue;
+        if (publishedAt && ctx.until && publishedAt > ctx.until) continue;
+        candidates.push({
+          domain: row.domain,
+          kind: 'feed',
+          title: plainText(field(item, 'title'), ctx.settings.title_max_chars),
+          url,
+          publishedAt,
+          source: `rss:${row.target}`,
+          tierHint: 'primary',
+          summary: plainText(field(item, 'description') || field(item, 'summary'), ctx.settings.summary_max_chars),
+        });
+      }
+    } catch (err) {
+      notices.push(`rss ${row.target}: ${err.message}`);
+    }
+  }
+  return { candidates, notices };
+}
+
+export function nvdStamp(iso) {
+  return new Date(iso).toISOString().replace(/Z$/, '');
+}
+
+// Every reader answers one question: when was the version we are about to report
+// actually released? Never a "last modified" timestamp -- registry bookkeeping
+// moves for reasons that have nothing to do with a release (metadata edits,
+// deprecations, a dist-tag change) and would date an old release as this week's.
+// The probe endpoint reports the budget for the same credentials and is documented
+// not to consume it. resources.core is the bucket the release and advisory calls are
+// charged against: verified against the x-ratelimit-* headers those calls return
+// (same limit, same reset, same used).
+export function coreBudget(json) {
+  const core = json?.resources?.core ?? json?.rate ?? {};
+  const remaining = Number(core.remaining);
+  const limit = Number(core.limit);
+  const reset = Number(core.reset);
+  return {
+    remaining: Number.isFinite(remaining) ? remaining : null,
+    limit: Number.isFinite(limit) ? limit : null,
+    resetAt: Number.isFinite(reset) && reset > 0 ? new Date(reset * 1000).toISOString() : null,
+  };
+}
+
+function uncheckedPhrase(n) {
+  return `${n} ${n === 1 ? 'repository' : 'repositories'} not checked`;
+}
+
+// The rows a failed probe leaves unread are not all repositories: an organisation row stands
+// for up to github_org_repos repositories, so counting it as one repository understates it.
+function uncheckedPhraseFor(rows) {
+  const count = (kind) => rows.filter((r) => r.kind === kind).length;
+  const parts = [];
+  const repos = count('github-repo');
+  const orgs = count('github-org');
+  if (repos) parts.push(uncheckedPhrase(repos));
+  if (orgs) parts.push(`${orgs} ${orgs === 1 ? 'organisation' : 'organisations'} not listed`);
+  return parts.join('; ');
+}
+
+// One notice replaces the wall of identical 403s. It names the budget, when it comes
+// back, how many rows went unchecked, and the remedy that matches the credentials in
+// use -- telling a caller who already supplied a token to supply one helps nobody.
+export function budgetNotice(budget, shortfall, token) {
+  const resets = budget.resetAt ? `, resets ${budget.resetAt}` : '';
+  const remedy = token
+    ? 'the supplied GITHUB_TOKEN budget is spent as well, so wait for the reset'
+    : 'set GITHUB_TOKEN to raise the limit';
+  const parts = [];
+  if (shortfall.repos) parts.push(uncheckedPhrase(shortfall.repos));
+  if (shortfall.orgs) parts.push(`${shortfall.orgs} ${shortfall.orgs === 1 ? 'organisation' : 'organisations'} not listed`);
+  if (shortfall.tags) parts.push(`${shortfall.tags} tag ${shortfall.tags === 1 ? 'listing' : 'listings'} not checked`);
+  return `github: rate limit reached (remaining ${budget.remaining} of ${budget.limit}${resets}); `
+    + `${parts.join('; ')}; ${remedy}`;
+}
+
+const REGISTRY = {
+  npm: {
+    // dist-tags.latest names the version; time[<that version>] is that version's own
+    // publish timestamp. time.modified is when the packument last changed.
+    url: (t) => `https://registry.npmjs.org/${encodeURIComponent(t)}`,
+    page: (t) => `https://www.npmjs.com/package/${t}`,
+    read: (j) => {
+      const version = j['dist-tags']?.latest ?? '';
+      return { version, at: version ? j.time?.[version] : undefined };
+    },
+  },
+  pypi: {
+    // info.version names the version; urls[] are that version's files, each with the
+    // upload time of that file. The release is when its first file appeared: a wheel
+    // or sdist added later must not make an older release look newer.
+    url: (t) => `https://pypi.org/pypi/${encodeURIComponent(t)}/json`,
+    page: (t) => `https://pypi.org/project/${t}/`,
+    read: (j) => {
+      const times = (j.urls ?? []).map((u) => u.upload_time_iso_8601).filter(Boolean).sort();
+      return { version: j.info?.version ?? '', at: times[0] };
+    },
+  },
+  crates: {
+    // crate.newest_version names the version; versions[] carries one entry per
+    // version with its created_at. Match by num, so the date always belongs to the
+    // version in the title: a backport published after the newest version sorts
+    // first in versions[] and must not date it. (crate.updated_at is bookkeeping.)
+    url: (t) => `https://crates.io/api/v1/crates/${encodeURIComponent(t)}`,
+    page: (t) => `https://crates.io/crates/${t}`,
+    read: (j) => {
+      // No fallback to versions[0]: borrowing another version's date is the defect the
+      // comment below forbids. A version missing from versions[] has no release time.
+      const version = j.crate?.newest_version ?? '';
+      const entry = (j.versions ?? []).find((v) => v.num === version);
+      return { version, at: entry?.created_at };
+    },
+  },
+  gomod: {
+    // The proxy's @latest response carries exactly two fields: the version and that
+    // version's commit time. There is no modification timestamp to confuse it with.
+    url: (t) => `https://proxy.golang.org/${goModulePath(t)}/@latest`,
+    page: (t) => `https://pkg.go.dev/${t}`,
+    read: (j) => ({ version: j.Version ?? '', at: j.Time }),
+  },
+};
+
+export async function collectRegistries(rows, ctx) {
+  const candidates = [];
+  const notices = [];
+  for (const row of rows) {
+    const spec = REGISTRY[row.kind];
+    if (!spec) { notices.push(`registry unknown kind ${row.kind}`); continue; }
+    try {
+      const json = JSON.parse(await ctx.net.fetchText(spec.url(row.target), ctx.timeout, {}, ctx.settings.user_agent, ctx.settings.error_snippet_max_chars));
+      const { version, at } = spec.read(json);
+      const publishedAt = toIso(at);
+      // A registry release whose release time cannot be established is a notice, not an
+      // undated "release" that passes every window.
+      if (!publishedAt) {
+        notices.push(`${row.kind} ${row.target}: no release time for ${version || 'the latest version'}; candidate skipped`);
+        continue;
+      }
+      if (ctx.since && publishedAt < ctx.since) continue;
+      if (ctx.until && publishedAt && publishedAt > ctx.until) continue;
+      candidates.push({
+        domain: row.domain,
+        kind: 'registry',
+        title: `${row.kind} ${row.target} ${version}`.trim(),
+        url: spec.page(row.target),
+        publishedAt,
+        source: `${row.kind}:${row.target}`,
+        tierHint: 'primary',
+        summary: `New ${row.kind} release ${version}`,
+      });
+    } catch (err) {
+      notices.push(`${row.kind} ${row.target}: ${err.message}`);
+    }
+  }
+  return { candidates, notices };
+}
+
+export async function collectAdvisories(rows, ctx) {
+  const candidates = [];
+  const notices = [];
+  const token = process.env.GITHUB_TOKEN || process.env.GH_TOKEN;
+  for (const row of rows) {
+    try {
+      if (row.kind === 'ghsa') {
+        const headers = { Accept: 'application/vnd.github+json' };
+        if (token) headers.Authorization = `Bearer ${token}`;
+        const url = `${GITHUB_API}/advisories`
+          + `?per_page=${encodeURIComponent(ctx.settings.ghsa_page_size)}`
+          + `&published=${(ctx.since ?? '').slice(0, 10)}..${(ctx.until ?? '').slice(0, 10)}`;
+        const body = JSON.parse(await ctx.net.fetchText(url, ctx.timeout, headers, ctx.settings.user_agent, ctx.settings.error_snippet_max_chars));
+        for (const a of Array.isArray(body) ? body : []) {
+          const publishedAt = toIso(a.published_at);
+          if (ctx.since && publishedAt && publishedAt < ctx.since) continue;
+          if (ctx.until && publishedAt && publishedAt > ctx.until) continue;
+          candidates.push({
+            domain: row.domain, kind: 'advisory', title: a.ghsa_id || a.summary,
+            url: a.html_url, publishedAt, source: 'ghsa', tierHint: 'primary',
+            summary: plainText(a.summary ?? '', ctx.settings.summary_max_chars),
+          });
+        }
+      } else if (row.kind === 'nvd') {
+        const url = 'https://services.nvd.nist.gov/rest/json/cves/2.0'
+          + `?pubStartDate=${encodeURIComponent(nvdStamp(ctx.since))}`
+          + `&pubEndDate=${encodeURIComponent(nvdStamp(ctx.until))}`
+          + `&cvssV3Severity=${encodeURIComponent(ctx.settings.nvd_severity)}`;
+        const body = JSON.parse(await ctx.net.fetchText(url, ctx.timeout, {}, ctx.settings.user_agent, ctx.settings.error_snippet_max_chars));
+        for (const v of body.vulnerabilities ?? []) {
+          const cve = v.cve ?? {};
+          const en = (cve.descriptions ?? []).find((d) => d.lang === 'en');
+          const publishedAt = toIso(cve.published);
+          if (ctx.since && publishedAt && publishedAt < ctx.since) continue;
+          if (ctx.until && publishedAt && publishedAt > ctx.until) continue;
+          candidates.push({
+            domain: row.domain, kind: 'advisory', title: cve.id,
+            url: `https://nvd.nist.gov/vuln/detail/${cve.id}`,
+            publishedAt, source: 'nvd', tierHint: 'primary',
+            summary: plainText(en?.value ?? '', ctx.settings.summary_max_chars),
+          });
+        }
+      }
+    } catch (err) {
+      notices.push(`${row.kind}: ${err.message}`);
+    }
+  }
+  return { candidates, notices };
+}
+
+export async function collectAll(config, opts) {
+  const ctx = {
+    // Normalised here as well as at parse time, so a direct caller passing an
+    // offset-bearing spelling cannot filter differently from its Z spelling.
+    since: toIso(opts.since), until: toIso(opts.until), settings: config.settings,
+    timeout: resolveTimeout({ timeout: opts.timeout ?? null }, config.settings),
+    net: opts.net ?? { fetchText, hostOf, isDiscoveryOnly },
+    domains: opts.domains ?? null,
+  };
+  const rows = (kind) => config.watchlist.filter(
+    (r) => r.kind === kind && (!ctx.domains || ctx.domains.includes(r.domain)),
+  );
+  const acc = { candidates: [], notices: [] };
+  await runSource('github', rows('github-repo').concat(rows('github-org')), collectGithub, ctx, acc);
+  await runSource('arxiv', rows('arxiv-category'), collectArxiv, ctx, acc);
+  await runSource('feeds', rows('rss'), collectFeeds, ctx, acc);
+  await runSource('advisories', rows('ghsa').concat(rows('nvd')), collectAdvisories, ctx, acc);
+  await runSource(
+    'registries',
+    rows('npm').concat(rows('pypi')).concat(rows('crates')).concat(rows('gomod')),
+    collectRegistries, ctx, acc,
+  );
+  const candidates = sortCandidates(acc.candidates).filter(
+    (c) => (!ctx.since || !c.publishedAt || c.publishedAt >= ctx.since)
+      && (!ctx.until || !c.publishedAt || c.publishedAt <= ctx.until),
+  );
+  return {
+    version: 1,
+    generatedAt: new Date().toISOString(),
+    window: { since: ctx.since, until: ctx.until },
+    candidates,
+    notices: acc.notices,
+  };
+}
+
+// The single line an operator sees on stderr for a degraded run, and the contract the
+// digest's Coverage note has to carry: the same count, written the same way, so the
+// two can be compared without interpretation.
+export function noticeWarning(count) {
+  const noun = count === 1 ? 'source notice' : 'source notices';
+  return `collect: ${count} ${noun} (GitHub rate limit and others) — `
+    + `the digest's Coverage note must report them; Collector notices: ${count}`;
+}
+
+export function humanSummary(pool) {
+  const counts = new Map();
+  for (const c of pool.candidates) counts.set(c.domain, (counts.get(c.domain) ?? 0) + 1);
+  const lines = [
+    `tech-radar collect  ${pool.generatedAt}`,
+    `window: ${pool.window.since} .. ${pool.window.until}`,
+    `candidates: ${pool.candidates.length}`,
+  ];
+  for (const [domain, n] of [...counts].sort((a, b) => String(a[0]).localeCompare(String(b[0])))) {
+    lines.push(`  ${domain}: ${n}`);
+  }
+  lines.push(`notices: ${pool.notices.length}`);
+  for (const notice of pool.notices) lines.push(`  - ${notice}`);
+  return lines.join('\n');
+}
+
+export async function main(argv = process.argv.slice(2)) {
+  if (flag(argv, '-h') || flag(argv, '--help')) {
+    console.log(USAGE);
+    return 0;
+  }
+  let options;
+  try {
+    options = parseArgs(argv);
+  } catch (err) {
+    console.error(`collect: ${err.message}`);
+    console.error(USAGE);
+    process.exitCode = 2;
+    return 2;
+  }
+  let config;
+  try {
+    config = readConfig(options.config);
+  } catch (err) {
+    console.error(`collect: cannot read config ${options.config}: ${err.message}`);
+    process.exitCode = 2;
+    return 2;
+  }
+  // A mistyped --domain would otherwise read as a quiet week: no candidates, no
+  // notices, exit 0. update-state.mjs validates its --domains the same way.
+  const unknown = (options.domain ?? []).filter((k) => !config.domains.some((d) => d.key === k));
+  if (unknown.length) {
+    console.error(`collect: unknown domain key(s): ${unknown.join(', ')}`);
+    process.exitCode = 2;
+    return 2;
+  }
+  const now = new Date();
+  let since;
+  let timeout;
+  try {
+    since = options.since ?? windowStart(config.settings, now);
+    timeout = resolveTimeout(options, config.settings);
+  } catch (err) {
+    console.error(`collect: ${err.message}`);
+    process.exitCode = 2;
+    return 2;
+  }
+  const until = options.until ?? now.toISOString();
+  // An empty window collects nothing and would read as a quiet week, so it is refused.
+  if (new Date(since).getTime() > new Date(until).getTime()) {
+    console.error(`collect: --since ${since} is after --until ${until}: the window is empty`);
+    process.exitCode = 2;
+    return 2;
+  }
+  let out;
+  try {
+    out = resolveOut(options, config.settings);
+  } catch (err) {
+    console.error(`collect: ${err.message}`);
+    process.exitCode = 2;
+    return 2;
+  }
+  let pool;
+  try {
+    pool = await collectAll(config, {
+      since, until, timeout, domains: options.domain,
+    });
+  } catch (err) {
+    console.error(`collect: ${err.message}`);
+    process.exitCode = 1;
+    return 1;
+  }
+  try {
+    const dir = dirname(out);
+    if (dir) mkdirSync(dir, { recursive: true });
+    writeFileSync(out, `${JSON.stringify(pool, null, 2)}\n`);
+  } catch (err) {
+    console.error(`collect: cannot write ${out}: ${err.message}`);
+    process.exitCode = 4;
+    return 4;
+  }
+  console.log(options.human ? humanSummary(pool) : JSON.stringify(pool, null, 2));
+  // A degraded run must be visible to an operator who never passes --human and to an
+  // agent that never reads the pool. Stdout stays byte-identical: this one line goes
+  // to stderr, and a clean pool writes nothing at all.
+  if (pool.notices.length > 0) console.error(noticeWarning(pool.notices.length));
+  if (pool.candidates.length === 0 && pool.notices.length > 0) {
+    process.exitCode = 3;
+    return 3;
+  }
+  return 0;
+}
+
+if (import.meta.url === pathToFileURL(process.argv[1] ?? '').href) main();
+

@@ -1,0 +1,24 @@
+# OS cruft
+.DS_Store
+Thumbs.db
+
+# Run artifacts
+.tech-radar-state.lock
+*.tmp
+.plan.json
+.pool.json
+.items.json
+.research.json
+
+# Run state and the deliverables a run writes: state belongs to the machine, and a digest
+# is an output. Keep a digest you want by naming it outside these patterns.
+tech-radar-state.json
+tech-radar-state.json.lock
+tech-radar-*.md
+tech-radar-*.html
+
+# Publication rule: docs/ ships only its design. Everything else under docs/ is working
+# material that belongs to the machine that built the skill, so a stray `git add -A`
+# cannot publish it. Keep docs/design.md, which is the specification that ships.
+docs/*
+!docs/design.md

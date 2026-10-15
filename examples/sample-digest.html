@@ -1,0 +1,228 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Tech Radar — 2026-09-23</title>
+<style>
+:root{color-scheme:dark;--bg:#0f1216;--panel:#161b22;--panel2:#1c232c;--fg:#e6edf3;--dim:#9aa7b4;--line:#28313c;--acc:#4da3ff;--new:#2ea043;--follow:#d29922}
+*{box-sizing:border-box}
+body{margin:0;background:var(--bg);color:var(--fg);font:15px/1.55 -apple-system,Segoe UI,Roboto,Noto Sans SC,Helvetica,Arial,sans-serif}
+a{color:var(--acc);text-decoration:none}a:hover{text-decoration:underline}
+header.top{padding:20px 0 12px;border-bottom:1px solid var(--line);background:var(--panel)}
+.wrap{max-width:1100px;margin:0 auto;padding:0 22px}
+header.top h1{margin:0 0 6px;font-size:22px}
+.meta{color:var(--dim);font-size:13px;margin:0 0 12px}
+.controls{display:flex;gap:14px;align-items:center;flex-wrap:wrap}
+#q{flex:1;min-width:220px;background:var(--panel2);border:1px solid var(--line);color:var(--fg);border-radius:8px;padding:8px 12px;font-size:14px}
+#q:focus{outline:none;border-color:var(--acc);box-shadow:0 0 0 3px rgba(77,163,255,.22)}
+:focus-visible{outline:2px solid var(--acc);outline-offset:2px}
+.tog{color:var(--dim);font-size:13px;display:flex;gap:6px;align-items:center}
+nav.topics{display:flex;gap:6px 12px;flex-wrap:wrap;margin-top:12px}
+nav.topics a{font-size:13px;padding:4px 9px;border:1px solid var(--line);border-radius:999px;white-space:nowrap;color:var(--dim)}
+nav.topics a:hover{color:var(--fg);border-color:var(--acc);text-decoration:none}
+html{scroll-behavior:smooth}
+main{padding:18px 22px 60px;max-width:1100px;margin:0 auto}
+section.sec{margin:0 0 26px}
+h2{font-size:19px;margin:22px 0 10px;border-bottom:1px solid var(--line);padding-bottom:6px}
+h3{font-size:16px;margin:18px 0 8px;color:var(--acc)}
+details.aspect{background:var(--panel);border:1px solid var(--line);border-radius:10px;margin:10px 0}
+details.aspect>summary{cursor:pointer;padding:10px 14px;font-weight:600;display:flex;justify-content:space-between;align-items:center;gap:12px;list-style:none}
+details.aspect>summary::-webkit-details-marker{display:none}
+.ah{font-size:16px}
+.badges{display:flex;gap:6px;flex-wrap:wrap;align-items:center}
+.count{color:var(--dim);font-weight:400;font-size:13px}
+.tier{font-size:11px;padding:2px 8px;border-radius:999px;border:1px solid var(--line);color:var(--dim);text-transform:uppercase;letter-spacing:.04em}
+.aspect-body{padding:2px 14px 12px}
+ul.stories{list-style:none;margin:0;padding:0}
+li.story{background:var(--panel2);border:1px solid var(--line);border-radius:8px;padding:10px 12px;margin:8px 0}
+.hlrow{display:flex;gap:8px;align-items:baseline}
+.hl{font-weight:600}
+.sum{margin:0 0 7px}
+a.hl{color:var(--fg)}a.hl:hover{color:var(--acc)}
+.prov{width:9px;height:9px;border-radius:999px;display:inline-block;flex:0 0 auto}
+.prov-primary{background:#2ea043}
+.prov-secondary{background:#4da3ff}
+.prov-preprint{background:#d9a7ff}
+.prov-vendor-claim{background:#f0c96b}
+.prov-default{background:var(--acc)}
+.badge{font-size:12px;padding:2px 8px;border-radius:999px;border:1px solid var(--line);color:var(--dim)}
+.badge.src{background:#132b45;color:#9fd0ff;border-color:#1d4a75}
+.badge.alt{background:#1a2230;color:var(--dim)}
+.badge.prov-primary{background:#12351d;color:#7ee2a1;border-color:#1d5a30}
+.badge.prov-secondary{background:#1a2230;color:#9fb3c8}
+.badge.prov-preprint{background:#2b2438;color:#d9a7ff;border-color:#4a3a63}
+.badge.prov-vendor-claim{background:#3a2d0d;color:#f0c96b;border-color:#5a4a1d}
+.tag{font-size:11px;padding:2px 8px;border-radius:999px;text-transform:uppercase;letter-spacing:.04em}
+.t-new{background:#12351d;color:#7ee2a1}
+.t-followup{background:#3a2d0d;color:#f0c96b}
+.t-developing{background:#3a230d;color:#ffb27a}
+.t-watch{background:#132b45;color:#9fd0ff}
+.quiet{color:var(--dim);font-style:italic;padding:8px 12px;border-left:3px solid var(--line);background:var(--panel)}
+ul.plain{margin:6px 0 6px 18px}
+#toTop{position:fixed;right:22px;bottom:22px;z-index:20;display:flex;align-items:center;justify-content:center;width:44px;height:44px;border-radius:999px;border:1px solid var(--line);background:var(--panel2);color:var(--fg);font-size:18px;line-height:1;box-shadow:0 4px 14px rgba(0,0,0,.35);text-decoration:none}
+#toTop:hover{border-color:var(--acc);color:var(--acc);text-decoration:none}
+footer{color:var(--dim);border-top:1px solid var(--line);padding:16px 0;margin-top:32px;font-size:13px}
+@media print{:root{color-scheme:light;--bg:#fff;--panel:#fff;--panel2:#fafafa;--fg:#111;--dim:#555;--line:#bbb}
+.controls,nav.topics,#toTop{display:none}body{font-size:11pt}details.aspect{border:1px solid #ccc}details.aspect:not([open])>.aspect-body{display:block}li.story{break-inside:avoid}}
+</style>
+</head>
+<body id="top">
+<header class="top"><div class="wrap"><h1>Tech Radar — 2026-09-23</h1><p class="meta">Covering 2026-09-16 08:00 to 2026-09-23 08:00 (Asia/Shanghai) · cap not hit · 43 domains scanned · 32 items</p>
+<div class="controls"><input id="q" type="search" placeholder="Search">
+<label class="tog"><input type="checkbox" id="collapse"> collapse all</label></div>
+<nav class="topics"><a href="#d-featured-this-week" title="Featured this week">Featured</a><a href="#d-ai-llm" title="AI / LLM · 人工智能 / 大模型">AI / LLM</a><a href="#d-chips-hardware-and-accelerators" title="Chips, hardware and accelerators · 芯片、硬件与加速器">Chips</a><a href="#d-computer-vision-and-perception" title="Computer vision and perception · 计算机视觉与感知">Vision</a><a href="#d-real-time-graphics-engines-and-generative-media" title="Real-time graphics, engines and generative media · 实时图形、引擎与生成式媒体">Graphics</a><a href="#d-self-hosting-local-first-and-privacy-tech" title="Self-hosting, local-first and privacy tech · 自托管、本地优先与隐私技术">Self-hosting</a><a href="#d-energy-and-power" title="Energy and power · 能源与电力">Energy</a><a href="#d-materials-and-advanced-manufacturing" title="Materials and advanced manufacturing · 材料与先进制造">Materials</a><a href="#d-robotics-and-autonomy" title="Robotics and autonomy · 机器人与自主系统">Robotics</a><a href="#d-industrial-automation-and-ot" title="Industrial automation and OT · 工业自动化与运营技术">Industrial OT</a><a href="#d-transport-and-mobility" title="Transport and mobility · 交通与出行">Transport</a><a href="#d-neuroscience-and-brain-computer-interfaces" title="Neuroscience and brain-computer interfaces · 神经科学与脑机接口">Neuro / BCI</a><a href="#d-wearables-sensors-and-human-augmentation" title="Wearables, sensors and human augmentation · 可穿戴、传感器与人体增强">Wearables</a><a href="#d-defence-and-dual-use-technology" title="Defence and dual-use technology · 国防与两用技术">Defence</a><a href="#d-audio-speech-and-music-technology" title="Audio, speech and music technology · 音频、语音与音乐技术">Audio / speech</a><a href="#d-security-and-privacy" title="Security and privacy · 安全与隐私">Security</a></nav></div></header>
+<main>
+<section class="sec" id="d-featured-this-week"><h2>Featured this week</h2>
+<ul class="stories"><li class="story featured"><div class="hlrow"><span class="prov prov-preprint" title="Provenance: preprint"></span><a class="hl" href="https://example.org/preprints/open-weights" target="_blank" rel="noopener">A placeholder deep dive: what an open-weights release at this scale would change</a></div>
+<p class="sum">This section is what a week that warrants a deep dive looks like: 200-350 words on what changed, why it matters, what it affects and what to watch next. The text here is placeholder prose that shows the shape rather than a real analysis.</p>
+<p class="sum">A real deep dive names the artifact, its date and its primary source in the first two sentences, then explains the second-order effects: who can now do what they could not do last week, which competing approach it undercuts, and which of the run&#39;s ordinary items it reframes. It does not restate the headline at length, and it does not speculate past what the fetched sources support.</p>
+<p class="sum">This example exists so that the shape is visible before the first real run is written. Every digest that ships a featured section fills it from fetched sources only, and a week that does not warrant one omits the section rather than padding it. A real deep dive names its artifact, its date and its primary source here; this placeholder carries a placeholder one instead, so the rendered card shows the linked headline, the marker dot and the origin pill an honest deep dive gets.</p>
+<div class="badges"><a class="badge src" href="https://example.org/preprints/open-weights" target="_blank" rel="noopener">arXiv cs.CL listing 2026-09-18</a><span class="badge prov-preprint">preprint</span><span class="tag t-new">new</span></div></li></ul>
+</section>
+<section class="sec" id="d-core-domains"><h2>Core domains</h2>
+<details class="aspect" id="d-ai-llm" data-cluster="AI and compute" open><summary><span class="ah">AI / LLM · 人工智能 / 大模型</span><span class="badges"><span class="tier core">core</span><span class="count">4 items</span></span></summary><div class="aspect-body">
+<ul class="stories">
+<li class="story"><div class="hlrow"><span class="prov prov-primary" title="Provenance: primary"></span><a class="hl" href="https://example.org/zh/open-weights" target="_blank" rel="noopener">某实验室发布新的开放权重模型，并把许可证改为允许商用</a></div><p class="sum">这次变化的关键在许可证：上一版需要单独申请商用授权，这一版把门槛直接取消；模型规模与评测数字仍来自发布方，需要独立复现才能当作结果。</p><div class="badges"><a class="badge src" href="https://example.org/zh/open-weights" target="_blank" rel="noopener">DeepSeek and Qwen release blogs 2026-09-18</a><span class="badge prov-primary">primary</span><span class="tag t-new">new</span></div></li>
+<li class="story"><div class="hlrow"><span class="prov prov-secondary" title="Provenance: secondary"></span><a class="hl" href="https://example.org/zh/agent-protocols" target="_blank" rel="noopener">国内媒体比较了两家厂商的智能体协议扩展</a></div><p class="sum">报道指出互操作性仍取决于各自的私有扩展；这是一篇二手梳理，窗口内没有对应的规范更新。</p><div class="badges"><a class="badge src" href="https://example.org/zh/agent-protocols" target="_blank" rel="noopener">量子位 2026-09-20</a><span class="badge prov-secondary">secondary</span><span class="tag t-followup">followup</span></div></li>
+<li class="story"><div class="hlrow"><span class="prov prov-primary" title="Provenance: primary"></span><a class="hl" href="https://example.org/en/batching-scheduler" target="_blank" rel="noopener">An inference runtime shipped a new batching scheduler</a></div><p class="sum">The release targets long-context requests and reports lower tail latency; the numbers are the project&#39;s own and are not independently reproduced here.</p><div class="badges"><a class="badge src" href="https://example.org/en/batching-scheduler" target="_blank" rel="noopener">Hugging Face blog 2026-09-21</a><span class="badge prov-primary">primary</span><span class="tag t-new">new</span></div></li>
+<li class="story"><div class="hlrow"><span class="prov prov-vendor-claim" title="Provenance: vendor-claim"></span><a class="hl" href="https://example.org/en/agent-roadmap" target="_blank" rel="noopener">A frontier lab restated its agent roadmap</a></div><p class="sum">The post restates a capability timeline and ships no product in the window, so it is recorded as a claim rather than a result.</p><div class="badges"><a class="badge src" href="https://example.org/en/agent-roadmap" target="_blank" rel="noopener">OpenAI release blog 2026-09-17</a><a class="badge alt" href="https://example.net/notes/agent-roadmap" target="_blank" rel="noopener">Independent analysis</a><span class="badge prov-vendor-claim">vendor-claim</span><span class="tag t-followup">followup</span></div></li>
+</ul>
+</div></details>
+<details class="aspect" id="d-chips-hardware-and-accelerators" data-cluster="AI and compute" open><summary><span class="ah">Chips, hardware and accelerators · 芯片、硬件与加速器</span><span class="badges"><span class="tier core">core</span><span class="count">3 items</span></span></summary><div class="aspect-body">
+<ul class="stories">
+<li class="story"><div class="hlrow"><span class="prov prov-vendor-claim" title="Provenance: vendor-claim"></span><a class="hl" href="https://example.org/en/accelerator-roadmap" target="_blank" rel="noopener">A placeholder accelerator roadmap slipped by a quarter</a></div><p class="sum">Roadmap dates are vendor claims and not shipped products, so the slip is recorded as a claim; the part it replaces stays current until the new one ships.</p><div class="badges"><a class="badge src" href="https://example.org/en/accelerator-roadmap" target="_blank" rel="noopener">NVIDIA newsroom and developer blog 2026-09-19</a><span class="badge prov-vendor-claim">vendor-claim</span><span class="tag t-new">new</span></div></li>
+<li class="story"><div class="hlrow"><span class="prov prov-primary" title="Provenance: primary"></span><a class="hl" href="https://example.org/en/platform-generation" target="_blank" rel="noopener">Two CPU vendors announced a shared platform generation</a></div><p class="sum">The announcement covers sockets, memory support and a firmware baseline, and both vendors&#39; own release notes are the primary record.</p><div class="badges"><a class="badge src" href="https://example.org/en/platform-generation" target="_blank" rel="noopener">AMD and Intel newsrooms 2026-09-21</a><span class="badge prov-primary">primary</span><span class="tag t-new">new</span></div></li>
+<li class="story"><div class="hlrow"><span class="prov prov-secondary" title="Provenance: secondary"></span><a class="hl" href="https://example.org/en/packaging-supply" target="_blank" rel="noopener">An independent analysis traced the packaging supply chain</a></div><p class="sum">The report maps which steps have a single supplier and which have a second source; it is reporting, not a primary artifact.</p><div class="badges"><a class="badge src" href="https://example.org/en/packaging-supply" target="_blank" rel="noopener">IEEE Spectrum semiconductors 2026-09-22</a><span class="badge prov-secondary">secondary</span><span class="tag t-followup">followup</span></div></li>
+</ul>
+</div></details>
+<details class="aspect" id="d-computer-vision-and-perception" data-cluster="AI and compute" open><summary><span class="ah">Computer vision and perception · 计算机视觉与感知</span><span class="badges"><span class="tier core">core</span><span class="count">2 items</span></span></summary><div class="aspect-body">
+<ul class="stories">
+<li class="story"><div class="hlrow"><span class="prov prov-preprint" title="Provenance: preprint"></span><a class="hl" href="https://example.org/preprints/cv-detector" target="_blank" rel="noopener">A preprint reports a detector trained without box labels</a></div><p class="sum">The listing reports gains on two benchmarks; as an unreviewed preprint this is written as a claim, not an established capability.</p><div class="badges"><a class="badge src" href="https://example.org/preprints/cv-detector" target="_blank" rel="noopener">arXiv cs.CV listing 2026-09-16</a><span class="badge prov-preprint">preprint</span><span class="tag t-new">new</span></div></li>
+<li class="story"><div class="hlrow"><span class="prov prov-primary" title="Provenance: primary"></span><a class="hl" href="https://example.org/en/vision-runtime" target="_blank" rel="noopener">A vision library changed its default inference runtime</a></div><p class="sum">The release note says the common path stays backwards compatible and lists the operators that still fall back.</p><div class="badges"><a class="badge src" href="https://example.org/en/vision-runtime" target="_blank" rel="noopener">OpenCV and ONNX Runtime release notes 2026-09-20</a><span class="badge prov-primary">primary</span><span class="tag t-followup">followup</span></div></li>
+</ul>
+</div></details>
+<details class="aspect" id="d-real-time-graphics-engines-and-generative-media" data-cluster="Software craft" open><summary><span class="ah">Real-time graphics, engines and generative media · 实时图形、引擎与生成式媒体</span><span class="badges"><span class="tier core">core</span><span class="count">2 items</span></span></summary><div class="aspect-body">
+<ul class="stories">
+<li class="story"><div class="hlrow"><span class="prov prov-primary" title="Provenance: primary"></span><a class="hl" href="https://example.org/specs/rt-extension" target="_blank" rel="noopener">A graphics API specification added a ray-tracing extension</a></div><p class="sum">The extension is optional and lands in a ratified specification, so it is a primary artifact even though drivers will follow later.</p><div class="badges"><a class="badge src" href="https://example.org/specs/rt-extension" target="_blank" rel="noopener">Khronos and Vulkan release notes 2026-09-18</a><span class="badge prov-primary">primary</span><span class="tag t-new">new</span></div></li>
+<li class="story"><div class="hlrow"><span class="prov prov-primary" title="Provenance: primary"></span><a class="hl" href="https://example.org/en/pipeline-rewrite" target="_blank" rel="noopener">An engine rewrote its rendering pipeline</a></div><p class="sum">The release notes describe the new pass structure, the projects it breaks and the migration path, all in the same note.</p><div class="badges"><a class="badge src" href="https://example.org/en/pipeline-rewrite" target="_blank" rel="noopener">Blender, Godot and Unreal release notes 2026-09-22</a><span class="badge prov-primary">primary</span><span class="tag t-followup">followup</span></div></li>
+</ul>
+</div></details>
+<details class="aspect" id="d-self-hosting-local-first-and-privacy-tech" data-cluster="Systems and infrastructure" open><summary><span class="ah">Self-hosting, local-first and privacy tech · 自托管、本地优先与隐私技术</span><span class="badges"><span class="tier core">core</span><span class="count">2 items</span></span></summary><div class="aspect-body">
+<ul class="stories">
+<li class="story"><div class="hlrow"><span class="prov prov-primary" title="Provenance: primary"></span><a class="hl" href="https://example.org/en/schema-migration" target="_blank" rel="noopener">A self-hosted project shipped the migration users had asked for</a></div><p class="sum">The release moves the database schema in place and documents a rollback, so the release note is the artifact.</p><div class="badges"><a class="badge src" href="https://example.org/en/schema-migration" target="_blank" rel="noopener">Home Assistant, Immich and Jellyfin releases 2026-09-19</a><span class="badge prov-primary">primary</span><span class="tag t-new">new</span></div></li>
+<li class="story"><div class="hlrow"><span class="prov prov-primary" title="Provenance: primary"></span><a class="hl" href="https://example.org/en/quantisation" target="_blank" rel="noopener">A local inference runtime added a quantisation format</a></div><p class="sum">The runtime now reads a 4-bit format it previously converted on load, which shortens cold starts on the same hardware.</p><div class="badges"><a class="badge src" href="https://example.org/en/quantisation" target="_blank" rel="noopener">llama.cpp and Ollama releases 2026-09-21</a><span class="badge prov-primary">primary</span><span class="tag t-followup">followup</span></div></li>
+</ul>
+</div></details>
+<details class="aspect" id="d-energy-and-power" data-cluster="Energy and the physical world" open><summary><span class="ah">Energy and power · 能源与电力</span><span class="badges"><span class="tier core">core</span><span class="count">3 items</span></span></summary><div class="aspect-body">
+<ul class="stories">
+<li class="story"><div class="hlrow"><span class="prov prov-vendor-claim" title="Provenance: vendor-claim"></span><a class="hl" href="https://example.org/en/certified-cell" target="_blank" rel="noopener">A storage vendor announced a certified cell for its shipping product</a></div><p class="sum">The certification is named but the test report is not public, so the claim is recorded as a vendor claim rather than a verified result.</p><div class="badges"><a class="badge src" href="https://example.org/en/certified-cell" target="_blank" rel="noopener">Battery and solar vendor technical blogs 2026-09-17</a><span class="badge prov-vendor-claim">vendor-claim</span><span class="tag t-new">new</span></div></li>
+<li class="story"><div class="hlrow"><span class="prov prov-primary" title="Provenance: primary"></span><a class="hl" href="https://example.org/reports/storage-outlook" target="_blank" rel="noopener">An energy agency published its storage outlook</a></div><p class="sum">The outlook revises deployment assumptions for the next three years and states its own uncertainty range.</p><div class="badges"><a class="badge src" href="https://example.org/reports/storage-outlook" target="_blank" rel="noopener">IEA and NREL publications 2026-09-20</a><span class="badge prov-primary">primary</span><span class="tag t-followup">followup</span></div></li>
+<li class="story"><div class="hlrow"><span class="prov prov-preprint" title="Provenance: preprint"></span><a class="hl" href="https://example.org/preprints/cathode" target="_blank" rel="noopener">A preprint measures a cathode chemistry in coin cells</a></div><p class="sum">A coin-cell measurement is a claim and not a shipping product, and the listing is unreviewed.</p><div class="badges"><a class="badge src" href="https://example.org/preprints/cathode" target="_blank" rel="noopener">arXiv and Joule research listings 2026-09-16</a><span class="badge prov-preprint">preprint</span><span class="tag t-new">new</span></div></li>
+</ul>
+</div></details>
+<details class="aspect" id="d-materials-and-advanced-manufacturing" data-cluster="Energy and the physical world" open><summary><span class="ah">Materials and advanced manufacturing · 材料与先进制造</span><span class="badges"><span class="tier core">core</span><span class="count">2 items</span></span></summary><div class="aspect-body">
+<ul class="stories">
+<li class="story"><div class="hlrow"><span class="prov prov-secondary" title="Provenance: secondary"></span><a class="hl" href="https://example.org/journals/replication" target="_blank" rel="noopener">A journal reports an independent replication of a superconductor measurement</a></div><p class="sum">Independent replication is what the hype rule asks for before the result is stated as one.</p><div class="badges"><a class="badge src" href="https://example.org/journals/replication" target="_blank" rel="noopener">Nature Materials and Science coverage 2026-09-18</a><span class="badge prov-secondary">secondary</span><span class="tag t-new">new</span></div></li>
+<li class="story"><div class="hlrow"><span class="prov prov-preprint" title="Provenance: preprint"></span><a class="hl" href="https://example.org/preprints/single-sample" target="_blank" rel="noopener">A preprint reports a single-sample measurement of the same class of material</a></div><p class="sum">One sample from one laboratory is a claim, and the preprint is tagged as unreviewed.</p><div class="badges"><a class="badge src" href="https://example.org/preprints/single-sample" target="_blank" rel="noopener">arXiv cond-mat.mtrl-sci listing 2026-09-17</a><span class="badge prov-preprint">preprint</span><span class="tag t-followup">followup</span></div></li>
+</ul>
+</div></details>
+<details class="aspect" id="d-robotics-and-autonomy" data-cluster="Machines and industry" open><summary><span class="ah">Robotics and autonomy · 机器人与自主系统</span><span class="badges"><span class="tier core">core</span><span class="count">2 items</span></span></summary><div class="aspect-body">
+<ul class="stories">
+<li class="story"><div class="hlrow"><span class="prov prov-primary" title="Provenance: primary"></span><a class="hl" href="https://example.org/en/deployed-units" target="_blank" rel="noopener">Units from a warehouse robotics vendor are running a commercial task</a></div><p class="sum">A deployed unit doing the task commercially is what the hype rule accepts as a result, and the vendor&#39;s release note is the record.</p><div class="badges"><a class="badge src" href="https://example.org/en/deployed-units" target="_blank" rel="noopener">ROS and vendor release notes 2026-09-21</a><span class="badge prov-primary">primary</span><span class="tag t-new">new</span></div></li>
+<li class="story"><div class="hlrow"><span class="prov prov-preprint" title="Provenance: preprint"></span><a class="hl" href="https://example.org/preprints/manipulation" target="_blank" rel="noopener">A preprint reports a manipulation policy reproduced outside the lab that built it</a></div><p class="sum">The reproduction is by a second group, which is the condition the hype rule sets.</p><div class="badges"><a class="badge src" href="https://example.org/preprints/manipulation" target="_blank" rel="noopener">arXiv cs.RO listing 2026-09-19</a><span class="badge prov-preprint">preprint</span><span class="tag t-followup">followup</span></div></li>
+</ul>
+</div></details>
+<details class="aspect" id="d-industrial-automation-and-ot" data-cluster="Machines and industry" open><summary><span class="ah">Industrial automation and OT · 工业自动化与运营技术</span><span class="badges"><span class="tier core">core</span><span class="count">2 items</span></span></summary><div class="aspect-body">
+<ul class="stories">
+<li class="story"><div class="hlrow"><span class="prov prov-primary" title="Provenance: primary"></span><a class="hl" href="https://example.org/advisories/ics" target="_blank" rel="noopener">OT advisories named three controllers with remotely reachable flaws</a></div><p class="sum">The advisories list the affected firmware versions and the mitigations that do not require a patch.</p><div class="badges"><a class="badge src" href="https://example.org/advisories/ics" target="_blank" rel="noopener">CISA ICS advisories 2026-09-22</a><span class="badge prov-primary">primary</span><span class="tag t-new">new</span></div></li>
+<li class="story"><div class="hlrow"><span class="prov prov-primary" title="Provenance: primary"></span><a class="hl" href="https://example.org/standards/62443" target="_blank" rel="noopener">A functional-safety standard revision entered a second comment round</a></div><p class="sum">The draft is a primary document, and the timetable to publication is not yet fixed.</p><div class="badges"><a class="badge src" href="https://example.org/standards/62443" target="_blank" rel="noopener">ISA and IEC 62443 updates 2026-09-17</a><span class="badge prov-primary">primary</span><span class="tag t-followup">followup</span></div></li>
+</ul>
+</div></details>
+<details class="aspect" id="d-transport-and-mobility" data-cluster="Machines and industry" open><summary><span class="ah">Transport and mobility · 交通与出行</span><span class="badges"><span class="tier core">core</span><span class="count">2 items</span></span></summary><div class="aspect-body">
+<ul class="stories">
+<li class="story"><div class="hlrow"><span class="prov prov-primary" title="Provenance: primary"></span><a class="hl" href="https://example.org/reports/charging-data" target="_blank" rel="noopener">A transport research body published new charging-utilisation data</a></div><p class="sum">The dataset covers public chargers by region and states its collection method.</p><div class="badges"><a class="badge src" href="https://example.org/reports/charging-data" target="_blank" rel="noopener">IEA Global EV Outlook and ICCT publications 2026-09-20</a><span class="badge prov-primary">primary</span><span class="tag t-new">new</span></div></li>
+<li class="story"><div class="hlrow"><span class="prov prov-secondary" title="Provenance: secondary"></span><a class="hl" href="https://example.org/news/freight" target="_blank" rel="noopener">Industry reporting described a freight electrification programme</a></div><p class="sum">The report is secondary, and no primary programme document was retrievable in the window.</p><div class="badges"><a class="badge src" href="https://example.org/news/freight" target="_blank" rel="noopener">Automotive World and electrive 2026-09-18</a><span class="badge prov-secondary">secondary</span><span class="tag t-followup">followup</span></div></li>
+</ul>
+</div></details>
+<details class="aspect" id="d-neuroscience-and-brain-computer-interfaces" data-cluster="Life and health" open><summary><span class="ah">Neuroscience and brain-computer interfaces · 神经科学与脑机接口</span><span class="badges"><span class="tier core">core</span><span class="count">2 items</span></span></summary><div class="aspect-body">
+<ul class="stories">
+<li class="story"><div class="hlrow"><span class="prov prov-vendor-claim" title="Provenance: vendor-claim"></span><a class="hl" href="https://example.org/en/participant-update" target="_blank" rel="noopener">A BCI company posted an update about its participant count</a></div><p class="sum">There is no peer-reviewed cohort and no regulatory clearance in the window, so the update is a vendor claim and not a result.</p><div class="badges"><a class="badge src" href="https://example.org/en/participant-update" target="_blank" rel="noopener">Neuralink 2026-09-19</a><span class="badge prov-vendor-claim">vendor-claim</span><span class="tag t-new">new</span></div></li>
+<li class="story"><div class="hlrow"><span class="prov prov-preprint" title="Provenance: preprint"></span><a class="hl" href="https://example.org/preprints/decoding" target="_blank" rel="noopener">A preprint reports a neural-decoding result from a named cohort</a></div><p class="sum">The cohort is named and the decoding target is stated; as a preprint it is a claim until it is reviewed.</p><div class="badges"><a class="badge src" href="https://example.org/preprints/decoding" target="_blank" rel="noopener">arXiv q-bio.NC listing 2026-09-16</a><span class="badge prov-preprint">preprint</span><span class="tag t-followup">followup</span></div></li>
+</ul>
+</div></details>
+<details class="aspect" id="d-wearables-sensors-and-human-augmentation" data-cluster="Life and health" open><summary><span class="ah">Wearables, sensors and human augmentation · 可穿戴、传感器与人体增强</span><span class="badges"><span class="tier core">core</span><span class="count">2 items</span></span></summary><div class="aspect-body">
+<ul class="stories">
+<li class="story"><div class="hlrow"><span class="prov prov-primary" title="Provenance: primary"></span><a class="hl" href="https://example.org/clearances/sensor" target="_blank" rel="noopener">A device clearance covered a continuous-monitoring sensor</a></div><p class="sum">A clearance is a regulatory artifact, so the clearance notice is the primary citation.</p><div class="badges"><a class="badge src" href="https://example.org/clearances/sensor" target="_blank" rel="noopener">FDA device clearances and vendor release notes 2026-09-21</a><span class="badge prov-primary">primary</span><span class="tag t-new">new</span></div></li>
+<li class="story"><div class="hlrow"><span class="prov prov-vendor-claim" title="Provenance: vendor-claim"></span><a class="hl" href="https://example.org/en/prototype-accuracy" target="_blank" rel="noopener">A vendor posted accuracy figures for a prototype</a></div><p class="sum">A prototype and a vendor accuracy figure are explicitly not a result under the hype rule, so this stays a claim.</p><div class="badges"><a class="badge src" href="https://example.org/en/prototype-accuracy" target="_blank" rel="noopener">FDA device clearances and vendor release notes 2026-09-17</a><span class="badge prov-vendor-claim">vendor-claim</span><span class="tag t-followup">followup</span></div></li>
+</ul>
+</div></details>
+<details class="aspect" id="d-defence-and-dual-use-technology" data-cluster="Frontier and society" open><summary><span class="ah">Defence and dual-use technology · 国防与两用技术</span><span class="badges"><span class="tier core">core</span><span class="count">2 items</span></span></summary><div class="aspect-body">
+<ul class="stories">
+<li class="story"><div class="hlrow"><span class="prov prov-primary" title="Provenance: primary"></span><a class="hl" href="https://example.org/notices/programme" target="_blank" rel="noopener">A procurement notice confirmed a programme milestone</a></div><p class="sum">Official programme documentation is what the hype rule accepts, and the notice is the primary artifact.</p><div class="badges"><a class="badge src" href="https://example.org/notices/programme" target="_blank" rel="noopener">Government defence procurement announcements 2026-09-20</a><span class="badge prov-primary">primary</span><span class="tag t-new">new</span></div></li>
+<li class="story"><div class="hlrow"><span class="prov prov-secondary" title="Provenance: secondary"></span><a class="hl" href="https://example.org/janes/counter-drone" target="_blank" rel="noopener">An independent assessment disputes a counter-drone capability claim</a></div><p class="sum">The assessment is paywalled, so it is cited link-only with a fetchable corroboration rather than paraphrased from the headline.</p><div class="badges"><a class="badge src" href="https://example.org/janes/counter-drone" target="_blank" rel="noopener">Janes and IISS analysis 2026-09-16</a><a class="badge alt" href="https://example.net/coverage/counter-drone" target="_blank" rel="noopener">Industry coverage</a><span class="badge prov-secondary">secondary</span><span class="tag t-followup">followup</span></div></li>
+</ul>
+</div></details>
+<details class="aspect" id="d-audio-speech-and-music-technology" data-cluster="Frontier and society" open><summary><span class="ah">Audio, speech and music technology · 音频、语音与音乐技术</span><span class="badges"><span class="tier core">core</span><span class="count">0 items</span></span></summary><div class="aspect-body">
+<p>Scanned, nothing notable this week. Nothing cleared the evidence bar, so the domain keeps its heading and says so rather than being padded.</p>
+</div></details>
+</section>
+<section class="sec" id="d-watch-domains-notable-this-week"><h2>Watch domains — notable this week</h2>
+<details class="aspect" id="d-security-and-privacy" data-cluster="Security and trust" open><summary><span class="ah">Security and privacy · 安全与隐私</span><span class="badges"><span class="tier watch">watch</span><span class="count">2 items</span></span></summary><div class="aspect-body">
+<ul class="stories">
+<li class="story"><div class="hlrow"><span class="prov prov-primary" title="Provenance: primary"></span><a class="hl" href="https://example.org/advisories/parser" target="_blank" rel="noopener">An advisory covered a parser used across many products</a></div><p class="sum">The advisory names the affected ranges and the fixed release, and it is the primary record.</p><div class="badges"><a class="badge src" href="https://example.org/advisories/parser" target="_blank" rel="noopener">GitHub Security Advisories and NVD 2026-09-22</a><span class="badge prov-primary">primary</span><span class="tag t-new">new</span></div></li>
+<li class="story"><div class="hlrow"><span class="prov prov-primary" title="Provenance: primary"></span><a class="hl" href="https://example.org/en/incident-writeup" target="_blank" rel="noopener">A vendor&#39;s incident write-up described the same class of flaw</a></div><p class="sum">The write-up is a primary account from the party that fixed it, not an independent assessment.</p><div class="badges"><a class="badge src" href="https://example.org/en/incident-writeup" target="_blank" rel="noopener">Google Project Zero blog 2026-09-21</a><span class="badge prov-primary">primary</span><span class="tag t-followup">followup</span></div></li>
+</ul>
+</div></details>
+</section>
+<section class="sec" id="d-watch-domains-quiet"><h2>Watch domains — quiet</h2>
+<p class="quiet">Photonics and optical interconnects · Quantum technologies · EDA and open silicon · Scientific computing and HPC · Languages and runtimes · Developer tools and editors · Web platform and browsers · Open source governance and licensing · Formal methods and program verification · Linux and operating systems · Infrastructure, cloud and orchestration · Data, databases and storage · Networking and telecom · Smart home and IoT protocols · Personal computing and devices · Tech policy, standards and regulation · Built environment and construction technology · Climate and earth observation · Ocean, water and critical resources · Power electronics · Supply chains and logistics technology · Simulation and computer-aided engineering · Biotech and health · Frontier science and fundamental research · Space and aerospace · Fintech and payment rails · Spatial computing, AR/VR and displays · HCI and interaction research (all scanned, nothing notable this week)</p>
+</section>
+<section class="sec" id="d-coming-up"><h2>Coming up</h2>
+<ul class="plain">
+<li>A licence clarification is disputed by two downstream projects; a statement is expected within two weeks.</li>
+<li>The advisory&#39;s fix has not reached every distribution; an updated build is expected within a month.</li>
+<li>The preprinted result has been submitted to a venue; a decision is expected before the next quarter.</li>
+</ul>
+</section>
+<section class="sec" id="d-coverage-note"><h2>Coverage note</h2>
+<p>Covering 2026-09-16 08:00 to 2026-09-23 08:00 (Asia/Shanghai) · cap not hit</p>
+<p>Illustrative example: every story, date and URL above is a placeholder, and the outlet names are real entries from `config/sources.md`. A real digest repeats the plan&#39;s window label here verbatim, states what the cap skipped, and carries the collector&#39;s notices. This run scanned 14 core domains and 29 watch domains, shipped 32 items, and names the 28 watch domains that produced nothing on the quiet line. No domain was clipped by the cap. Collector notices: none, because this example collected nothing.</p>
+</section>
+<section class="sec" id="d-sources"><h2>Sources</h2>
+<p>Registry and discovery surfaces are listed in `config/sources.md`; discovery surfaces are never cited. The four provenance markers are `<span class="badge prov-primary">primary</span>`, `<span class="badge prov-secondary">secondary</span>`, `<span class="badge prov-preprint">preprint</span>` and `<span class="badge prov-vendor-claim">vendor-claim</span>`; every item carries exactly one of them and exactly one of `<span class="tag t-new">new</span>` and `<span class="tag t-followup">followup</span>`.</p>
+</section>
+</main>
+<footer class="wrap">Generated by the tech-radar skill. Every item cites a real, date-stamped source.</footer>
+<script>
+(function(){
+  var stories = Array.prototype.slice.call(document.querySelectorAll(".story"));
+  var q = document.getElementById("q");
+  var collapse = document.getElementById("collapse");
+  function apply(){
+    var v = (q.value || "").toLowerCase().trim();
+    stories.forEach(function(s){ s.style.display = (!v || s.textContent.toLowerCase().indexOf(v) >= 0) ? "" : "none"; });
+    Array.prototype.slice.call(document.querySelectorAll("details.aspect")).forEach(function(d){
+      var mine = Array.prototype.slice.call(d.querySelectorAll(".story"));
+      var shown = mine.length === 0 ? true : mine.some(function(s){ return s.style.display !== "none"; });
+      d.style.display = shown ? "" : "none";
+      if (v && shown) d.setAttribute("open", "");
+    });
+  }
+  q.addEventListener("input", apply);
+  collapse.addEventListener("change", function(){
+    Array.prototype.slice.call(document.querySelectorAll("details.aspect")).forEach(function(d){
+      if (collapse.checked) d.removeAttribute("open"); else d.setAttribute("open", "");
+    });
+  });
+  window.addEventListener("beforeprint", function(){
+    Array.prototype.slice.call(document.querySelectorAll("details.aspect")).forEach(function(d){ d.setAttribute("open", ""); });
+  });
+  window.addEventListener("afterprint", function(){
+    collapse.dispatchEvent(new Event("change"));
+  });
+})();
+</script>
+<a id="toTop" href="#top" aria-label="Back to top" title="Back to top">&#8593;</a>
+</body>
+</html>

@@ -1,0 +1,272 @@
+{
+  "since": "2026-09-16T00:00:00.000Z",
+  "until": "2026-09-23T00:00:00.000Z",
+  "window": {
+    "since": "2026-09-16T00:00:00.000Z",
+    "until": "2026-09-23T00:00:00.000Z"
+  },
+  "declared": "2026-09-16T00:00:00.000Z",
+  "skippedMs": 0,
+  "capped": false,
+  "perDomain": {
+    "ai-llm": {
+      "since": "2026-09-16T00:00:00.000Z",
+      "until": "2026-09-23T00:00:00.000Z",
+      "declared": "2026-09-16T00:00:00.000Z",
+      "skippedMs": 0
+    },
+    "chips-hardware": {
+      "since": "2026-09-16T00:00:00.000Z",
+      "until": "2026-09-23T00:00:00.000Z",
+      "declared": "2026-09-16T00:00:00.000Z",
+      "skippedMs": 0
+    },
+    "computer-vision": {
+      "since": "2026-09-16T00:00:00.000Z",
+      "until": "2026-09-23T00:00:00.000Z",
+      "declared": "2026-09-16T00:00:00.000Z",
+      "skippedMs": 0
+    },
+    "photonics": {
+      "since": "2026-09-16T00:00:00.000Z",
+      "until": "2026-09-23T00:00:00.000Z",
+      "declared": "2026-09-16T00:00:00.000Z",
+      "skippedMs": 0
+    },
+    "quantum": {
+      "since": "2026-09-16T00:00:00.000Z",
+      "until": "2026-09-23T00:00:00.000Z",
+      "declared": "2026-09-16T00:00:00.000Z",
+      "skippedMs": 0
+    },
+    "eda-silicon": {
+      "since": "2026-09-16T00:00:00.000Z",
+      "until": "2026-09-23T00:00:00.000Z",
+      "declared": "2026-09-16T00:00:00.000Z",
+      "skippedMs": 0
+    },
+    "hpc-scientific": {
+      "since": "2026-09-16T00:00:00.000Z",
+      "until": "2026-09-23T00:00:00.000Z",
+      "declared": "2026-09-16T00:00:00.000Z",
+      "skippedMs": 0
+    },
+    "languages-runtimes": {
+      "since": "2026-09-16T00:00:00.000Z",
+      "until": "2026-09-23T00:00:00.000Z",
+      "declared": "2026-09-16T00:00:00.000Z",
+      "skippedMs": 0
+    },
+    "devtools": {
+      "since": "2026-09-16T00:00:00.000Z",
+      "until": "2026-09-23T00:00:00.000Z",
+      "declared": "2026-09-16T00:00:00.000Z",
+      "skippedMs": 0
+    },
+    "web-platform": {
+      "since": "2026-09-16T00:00:00.000Z",
+      "until": "2026-09-23T00:00:00.000Z",
+      "declared": "2026-09-16T00:00:00.000Z",
+      "skippedMs": 0
+    },
+    "oss-governance": {
+      "since": "2026-09-16T00:00:00.000Z",
+      "until": "2026-09-23T00:00:00.000Z",
+      "declared": "2026-09-16T00:00:00.000Z",
+      "skippedMs": 0
+    },
+    "graphics-media": {
+      "since": "2026-09-16T00:00:00.000Z",
+      "until": "2026-09-23T00:00:00.000Z",
+      "declared": "2026-09-16T00:00:00.000Z",
+      "skippedMs": 0
+    },
+    "formal-methods": {
+      "since": "2026-09-16T00:00:00.000Z",
+      "until": "2026-09-23T00:00:00.000Z",
+      "declared": "2026-09-16T00:00:00.000Z",
+      "skippedMs": 0
+    },
+    "linux-os": {
+      "since": "2026-09-16T00:00:00.000Z",
+      "until": "2026-09-23T00:00:00.000Z",
+      "declared": "2026-09-16T00:00:00.000Z",
+      "skippedMs": 0
+    },
+    "infra-cloud": {
+      "since": "2026-09-16T00:00:00.000Z",
+      "until": "2026-09-23T00:00:00.000Z",
+      "declared": "2026-09-16T00:00:00.000Z",
+      "skippedMs": 0
+    },
+    "data-storage": {
+      "since": "2026-09-16T00:00:00.000Z",
+      "until": "2026-09-23T00:00:00.000Z",
+      "declared": "2026-09-16T00:00:00.000Z",
+      "skippedMs": 0
+    },
+    "self-hosting": {
+      "since": "2026-09-16T00:00:00.000Z",
+      "until": "2026-09-23T00:00:00.000Z",
+      "declared": "2026-09-16T00:00:00.000Z",
+      "skippedMs": 0
+    },
+    "networking": {
+      "since": "2026-09-16T00:00:00.000Z",
+      "until": "2026-09-23T00:00:00.000Z",
+      "declared": "2026-09-16T00:00:00.000Z",
+      "skippedMs": 0
+    },
+    "smart-home-iot": {
+      "since": "2026-09-16T00:00:00.000Z",
+      "until": "2026-09-23T00:00:00.000Z",
+      "declared": "2026-09-16T00:00:00.000Z",
+      "skippedMs": 0
+    },
+    "personal-computing": {
+      "since": "2026-09-16T00:00:00.000Z",
+      "until": "2026-09-23T00:00:00.000Z",
+      "declared": "2026-09-16T00:00:00.000Z",
+      "skippedMs": 0
+    },
+    "security-privacy": {
+      "since": "2026-09-16T00:00:00.000Z",
+      "until": "2026-09-23T00:00:00.000Z",
+      "declared": "2026-09-16T00:00:00.000Z",
+      "skippedMs": 0
+    },
+    "tech-policy": {
+      "since": "2026-09-16T00:00:00.000Z",
+      "until": "2026-09-23T00:00:00.000Z",
+      "declared": "2026-09-16T00:00:00.000Z",
+      "skippedMs": 0
+    },
+    "energy-power": {
+      "since": "2026-09-16T00:00:00.000Z",
+      "until": "2026-09-23T00:00:00.000Z",
+      "declared": "2026-09-16T00:00:00.000Z",
+      "skippedMs": 0
+    },
+    "materials-mfg": {
+      "since": "2026-09-16T00:00:00.000Z",
+      "until": "2026-09-23T00:00:00.000Z",
+      "declared": "2026-09-16T00:00:00.000Z",
+      "skippedMs": 0
+    },
+    "built-environment": {
+      "since": "2026-09-16T00:00:00.000Z",
+      "until": "2026-09-23T00:00:00.000Z",
+      "declared": "2026-09-16T00:00:00.000Z",
+      "skippedMs": 0
+    },
+    "climate-earth": {
+      "since": "2026-09-16T00:00:00.000Z",
+      "until": "2026-09-23T00:00:00.000Z",
+      "declared": "2026-09-16T00:00:00.000Z",
+      "skippedMs": 0
+    },
+    "ocean-water": {
+      "since": "2026-09-16T00:00:00.000Z",
+      "until": "2026-09-23T00:00:00.000Z",
+      "declared": "2026-09-16T00:00:00.000Z",
+      "skippedMs": 0
+    },
+    "power-electronics": {
+      "since": "2026-09-16T00:00:00.000Z",
+      "until": "2026-09-23T00:00:00.000Z",
+      "declared": "2026-09-16T00:00:00.000Z",
+      "skippedMs": 0
+    },
+    "robotics": {
+      "since": "2026-09-16T00:00:00.000Z",
+      "until": "2026-09-23T00:00:00.000Z",
+      "declared": "2026-09-16T00:00:00.000Z",
+      "skippedMs": 0
+    },
+    "industrial-ot": {
+      "since": "2026-09-16T00:00:00.000Z",
+      "until": "2026-09-23T00:00:00.000Z",
+      "declared": "2026-09-16T00:00:00.000Z",
+      "skippedMs": 0
+    },
+    "transport": {
+      "since": "2026-09-16T00:00:00.000Z",
+      "until": "2026-09-23T00:00:00.000Z",
+      "declared": "2026-09-16T00:00:00.000Z",
+      "skippedMs": 0
+    },
+    "supply-chain": {
+      "since": "2026-09-16T00:00:00.000Z",
+      "until": "2026-09-23T00:00:00.000Z",
+      "declared": "2026-09-16T00:00:00.000Z",
+      "skippedMs": 0
+    },
+    "simulation-cae": {
+      "since": "2026-09-16T00:00:00.000Z",
+      "until": "2026-09-23T00:00:00.000Z",
+      "declared": "2026-09-16T00:00:00.000Z",
+      "skippedMs": 0
+    },
+    "biotech-health": {
+      "since": "2026-09-16T00:00:00.000Z",
+      "until": "2026-09-23T00:00:00.000Z",
+      "declared": "2026-09-16T00:00:00.000Z",
+      "skippedMs": 0
+    },
+    "neuro-bci": {
+      "since": "2026-09-16T00:00:00.000Z",
+      "until": "2026-09-23T00:00:00.000Z",
+      "declared": "2026-09-16T00:00:00.000Z",
+      "skippedMs": 0
+    },
+    "wearables-sensors": {
+      "since": "2026-09-16T00:00:00.000Z",
+      "until": "2026-09-23T00:00:00.000Z",
+      "declared": "2026-09-16T00:00:00.000Z",
+      "skippedMs": 0
+    },
+    "frontier-science": {
+      "since": "2026-09-16T00:00:00.000Z",
+      "until": "2026-09-23T00:00:00.000Z",
+      "declared": "2026-09-16T00:00:00.000Z",
+      "skippedMs": 0
+    },
+    "space-aerospace": {
+      "since": "2026-09-16T00:00:00.000Z",
+      "until": "2026-09-23T00:00:00.000Z",
+      "declared": "2026-09-16T00:00:00.000Z",
+      "skippedMs": 0
+    },
+    "defence-dual-use": {
+      "since": "2026-09-16T00:00:00.000Z",
+      "until": "2026-09-23T00:00:00.000Z",
+      "declared": "2026-09-16T00:00:00.000Z",
+      "skippedMs": 0
+    },
+    "fintech-rails": {
+      "since": "2026-09-16T00:00:00.000Z",
+      "until": "2026-09-23T00:00:00.000Z",
+      "declared": "2026-09-16T00:00:00.000Z",
+      "skippedMs": 0
+    },
+    "spatial-computing": {
+      "since": "2026-09-16T00:00:00.000Z",
+      "until": "2026-09-23T00:00:00.000Z",
+      "declared": "2026-09-16T00:00:00.000Z",
+      "skippedMs": 0
+    },
+    "audio-speech": {
+      "since": "2026-09-16T00:00:00.000Z",
+      "until": "2026-09-23T00:00:00.000Z",
+      "declared": "2026-09-16T00:00:00.000Z",
+      "skippedMs": 0
+    },
+    "hci-research": {
+      "since": "2026-09-16T00:00:00.000Z",
+      "until": "2026-09-23T00:00:00.000Z",
+      "declared": "2026-09-16T00:00:00.000Z",
+      "skippedMs": 0
+    }
+  },
+  "label": "Covering 2026-09-16 08:00 to 2026-09-23 08:00 (Asia/Shanghai) · cap not hit"
+}

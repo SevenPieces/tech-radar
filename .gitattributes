@@ -1,0 +1,5 @@
+# Normalize every text file to LF in the repository, and check it out as LF.
+# This repository is almost entirely Markdown; without this a Windows
+# contributor's CRLF shows up as a whole-file diff.
+* text=auto eol=lf
+*.png binary
