@@ -14,10 +14,11 @@ import { DEFAULT_UA } from '../scripts/lib/net.mjs';
 import { readSettings } from '../scripts/lib/mdtable.mjs';
 import { SKILL_ROOT, shippedFiles } from './lib/shipped-files.mjs';
 
-// True when the repository's own ignore rules exclude a path, false when they do not, and
-// null when git cannot be asked at all (no binary, or the tree is not a repository).
-function gitSaysIgnored(rel) {
-  const res = spawnSync('git', ['-C', SKILL_ROOT, 'check-ignore', '-q', rel], { encoding: 'utf8' });
+// True when the ignore rules of the repository rooted at `root` exclude a path, false when
+// they do not, and null when git cannot be asked at all (no binary, or the tree is not a
+// repository). The root is a parameter so a case can ask a tree it owns.
+function gitSaysIgnored(rel, root = SKILL_ROOT) {
+  const res = spawnSync('git', ['-C', root, 'check-ignore', '-q', rel], { encoding: 'utf8' });
   if (res.error || (res.status !== 0 && res.status !== 1)) return null;
   return res.status === 0;
 }
@@ -146,39 +147,53 @@ test('a dangling symlink does not break the guards, and a shipped leak is still 
 
 // The walker asks the repository itself, so a path the ignore rules exclude is skipped even
 // when it sits beside shipped files, while the same leak planted in a shipped file fails.
-// Both fixtures are removed in the finally and their names are unique per run.
+// The fixture is a repository this case builds for itself, under a name unique to the
+// process, and removes in the finally: nothing is written into the working tree the suite
+// runs in, so a second copy of the suite checked out inside this one -- or a run overlapping
+// this one -- can neither see the fixture nor change the verdict, and the walk judged here is
+// the one rooted at this case's own tree. The rule it applies is this repository's own
+// .gitignore, copied in verbatim, so the walk still consults the publication rule the
+// checkout states.
 test('a gitignored path is skipped while a shipped file is still scanned', (t) => {
   const tag = 'planted-' + process.pid + '-' + Date.now().toString(36);
   const ignoredRel = 'tests/' + tag + '.tmp';
   const shippedRel = 'tests/' + tag + '-fixture.txt';
-  const ignoredPath = join(SKILL_ROOT, ignoredRel);
-  const shippedPath = join(SKILL_ROOT, shippedRel);
-  const ignored = gitSaysIgnored(ignoredRel);
+  const dir = mkdtempSync(join(tmpdir(), 'tech-radar-ignored-'));
   const leak = 'Task ' + '7 ' + 'ran the probes\n';
   const secret = 'ghp_' + 'fakefakefakefake' + '\n';
   try {
-    writeFileSync(ignoredPath, leak + secret);
-    writeFileSync(shippedPath, leak + secret);
-    const files = shippedFiles(SKILL_ROOT);
-    const named = scan(SKILL_ROOT, PROCESS, 'names');
-    const carried = scan(SKILL_ROOT, SECRET, 'carries');
+    mkdirSync(join(dir, 'tests'), { recursive: true });
+    writeFileSync(join(dir, '.gitignore'), readFileSync(join(SKILL_ROOT, '.gitignore')));
+    writeFileSync(join(dir, ignoredRel), leak + secret);
+    writeFileSync(join(dir, shippedRel), leak + secret);
+    // The rule is answered only inside a work tree, so the fixture tree is made one.
+    const made = spawnSync('git', ['-C', dir, 'init', '-q'], { encoding: 'utf8' });
+    const ignored = made.error || made.status !== 0 ? null : gitSaysIgnored(ignoredRel, dir);
+    const files = shippedFiles(dir);
+    const named = scan(dir, PROCESS, 'names');
+    const carried = scan(dir, SECRET, 'carries');
     // This half holds whatever git can answer: the guard must not be blunted by the skip.
-    assert.equal(files.includes(shippedRel), true, 'a file under tests/ ships and is scanned');
+    assert.equal(files.includes(shippedRel), true, 'a file the repository ships is scanned');
     assert.equal(named.includes(shippedRel + ' names a build task number'), true,
       'the shipped leak is still caught: ' + named.join('; '));
     assert.equal(carried.includes(shippedRel + ' carries a GitHub token'), true,
       'the shipped credential shape is still caught: ' + carried.join('; '));
     if (ignored === null) {
-      t.diagnostic('git is not available, so the repository ignore rule was not consulted');
+      t.skip('git is not available, so the repository ignore rule was not consulted');
       return;
     }
     assert.equal(ignored, true, 'the fixture name is one the repository ignores: ' + ignoredRel);
     assert.equal(files.includes(ignoredRel), false, 'a gitignored run artifact is never scanned');
     assert.equal(named.some((o) => o.startsWith(ignoredRel)), false, 'the ignored leak is not reported');
     assert.equal(carried.some((o) => o.startsWith(ignoredRel)), false, 'the ignored credential shape is not reported');
+    // The same shape is one this checkout ignores, asked without planting anything in it.
+    const realIgnored = gitSaysIgnored(ignoredRel);
+    if (realIgnored !== null) {
+      assert.equal(realIgnored, true,
+        'this repository ignores a run artifact under tests/: ' + ignoredRel);
+    }
   } finally {
-    rmSync(ignoredPath, { force: true });
-    rmSync(shippedPath, { force: true });
+    rmSync(dir, { recursive: true, force: true });
   }
 });
 

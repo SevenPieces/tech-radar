@@ -3,6 +3,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { collectRegistries, collectAdvisories, nvdStamp } from '../scripts/collect.mjs';
 import { linkify } from '../scripts/render-html.mjs';
+import { shapeHttpError } from '../scripts/lib/net.mjs';
 
 const ctx = {
   since: '2026-09-16T00:00:00Z', until: '2026-09-23T00:00:00Z', timeout: 5000,
@@ -420,4 +421,64 @@ test('a crafted or absent NVD identifier never becomes a citation', async () => 
   for (const notice of notices) {
     assert.match(notice, /identifier/i, 'the notice names what it skipped: ' + notice);
   }
+});
+
+// TR-107 regression test: a notice is published text and the digest ships as Markdown, so the
+// Coverage note is read through a Markdown renderer whose link rule draws a live anchor out of
+// '[label](destination)'. The identifier a rejected advisory carries is upstream text of
+// arbitrary shape - the row below is skipped precisely because it is not a CVE id - so an id
+// that spells '[x](https://evil.example/pwn)' was quoted into the notice verbatim and the
+// published coverage note carried an anchor pointing wherever the upstream value chose. The
+// link syntax is neutralised in the same single place the marker vocabulary is, while an
+// ordinary bracketed word and the punctuation of a legitimate server message survive.
+const MARKDOWN_LINK = /\[([^\]\n]*)\]\(((?:[^()\s]|\([^()\s]*\))*)\)/g;
+// The one rendering rule this test pins: the notice text through a Markdown reader. A live
+// anchor is exactly what the rule draws, and its address is the upstream value's own.
+const renderMarkdown = (text) => String(text)
+  .replace(MARKDOWN_LINK, (match, label, href) => `<a href="${href}">${label}</a>`);
+
+test('a rejected NVD identifier that spells a markdown link draws no anchor in the coverage note', async () => {
+  const net = {
+    fetchText: async () => JSON.stringify({
+      vulnerabilities: [
+        { cve: { id: '[x](https://evil.example/pwn)', published: '2026-09-21T00:00:00.000',
+          descriptions: [{ lang: 'en', value: 'a markdown link' }] } },
+        { cve: { id: '[draft] CVE', published: '2026-09-21T00:00:00.000',
+          descriptions: [{ lang: 'en', value: 'a bracketed word' }] } },
+      ],
+    }),
+  };
+  const { candidates, notices } = await collectAdvisories(
+    [{ kind: 'nvd', target: 'high-severity', domain: 'security-privacy' }], { ...ctx, net });
+  assert.deepEqual(candidates, [], 'neither identifier is a CVE id, so neither row ships');
+  assert.equal(notices.length, 2, 'each unusable identifier is reported: ' + notices.join(' | '));
+
+  // What the coverage note publishes, read the way a Markdown reader reads it.
+  const rendered = notices.map(renderMarkdown).join('\n');
+  assert.doesNotMatch(rendered, /<a\b/, 'a notice rendered a live anchor: ' + rendered);
+  assert.match(notices[0], /identifier/i, 'the notice still names what it skipped: ' + notices[0]);
+
+  // An ordinary bracketed word spells no link, so it survives exactly as upstream wrote it.
+  assert.match(notices[1], /\[draft\] CVE/, 'a bracketed word that spells no link survives: ' + notices[1]);
+  assert.doesNotMatch(renderMarkdown(notices[1]), /<a\b/,
+    'a bracketed word draws no anchor: ' + notices[1]);
+
+  // A legitimate server message keeps its punctuation through the same single sanitiser.
+  const stub = {
+    ...ctx,
+    net: {
+      fetchText: async () => {
+        throw shapeHttpError(500,
+          Buffer.from('the feed is otherwise fine (retry later); see [1] of the log'),
+          'https://feeds.example/rss', 400);
+      },
+    },
+  };
+  const { notices: shaped } = await collectRegistries(
+    [{ kind: 'npm', target: 'serde', domain: 'ai-llm' }], stub);
+  assert.equal(shaped.length, 1, 'the failed row produced one notice');
+  assert.match(shaped[0], /the feed is otherwise fine \(retry later\); see \[1\] of the log/,
+    'a legitimate server message keeps its punctuation: ' + shaped[0]);
+  assert.doesNotMatch(renderMarkdown(shaped[0]), /<a\b/,
+    'a parenthesised remark is not a link: ' + shaped[0]);
 });

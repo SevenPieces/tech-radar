@@ -29,10 +29,10 @@ const GITHUB_API = 'https://api.github.com';
 // message it raises for a JSON parse failure, so a notice built from that message used to
 // carry a raw ESC (or NUL, or BS) into stdout, stderr and the published pool. Every notice
 // is normalised at the single push: a whitespace control becomes a space, every other C0,
-// C1 and DEL byte is dropped, the marker vocabulary the renderer trusts is neutralised --
-// SKILL.md requires the notices to be carried into the published Coverage note, so a notice
-// is published text -- and the text is bounded so one hostile response cannot become an
-// unbounded notice.
+// C1 and DEL byte is dropped, the marker vocabulary and the markdown link syntax the
+// renderers trust are neutralised -- SKILL.md requires the notices to be carried into the
+// published Coverage note, so a notice is published text -- and the text is bounded so one
+// hostile response cannot become an unbounded notice.
 //
 // The request's own credential is removed here too, at the one boundary every notice crosses.
 // The transport shapers redact the messages they build, but the shapers are not the only

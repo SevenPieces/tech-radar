@@ -387,13 +387,14 @@ export function splitItems(xml) {
   return out;
 }
 
-// Upstream text is normalised here and nowhere else, so this is where two classes of
-// hostile byte are refused. A control byte can redraw an operator's terminal line or sit
+// Upstream text is normalised here and nowhere else, so this is where the classes of
+// hostile text are refused. A control byte can redraw an operator's terminal line or sit
 // in the published pool; a whitespace control becomes a space so words keep their
 // separation, and every other C0, C1 and DEL byte is dropped. The marker vocabulary below
 // is the grammar the renderer trusts, so text that merely spells it must not draw a badge
 // on a published card: a marker's bracket and colon become spaces, and a status token's
-// hash becomes a space rather than being deleted. The length bound is applied last.
+// hash becomes a space rather than being deleted. Markdown link syntax is the same class
+// of trusted text, so the seam below is spaced here too. The length bound is applied last.
 const CONTROLS = /[\u0000-\u001f\u007f-\u009f]/g;
 // A whole marker, opener and closer together, with a plausible body after the opener: a
 // bracketed span that reads like a label rather than a sentence. Both brackets and the colon
@@ -422,17 +423,33 @@ const STATUS_FLAG = /(?<!\w)#(?=(?:new|followup|developing|watch)\b)/gi;
 // emphasis into a published card. Both asterisks become a space, so the words keep their
 // separation and no emphasis is drawn.
 const BOLD = /\*\*/g;
+// A bracketed label immediately followed by a parenthesised destination is a link in every
+// markdown reader, and a notice is published text in the Coverage note: upstream text that
+// merely spells the syntax drew a live anchor pointing wherever the upstream value chose
+// ('the identifier is not a CVE id: "[x](https://evil.example/pwn)"'). One space between the
+// two halves ends the link grammar while the rejected value stays legible - the reader still
+// sees the brackets and the destination - and nothing else moves, because only the '](' seam
+// is rewritten: an ordinary bracketed word, a parenthetical remark, and every other mark of
+// punctuation in a legitimate server message survive byte-identical. The marker rules above
+// run first, and they already consume a citation's closer with its opener, so the seam a
+// legitimate '[src:OUTLET DATE](url)' carries is never reached here. A reference-style link
+// is not a live link on its own - it needs a definition line - and both callers have already
+// turned every control byte, newline included, into a space, so the text normalised here
+// cannot carry one.
+const LINK_SEAM = /\]\(/g;
 
 // The vocabulary the renderer trusts, as one step with one contract: upstream text must not
-// draw a badge, a status tag or emphasis on a published card. A candidate field is normalised
-// with this, and so is every notice - a notice is published text in the coverage note.
+// draw a badge, a status tag, emphasis or a link on a published card. A candidate field is
+// normalised with this, and so is every notice - a notice is published text in the coverage
+// note.
 export function neutraliseMarkers(text) {
   return String(text)
     .replace(MARKER, ' $1 $2 ')
     .replace(MARKER_OPENER, ' $1 ')
     .replace(MARKER_OPEN, ' ')
     .replace(STATUS_FLAG, ' ')
-    .replace(BOLD, ' ');
+    .replace(BOLD, ' ')
+    .replace(LINK_SEAM, '] (');
 }
 
 // The same vocabulary, in the one candidate field that is a URL rather than prose. The
