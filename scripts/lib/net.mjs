@@ -64,12 +64,13 @@ const SECRET_SHAPES = [
 // set cannot know.
 const MIN_SECRET_CHARS = 8;
 
-// A credential-named query parameter is a credential position, but a value of one or two
-// characters is an ordinary word as often as it is a credential: a feed whose target carried
+// A credential-named query parameter is a credential position in a notice, but a value of one or
+// two characters is an ordinary word as often as it is a credential: a feed whose target carried
 // '?code=on' reaped the word 'on' from every published field and turned 'Python on Windows' into
-// 'Python [redacted] Windows'. Three characters is the floor for collecting one. The request's
-// userinfo is the one credential position with no floor at all, because a userinfo value is never
-// ordinary configuration.
+// 'Python [redacted] Windows'. Three characters is the floor for the notice removal set. The
+// candidate pass has its own, higher floor below (MIN_SECRET_CHARS): a notice is redacted at the
+// push and an over-broad removal there costs the run's only diagnosis, while the candidate fields
+// are the prose the digest is written from.
 const MIN_CREDENTIAL_VALUE_CHARS = 3;
 
 function looksLikeValue(value) {
@@ -79,28 +80,64 @@ function looksLikeValue(value) {
 
 // A query parameter whose name is credential-shaped holds a credential, and no other query
 // parameter's value is collected at all. The name is lower-cased with every non-alphanumeric
-// character removed before the stem test, and the stem is matched as a substring of that form,
-// because a fused spelling is the same parameter to the server and no curated list can know the
-// operator's spelling: api-key, apiKey, apikey, auth_token, access-token, accesstoken,
-// client_secret, clientsecret, pwd, private_token, X-Amz-Signature, AWSAccessKeyId,
-// subscriptionkey, bearer, jwt, session and code all have to match. Removing the separators
-// costs the word boundary the earlier shape relied on, so a rare ordinary name that happens to
-// carry a stem (for example 'keyword' carries 'key') takes the credential rule; that is the safe
-// direction, and the three-character value floor below keeps an ordinary short value under such a
-// name out of the removal set.
-const CREDENTIAL_STEM = /pass|pwd|secret|token|auth|key|sig|session|code|credential|cookie|bearer|jwt/;
+// character removed, and a stem is matched either as one whole token of the name or as a suffix of
+// that stripped form -- never as a substring anywhere in it. A fused spelling is the same
+// parameter to the server and no curated list can know the operator's spelling, so the suffix
+// carries every fused spelling (apikey, accesstoken, refreshtoken, clientsecret, privatekey,
+// subscriptionkey, sshkey), while the token carries the delimited ones whose tail is not the stem
+// itself (AWSAccessKeyId ends in 'id', not 'key'; X-Amz-Signature ends in 'nature', not 'sig').
+//
+// Matching a token or a suffix rather than a substring is what keeps an ordinary name out of the
+// credential rule: 'author' carries 'auth' but does not end with it, 'design' and 'assign' carry
+// 'sig' only in the middle, 'keyword' carries 'key' only at the front, and 'statuscode',
+// 'countrycode', 'zipcode', 'recode' and 'decoder' carry no stem once 'code' is matched by its own
+// name rather than as a suffix. An ordinary name that does end with a shorter stem ('monkey' ends
+// in 'key', 'bypass' ends in 'pass') still takes the rule; that is the safe direction, and the
+// value floors below keep an ordinary short value under such a name out of the candidate set, and
+// a one- or two-character one out of the notice set as well.
+const CREDENTIAL_STEMS = [
+  'pass', 'pwd', 'pw', 'pswd', 'secret', 'token', 'auth', 'key', 'sig', 'signature', 'session',
+  'credential', 'cookie', 'bearer', 'jwt', 'otp', 'pin', 'hmac', 'ticket', 'assertion', 'saml',
+  'samlresponse', 'nonce',
+];
 
-// The name in the form the stem test is defined on.
+// A code-carrying parameter is matched by its whole name only: 'code' alone (?code=...) and a name
+// that spells it as its own token (code_verifier, auth_code) are the explicit code-carrying names
+// this rule keeps, while 'code' is not a suffix stem -- the ambiguous spelling that made
+// statuscode, countrycode, zipcode, recode and decoder credential positions.
+const CREDENTIAL_CODE_TOKEN = 'code';
+
+// The tokens of a name: a separator or a lower-to-upper case transition starts one, so
+// 'auth_token', 'AWSAccessKeyId' and 'X-Amz-Signature' are split where a reader would read them.
+function nameTokens(name) {
+  return String(name ?? '')
+    .replace(/([a-z0-9])([A-Z])/g, '$1 $2')
+    .toLowerCase()
+    .split(/[^a-z0-9]+/)
+    .filter((token) => token !== '');
+}
+
+// The name in the form the suffix rule is defined on.
 function normalizedParamName(name) {
   return String(name ?? '').toLowerCase().replace(/[^a-z0-9]/g, '');
 }
 
+function isCredentialName(name) {
+  const normalized = normalizedParamName(name);
+  if (normalized === '') return false;
+  for (const token of nameTokens(name)) {
+    if (token === CREDENTIAL_CODE_TOKEN || CREDENTIAL_STEMS.includes(token)) return true;
+  }
+  return CREDENTIAL_STEMS.some((stem) => normalized.endsWith(stem));
+}
+
 // The name as the server reads it: a percent-encoded spelling of a credential name is the same
-// parameter to the server, so it is the same parameter here.
+// parameter to the server, so it is the same parameter here. Both the stem list and the token rule
+// are re-run on the decoded form.
 function credentialParam(name) {
   const raw = String(name ?? '');
-  if (CREDENTIAL_STEM.test(normalizedParamName(raw))) return true;
-  try { return CREDENTIAL_STEM.test(normalizedParamName(decodeURIComponent(raw.replace(/\+/g, ' ')))); } catch { return false; }
+  if (isCredentialName(raw)) return true;
+  try { return isCredentialName(decodeURIComponent(raw.replace(/\+/g, ' '))); } catch { return false; }
 }
 
 // How long a value is once the server has decoded it, which is the value the floor is about: a
@@ -129,8 +166,11 @@ function redactBasicCredentials(text) {
 // the floor, an escaped pattern below it, so a regex metacharacter in a value is never read as a
 // pattern -- and the floor is applied here rather than at the removal, because this is the only
 // place that knows where the value came from. Exactly what is collected:
-//   - the request's userinfo, whatever its length: it is never ordinary configuration;
-//   - the value of a credential-named query parameter, from MIN_CREDENTIAL_VALUE_CHARS up;
+//   - the request's userinfo PASSWORD, whatever its length: it is never ordinary configuration,
+//     while the username is an ordinary word as often as it is a login and is collected only from
+//     MIN_SECRET_CHARS up;
+//   - the value of a credential-named query parameter, from MIN_CREDENTIAL_VALUE_CHARS up in the
+//     notice set and from MIN_SECRET_CHARS up in the candidate set;
 //   - a credential header's value whole, and above the floor the words it splits into;
 //   - no other value at all, so an ordinary configured query value ('?sortOrder=descending',
 //     '?max_results=40') can never rewrite a published word.
@@ -140,38 +180,57 @@ function redactBasicCredentials(text) {
 export function requestSecretSets(url, headers) {
   const all = new Set();
   const credentials = new Set();
-  const add = (value, credentialPosition) => {
+  // Eligibility is decided once, before any spelling of a value is added: notice is the
+  // notice-only removal set, candidate is the candidate-pass set (a credential position long
+  // enough not to be ordinary prose), and a candidate value is always a notice value too.
+  const add = (value, { notice = false, candidate = false } = {}) => {
     const v = String(value ?? '');
     if (v === '') return;
-    if (credentialPosition || looksLikeValue(v)) {
+    if (candidate) {
       all.add(v);
-      if (credentialPosition) credentials.add(v);
+      credentials.add(v);
+    } else if (notice) {
+      all.add(v);
     }
   };
   // Every spelling of one value is collected: the decoded form a server would print after
   // decoding, the raw spelling curl actually put on the request line, and the percent-encoded
   // form of the decoded one. A server that echoes $request_uri republishes the raw spelling,
   // and removing only the decoded form left that spelling readable in the notice.
-  const addSpellings = (value, always = false) => {
+  const addSpellings = (value, eligible) => {
     const v = String(value ?? '');
-    add(v, always);
     let decoded = null;
     try { decoded = decodeURIComponent(v); } catch { /* not percent-encoded */ }
-    if (decoded !== null && decoded !== v) add(decoded, always);
-    for (const spelling of [v, decoded, String(v).replace(/\+/g, ' ')]) {
+    for (const spelling of [v, decoded, v.replace(/\+/g, ' ')]) {
       if (spelling === null) continue;
-      try { add(encodeURIComponent(spelling), always); } catch { /* a lone surrogate */ }
+      add(spelling, eligible);
+      try { add(encodeURIComponent(spelling), eligible); } catch { /* a lone surrogate */ }
     }
   };
+  // A credential-named query value crosses two floors: the notice set takes it from
+  // MIN_CREDENTIAL_VALUE_CHARS up, the candidate set only from MIN_SECRET_CHARS up, so an ordinary
+  // short word under a credential name ('new', 'beta', 'live') stays in the notice's removal set
+  // while it cannot rewrite the prose a candidate carries.
+  const queryEligibility = (length) => ({
+    notice: length >= MIN_CREDENTIAL_VALUE_CHARS,
+    candidate: length >= MIN_SECRET_CHARS,
+  });
   const raw = String(url ?? '');
   try {
     const parsed = new URL(raw);
-    addSpellings(parsed.username, true);
-    addSpellings(parsed.password, true);
+    // The password is never ordinary configuration and goes in whole; the username is an ordinary
+    // word as often as it is a login, so it enters the sets only at the free-text floor (TR-117).
+    addSpellings(parsed.password, { notice: true, candidate: true });
+    if (parsed.username.length >= MIN_SECRET_CHARS) {
+      addSpellings(parsed.username, { notice: true, candidate: true });
+    }
     for (const [name, value] of parsed.searchParams) {
       if (!credentialParam(name)) continue;
-      if (value.length < MIN_CREDENTIAL_VALUE_CHARS) continue;
-      addSpellings(value, true);
+      // URLSearchParams reports the value already decoded, so its length is the floor's input;
+      // decoding it a second time would shorten a value that literally spells an escape.
+      const eligible = queryEligibility(value.length);
+      if (!eligible.notice && !eligible.candidate) continue;
+      addSpellings(value, eligible);
     }
     // URLSearchParams reports the decoded value, so 'token=oper+plus' arrives as 'oper plus'
     // and the raw pair spelling is read from the query string itself. The floor is read from the
@@ -181,22 +240,33 @@ export function requestSecretSets(url, headers) {
       if (eq === -1) continue;
       if (!credentialParam(pair.slice(0, eq))) continue;
       const rawValue = pair.slice(eq + 1);
-      if (decodedLength(rawValue) < MIN_CREDENTIAL_VALUE_CHARS) continue;
-      addSpellings(rawValue, true);
+      const eligible = queryEligibility(decodedLength(rawValue));
+      if (!eligible.notice && !eligible.candidate) continue;
+      addSpellings(rawValue, eligible);
     }
     // The Basic header curl would send is the base64 of the userinfo: a request with none
     // contributes nothing here rather than the base64 of a bare colon.
     if (parsed.username !== '' || parsed.password !== '') {
       const userinfo = `${parsed.username}:${parsed.password}`;
-      try { add(Buffer.from(decodeURIComponent(userinfo)).toString('base64'), true); } catch { add(Buffer.from(userinfo).toString('base64'), true); }
+      const basic = { notice: true, candidate: true };
+      try { add(Buffer.from(decodeURIComponent(userinfo)).toString('base64'), basic); } catch { add(Buffer.from(userinfo).toString('base64'), basic); }
     }
   } catch {
+    // The same split by hand: the password (after the first colon) goes in whole, the username
+    // only at the free-text floor.
     const userinfo = /\/\/([^/?#\s]*)@/.exec(raw);
-    if (userinfo) addSpellings(userinfo[1], true);
+    if (userinfo) {
+      const colon = userinfo[1].indexOf(':');
+      const user = colon === -1 ? userinfo[1] : userinfo[1].slice(0, colon);
+      const password = colon === -1 ? '' : userinfo[1].slice(colon + 1);
+      if (password !== '') addSpellings(password, { notice: true, candidate: true });
+      if (user.length >= MIN_SECRET_CHARS) addSpellings(user, { notice: true, candidate: true });
+    }
     for (const m of raw.matchAll(/[?&]([^=&#\s]+)=([^&#\s]*)/g)) {
       if (!credentialParam(m[1])) continue;
-      if (decodedLength(m[2]) < MIN_CREDENTIAL_VALUE_CHARS) continue;
-      addSpellings(m[2], true);
+      const eligible = queryEligibility(decodedLength(m[2]));
+      if (!eligible.notice && !eligible.candidate) continue;
+      addSpellings(m[2], eligible);
     }
   }
   // A credential the request carried in a header is the request's own secret too: the token the
@@ -208,8 +278,10 @@ export function requestSecretSets(url, headers) {
   // the removal set so a notice that merely names the scheme keeps its wording.
   for (const [name, value] of Object.entries(headers ?? {})) {
     if (!/authorization|cookie|token|key|secret/i.test(String(name))) continue;
-    addSpellings(value, true);
-    for (const part of String(value).split(/\s+/)) addSpellings(part);
+    addSpellings(value, { notice: true, candidate: true });
+    for (const part of String(value).split(/\s+/)) {
+      addSpellings(part, { notice: looksLikeValue(part), candidate: false });
+    }
   }
   return { all: [...all], credentials: [...credentials] };
 }

@@ -72,7 +72,7 @@ test('TR-109 a fused credential parameter name is protected and a short ordinary
 // must survive the narrowing: a credential a 200 answer echoes into a candidate field is still
 // removed, and the userinfo password with it. This drives collectAll, which owns both unions.
 test('TR-110 the collectors own query values do not reap candidate prose while a credential still does', async () => {
-  const token = 'TK1234';
+  const token = 'TK12345678';
   const password = 'pw1';
   const settings = {
     timezone: 'Asia/Shanghai', window_cap_weeks: 4, first_run_days: 7,

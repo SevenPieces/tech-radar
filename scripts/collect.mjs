@@ -566,10 +566,14 @@ export function nvdStamp(iso) {
 const CVE_ID = /^CVE-\d{4}-\d{4,}$/;
 
 // What a skipped identifier is called in the notice. The id is upstream text of arbitrary
-// length and content, so it is JSON-quoted (bounded by sanitizeNotice) rather than pasted
-// in: a reader has to see what was rejected without the notice itself becoming a carrier.
+// length and content, so it crosses the same normalisation the transport's body snippet does
+// before it can be quoted: plainText strips a tag-shaped span, drops the control bytes and
+// neutralises the vocabulary the renderer trusts, and the push adds the markdown link seam. The
+// notice therefore carries no live <a href>, no <img src> and no link syntax the Coverage note
+// would render, while JSON.stringify keeps what was rejected legible to the reader.
 function unnamedAdvisory(id) {
-  return JSON.stringify(id.length > 120 ? `${id.slice(0, 120)}...` : id);
+  const text = plainText(String(id ?? ''), 400);
+  return JSON.stringify(text.length > 120 ? `${text.slice(0, 120)}...` : text);
 }
 
 // Every reader answers one question: when was the version we are about to report
@@ -719,7 +723,11 @@ export async function collectRegistries(rows, ctx) {
       // A registry release whose release time cannot be established is a notice, not an
       // undated "release" that passes every window.
       if (!publishedAt) {
-        pushNotice(notices, `${row.kind} ${row.target}: no release time for ${version || 'the latest version'}; candidate skipped`);
+        // The version is upstream text and a notice is published verbatim into the Coverage note,
+        // so it crosses the same normalisation the transport's body snippet does (TR-119): the
+        // notice cannot become a carrier for a tag-shaped version.
+        const versionText = plainText(String(version ?? ''), ctx.settings.title_max_chars);
+        pushNotice(notices, `${row.kind} ${row.target}: no release time for ${versionText || 'the latest version'}; candidate skipped`);
         continue;
       }
       if (ctx.since && publishedAt < ctx.since) continue;

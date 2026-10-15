@@ -336,7 +336,7 @@ test('a credential a server splits with whitespace is still removed from the not
 // is written from. README states the credential is never one of the pool's fields, so the
 // successful-source path has to hold that too.
 test('a 200 answer that echoes the request credential cannot put it in a pool field', async () => {
-  const token = 'TK1234';
+  const token = 'TK12345678';
   const row = {
     kind: 'rss',
     target: 'https://u:pw1@feeds.example/rss.xml?token=' + token,
