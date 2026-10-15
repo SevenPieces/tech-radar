@@ -314,6 +314,24 @@ test('a request credential is removed in its raw, encoded and decoded spellings'
     assert.equal(/oper[+% ]?plus/.test(shaped.message), false,
       'a spelling of the request value survived: ' + shaped.message);
   }
+  // TR-102: a server that echoes the value with a whitespace control inside it - a reflowed log
+  // line, a body that wraps the token - defeats an exact match, because the collector normalises
+  // the control to a space before the notice is published. A value at or above the floor is also
+  // matched with optional whitespace between its characters, so neither half is readable.
+  const split = 'https://feed.example/x?token=' + secret;
+  for (const body of ['token=oper+ OPERATORSECRET42', 'token=oper +OPERATORSECRET42',
+    'token=o p e r + O P E R A T O R S E C R E T 4 2']) {
+    const shaped = shapeHttpError(500, Buffer.from(body), split, 400);
+    assert.equal(/oper|OPERATORSECRET42|plus/i.test(shaped.message), false,
+      'a whitespace-split spelling of the request value survived: ' + shaped.message);
+  }
+  // The floor is what keeps the loose form from matching across unrelated text: a value below it
+  // is matched only as its own token, so a short credential never rewrites the characters of a
+  // sentence that merely scatters them.
+  const shortUrl = 'https://feed.example/x?token=abc';
+  const prose = shapeHttpError(500, Buffer.from('the a b c sequence and xabcde survive'), shortUrl, 400);
+  assert.match(prose.message, /the a b c sequence and xabcde survive/,
+    'a short value never matches across unrelated text: ' + prose.message);
 });
 
 // TR-82 regression test: a candidate URL is the one text field the marker neutraliser did not
@@ -435,14 +453,17 @@ test('shapeHttpError removes the request credential a server body echoes back', 
   assert.equal(shaped.message.includes(password), false, 'the password must not survive: ' + shaped.message);
 });
 
-// TR-85 regression test: the value redaction removed every query value of three characters or
-// more and every whitespace-separated part of a credential-named header, with no word boundary
-// and no credential-shaped test. A notice whose own wording happened to carry either therefore
-// read "the [redacted] feed could not be parsed", and the notice is the run's only diagnosis of
-// a degraded source. What the floor keeps is a notice's own wording and the scheme word that
-// merely names the credential; a value the request itself sent goes whatever its length, so the
-// wording this fixture protects is wording the request did not carry. The query value below is
-// deliberately not a word of the notice.
+// Regression test: the value redaction removed every query value of three characters or more and
+// every whitespace-separated part of a credential-named header, with no word boundary and no
+// credential-shaped test, so a notice whose own wording happened to carry one read "the
+// [redacted] feed could not be parsed". The floor is what keeps a notice's own wording and the
+// scheme word that merely names the credential. It was then dropped from every URL-carried value
+// to catch a short credential, which reaped the collector's own prose: a production pool published
+// 'resets 2026-[redacted]-15T18:18:21.000Z' and 'listing capped at [redacted] entries' where the
+// previous run carried both, because the configured page sizes counted as credentials. The floor
+// applies once more to every query value whose name is not credential-shaped, while a
+// credential-named value and the userinfo are still removed whatever their length. Both directions
+// are pinned here.
 test('a notice keeps its own wording while the request credential is still removed', () => {
   const secret = 'echo' + '-TOKENVALUE1234';
   const benign = shapeHttpError(500,
@@ -451,18 +472,30 @@ test('a notice keeps its own wording while the request credential is still remov
   assert.match(benign.message, /the atom feed expects/, "a notice's own wording stays: " + benign.message);
   assert.match(benign.message, /as Bearer;/, 'the scheme word stays: ' + benign.message);
   assert.doesNotMatch(benign.message, /\[redacted\]/, 'a benign wording is not redacted: ' + benign.message);
-  // The fixture above deliberately avoids the collision this one pins. 'format=atom' is a query
-  // value the request itself sent, and it is also a word of the notice's own text: the guarantee
-  // this fixture used to carry - a benign query value reaps nothing - is the one the row
-  // reverses, because a value the request carried in its URL is a credential position whatever
-  // it spells. The reversal is pinned here rather than left implicit, so the reader can see what
-  // became of that guarantee and what it costs: the notice's own word 'atom' is removed with it.
-  const reaped = shapeHttpError(500,
+  // 'format' is not a credential-shaped name, so its value keeps the floor: 'atom' is four
+  // characters and is not collected, and the notice's own word survives even though the request
+  // carried that same spelling in its URL.
+  const shortName = shapeHttpError(500,
     Buffer.from('the atom feed expects the token as Bearer; no query value is accepted'),
     'https://feeds.example/rss?format=atom', 200, { Authorization: 'Bearer ' + secret });
-  assert.match(reaped.message, /the \[redacted\] feed expects/,
-    "the request's own query value is removed even where it is an ordinary word of the notice: "
-    + reaped.message);
+  assert.match(shortName.message, /the atom feed expects/,
+    'a short non-credential query value does not reap the notice wording: ' + shortName.message);
+  assert.doesNotMatch(shortName.message, /\[redacted\]/,
+    'and nothing else in that notice is reaped either: ' + shortName.message);
+  // The other half of the decision: a credential-named query token is a credential position
+  // whatever it spells, so a seven-character one goes, and the two-character userinfo password
+  // with it, while a harmless word of free text stays readable.
+  const token = 'ABC1234';
+  const credentialName = shapeHttpError(500,
+    Buffer.from('upstream said: token=' + token + ' and the password pw was rejected; '
+      + 'the atom feed is otherwise fine'),
+    'https://feeduser:pw@feeds.example/rss?token=' + token, 200);
+  assert.equal(credentialName.message.includes(token), false,
+    'a short credential-named token is still removed: ' + credentialName.message);
+  assert.doesNotMatch(credentialName.message, /(^|[^A-Za-z])pw([^A-Za-z]|$)/,
+    'a short userinfo password is still removed: ' + credentialName.message);
+  assert.match(credentialName.message, /the atom feed is otherwise fine/,
+    'a harmless word that is not the request value stays: ' + credentialName.message);
   const echoed = shapeHttpError(500,
     Buffer.from('denied: token=' + secret + ' for the atom feed'),
     'https://feeds.example/rss?format=atom', 200, { Authorization: 'Bearer ' + secret });

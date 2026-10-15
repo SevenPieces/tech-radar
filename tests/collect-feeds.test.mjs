@@ -5,7 +5,7 @@ import { copyFileSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'nod
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { collectFeeds, main } from '../scripts/collect.mjs';
+import { collectAll, collectFeeds, main } from '../scripts/collect.mjs';
 import { plainText, shapeHttpError } from '../scripts/lib/net.mjs';
 
 const REPO = fileURLToPath(new URL('../', import.meta.url));
@@ -300,4 +300,68 @@ test('no notice carries a credential another row of the same host sent', async (
   // The boundary is not bought with silence: each notice still names the request it reports.
   assert.match(notices[0], /feeds\.example\/row-0\.xml/);
   assert.match(notices[1], /feeds\.example\/row-1\.xml/);
+});
+
+// TR-102 regression test: the value match is exact, so a server that echoes the request's own
+// credential with a whitespace control inside it - a line break splitting the value into two
+// runs - defeats every layer: the value is not one contiguous string, and the control is
+// normalised to a space before the notice is published. The request's own value is the one
+// thing the redaction may not miss, so the published notice must carry neither half of it
+// while it still names the feed it reports.
+test('a credential a server splits with whitespace is still removed from the notice', async () => {
+  const secret = 'SPLITSECRET-ALPHA/BETA';
+  const row = {
+    kind: 'rss',
+    target: 'https://feeds.example/echo.xml?token=' + encodeURIComponent(secret),
+    domain: 'languages-runtimes',
+    note: '',
+  };
+  const net = {
+    fetchText: async (target) => {
+      throw shapeHttpError(500,
+        Buffer.from('upstream said own=' + secret.slice(0, 6) + '\n' + secret.slice(6)), target, 200);
+    },
+  };
+  const { notices } = await collectFeeds([row], { ...ctx, net });
+  assert.equal(notices.length, 1, 'one notice: ' + JSON.stringify(notices));
+  const notice = notices[0];
+  assert.equal(notice.includes('SPLIT'), false, 'the first half of the credential survived: ' + notice);
+  assert.equal(notice.includes('ALPHA/BETA'), false, 'the second half of the credential survived: ' + notice);
+  assert.match(notice, /feeds\.example/, 'the notice still names the feed it reports: ' + notice);
+});
+
+// TR-106 regression test: the redaction ran over the notices only, so a source that answers 200
+// and echoes the request's own credential into the text it feeds puts that value into the
+// published pool - the item title and summary carry it verbatim, and the pool is what the digest
+// is written from. README states the credential is never one of the pool's fields, so the
+// successful-source path has to hold that too.
+test('a 200 answer that echoes the request credential cannot put it in a pool field', async () => {
+  const token = 'TK1234';
+  const row = {
+    kind: 'rss',
+    target: 'https://u:pw1@feeds.example/rss.xml?token=' + token,
+    domain: 'languages-runtimes',
+    note: '',
+  };
+  const body = '<rss><channel><item><title>hello ' + token + ' world</title>'
+    + '<link>https://feeds.example/1</link><pubDate>Sun, 20 Sep 2026 12:00:00 GMT</pubDate>'
+    + '<description>the token is ' + token + ' for the user with password pw1</description></item></channel></rss>';
+  const config = {
+    settings: {
+      timezone: 'Asia/Shanghai', window_cap_weeks: 4, first_run_days: 7,
+      discovery_hosts: 'news.ycombinator.com', user_agent: 'tech-radar/1.0',
+      request_timeout_ms: 20000, title_max_chars: 200, summary_max_chars: 400,
+      error_snippet_max_chars: 200,
+    },
+    watchlist: [row],
+  };
+  const pool = await collectAll(config, {
+    since: '2026-09-16T00:00:00Z', until: '2026-09-23T00:00:00Z', net: { fetchText: async () => body },
+  });
+  assert.equal(pool.candidates.length, 1, 'the answering feed still contributes its item');
+  const published = JSON.stringify(pool);
+  assert.equal(published.includes(token), false, 'the query credential reached a pool field: ' + published);
+  assert.equal(published.includes('pw1'), false, 'the userinfo password reached a pool field: ' + published);
+  assert.match(pool.candidates[0].source, /^rss:https:\/\/feeds\.example\/rss\.xml/,
+    'the source still labels the feed: ' + pool.candidates[0].source);
 });

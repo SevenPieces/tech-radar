@@ -996,3 +996,39 @@ test('a symlinked state destination is written through, not replaced', () => {
   }
 });
 
+// TR-103 regression test: with a dangling symlink destination the lock was taken on the link's
+// own name while the write walked the chain to the file the link names, so the holder and the
+// writer named two different files. A live lock on the target therefore did not refuse this
+// update: it wrote through the link, and two updates - one naming the link, one naming the
+// target - could each pass their own check and lose a merge. The lock has to follow the same
+// chain the write does, so the target's own lock refuses the run; once that lock is gone the
+// same invocation still writes through the link, which is the behaviour the link is for.
+test('a live lock on the target of a dangling link destination refuses the update', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'tech-radar-dangling-out-lock-'));
+  try {
+    const f = updateFixture(dir);
+    writeFileSync(f.itemsPath, JSON.stringify([item]));
+    const link = join(dir, 'link.json');
+    const target = join(dir, 'real-out.json');
+    symlinkSync('real-out.json', link);
+    assert.equal(existsSync(link), false, 'the fixture link dangles: its target is not there yet');
+    const lock = plantLock(target, { pid: process.pid });
+    assert.equal(alive(process.pid), true, 'the lock names this live test process');
+    const runFor = () => runCli(['update', '--state', link, '--items', f.itemsPath,
+      '--out', link, '--date', '2026-09-23', '--config', f.configDir]);
+    const refused = runFor();
+    assert.notEqual(refused.code, 0,
+      'the write names the link target, so that lock must refuse the update: ' + refused.errs);
+    assert.match(refused.errs, /real-out\.json/, 'the refusal names the file it would write: ' + refused.errs);
+    assert.equal(existsSync(target), false, 'nothing is written to the locked target');
+    assert.equal(lstatSync(link).isSymbolicLink(), true, 'the lock refusal leaves the link alone');
+    rmSync(lock, { force: true });
+    const allowed = runFor();
+    assert.equal(allowed.code, 0, 'with the lock gone the same run writes through the link: ' + allowed.errs);
+    assert.equal(lstatSync(link).isSymbolicLink(), true, 'the write keeps the link the operator named');
+    assert.equal(JSON.parse(readFileSync(target, 'utf8')).runs.length, 1, 'the merge lands on the link target');
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+

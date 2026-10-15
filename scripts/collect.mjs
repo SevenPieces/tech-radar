@@ -866,13 +866,28 @@ export async function collectAll(config, opts) {
   // row, is redacted once more against the secrets of every request the run issued. The
   // per-request redaction stays as it is (and is what makes the notice readable at the point it
   // is built); this pass closes the cross-row echo the per-request pass cannot see.
+  const union = [...issuedSecrets];
   const notices = [];
-  for (const notice of acc.notices) pushNotice(notices, notice, [...issuedSecrets]);
+  for (const notice of acc.notices) pushNotice(notices, notice, union);
+  // TR-106: the same union covers the candidate fields, which the notices' redaction never did. A
+  // source that answered 200 and echoed the request's own credential into the text it feeds - an
+  // item title, an item summary - published that value in the pool, and the pool is what the
+  // digest is written from, so a credential was a field of the published pool. Every string field
+  // of every candidate crosses the same redaction the notices do, against the same union; the
+  // per-source pass above stays as it is, and the redaction is skipped entirely when the run
+  // issued no request (nothing can have been echoed).
+  const redactedCandidates = union.length === 0 ? candidates : candidates.map((candidate) => {
+    const out = { ...candidate };
+    for (const [field, value] of Object.entries(out)) {
+      if (typeof value === 'string') out[field] = redactSecrets(value, union);
+    }
+    return out;
+  });
   return {
     version: 1,
     generatedAt: new Date().toISOString(),
     window: { since: ctx.since, until: ctx.until },
-    candidates,
+    candidates: redactedCandidates,
     notices,
   };
 }

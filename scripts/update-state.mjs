@@ -468,18 +468,29 @@ export function findRecordedRun(state, date, domainKeys) {
 // as a plain write to a fresh destination would. A chain that never terminates is refused
 // with the documented write failure rather than guessed at, and the caller's failure path
 // unlinks the temp this write created, so nothing is left behind.
-function resolveWriteTarget(out) {
-  try { return realpathSync(out); } catch { /* absent, or a link to a path that is not there */ }
-  let current = out;
+// The name a chain of symlinks ends at, walked by hand because realpathSync only answers when
+// the final target exists. The name it returns is either an existing file or the name the last
+// link points at, which the write then creates exactly as a plain write to a fresh destination
+// would; null means the chain never terminated within the bound. Both the writer and the lock
+// read this one answer, so they cannot disagree about which file a destination names.
+function walkLinks(path) {
+  let current = path;
   let stats;
   try { stats = lstatSync(current); } catch { return current; }
   for (let hop = 0; stats.isSymbolicLink(); hop += 1) {
-    if (hop >= 32) throw fail(`${out} is a symlink chain that does not resolve to a file`, 4);
+    if (hop >= 32) return null;
     const target = readlinkSync(current);
     current = isAbsolute(target) ? target : resolve(dirname(current), target);
     try { stats = lstatSync(current); } catch { return current; }
   }
   return current;
+}
+
+function resolveWriteTarget(out) {
+  try { return realpathSync(out); } catch { /* absent, or a link to a path that is not there */ }
+  const target = walkLinks(out);
+  if (target === null) throw fail(`${out} is a symlink chain that does not resolve to a file`, 4);
+  return target;
 }
 
 // The mode the replacement carries. The rename replaces the inode, so an existing
@@ -564,14 +575,25 @@ function lockTargets(opts) {
 
 // Two spellings of one path - 's.json' and './s.json', the same file named absolutely,
 // or a symlink to it - name one file, so they have to produce one lock name and compare
-// equal. The canonical spelling is the real path when the file is there, and the real
-// directory plus the file name when it is not: a lock is taken for an output that does
-// not exist yet as much as for one that does, and a caller who spells its own state two
-// ways must not be refused by the lock it just took. Nothing here writes to the canonical
-// path; it is the identity of the file, not a destination.
+// equal. The canonical spelling is the real path when the file is there, and the name the
+// chain ends at when it is not: a lock is taken for an output that does not exist yet as
+// much as for one that does, and a caller who spells its own state two ways must not be
+// refused by the lock it just took. Nothing here writes to the canonical path; it is the
+// identity of the file, not a destination.
+//
+// A dangling link has no real path, and the link's own name is not the file the run writes:
+// locking '<link>.lock' while the write lands on the link's target left a live lock on the
+// target unable to refuse the run, so two updates - one naming the link, one naming the
+// target - each passed their own check and one merge was lost. The chain is walked exactly
+// as resolveWriteTarget walks it, so the lock and the write name one file. A chain that never
+// terminates is left to the writer, which refuses it with the documented write failure.
 function canonicalPath(path) {
   const name = String(path);
   try { return realpathSync(name); } catch { /* the file does not exist yet */ }
+  const target = walkLinks(name);
+  if (target !== null && target !== name) {
+    try { return join(realpathSync(dirname(target)), basename(target)); } catch { return resolve(target); }
+  }
   try { return join(realpathSync(dirname(name)), basename(name)); } catch { return resolve(name); }
 }
 

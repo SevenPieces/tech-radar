@@ -10,6 +10,7 @@ import { readConfig } from '../scripts/lib/mdtable.mjs';
 import {
   parseArgs, collectAll, sortCandidates, resolveOut, windowStart, resolveTimeout, noticeWarning, humanSummary, main,
 } from '../scripts/collect.mjs';
+import { shapeHttpError } from '../scripts/lib/net.mjs';
 
 const FIXTURE_CONFIG = fileURLToPath(new URL('./fixtures/config/', import.meta.url));
 const SKILL_CONFIG = fileURLToPath(new URL('../config/', import.meta.url));
@@ -636,4 +637,78 @@ test('the collector keeps the mode of the pool it replaces', () => {
     'the pool keeps the mode it was protected with, not the umask: '
     + (statSync(out).mode & 0o777).toString(8));
   rmSync(dir, { recursive: true, force: true });
+});
+
+// TR-101 regression test: the run-wide redaction union reaped the collector's own configured
+// values. Every value a request carried in its URL was collected without the length floor, so
+// the numbers the shipped configuration sends - max_results 40, per_page 10 - entered the union
+// and were then replaced wherever they stood alone, inside notices the collector itself wrote:
+// the arXiv cap notice read "capped at [redacted] entries", and the GitHub budget notice's reset
+// instant read "2026-[redacted]-15T18:18:21.000Z". The notice is the run's only account of the
+// degradation, so neither may be damaged, while a credential the request actually sent must
+// still go. This drives the composed published path - collectAll, whose final pass redacts every
+// notice against the union of every request the run issued - rather than the notice builder, so
+// the redaction pass is on the way.
+test('the run-wide redaction keeps configured values and still removes credentials', async () => {
+  const resetIso = '2026-10-15T18:18:21.000Z';
+  const settings = {
+    timezone: 'Asia/Shanghai', window_cap_weeks: 4, first_run_days: 7,
+    discovery_hosts: 'news.ycombinator.com', user_agent: 'tech-radar/1.0',
+    request_timeout_ms: 20000, title_max_chars: 200, summary_max_chars: 400,
+    error_snippet_max_chars: 200,
+    github_org_repos: 10, github_releases_per_repo: 10, github_tags_per_repo: 5,
+    github_rate_limit_reserve: 0, arxiv_max_results: 40, ghsa_page_size: 50, nvd_severity: 'HIGH',
+  };
+  const watchlist = [
+    ...Array.from({ length: 5 }, (_, i) => (
+      { kind: 'github-repo', target: 'org/repo' + i, domain: 'ai-llm', note: '' }
+    )),
+    { kind: 'arxiv-category', target: 'cs.AI', domain: 'ai-llm', note: '' },
+    // A short credential in a credential-named parameter and a short userinfo password: the
+    // floor has to keep covering these, so the fix cannot simply raise it for every value.
+    { kind: 'rss', target: 'https://feeduser:pw1@feeds.example/echo.xml?auth_token=TK1234', domain: 'ai-llm', note: '' },
+  ];
+  const entries = Array.from({ length: 40 }, (_, i) => '<entry><title>Paper ' + i + '</title>'
+    + '<link rel="alternate" href="http://arxiv.org/abs/2609.' + (10000 + i) + 'v1"/>'
+    + '<published>2026-09-20T01:00:00Z</published><summary>s</summary></entry>').join('');
+  const net = {
+    hostOf: (url) => new URL(url).host,
+    isDiscoveryOnly: () => false,
+    fetchText: async (url) => {
+      if (url === 'https://api.github.com/rate_limit') {
+        return JSON.stringify({ resources: { core: { limit: 60, remaining: 3, reset: Math.floor(Date.parse(resetIso) / 1000) } } });
+      }
+      if (url.includes('/releases') || url.includes('/tags')) return '[]';
+      if (url.startsWith('https://export.arxiv.org/api/query')) return '<feed>' + entries + '</feed>';
+      if (url.includes('feeds.example')) {
+        throw shapeHttpError(500,
+          Buffer.from('upstream rejected auth_token=TK1234 for the user with password pw1'), url, 200);
+      }
+      throw new Error('unexpected request: ' + url);
+    },
+  };
+  const previous = process.env.GITHUB_TOKEN;
+  delete process.env.GITHUB_TOKEN;
+  let pool;
+  try {
+    pool = await collectAll({ settings, watchlist },
+      { since: '2026-09-16T00:00:00Z', until: '2026-09-23T00:00:00Z', net });
+  } finally {
+    if (previous !== undefined) process.env.GITHUB_TOKEN = previous;
+  }
+  const budget = pool.notices.find((n) => n.startsWith('github: rate limit reached'));
+  assert.ok(budget, 'the budget notice is published: ' + JSON.stringify(pool.notices));
+  assert.match(budget, /resets \d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z/,
+    'the reset instant must survive whole: ' + budget);
+  assert.doesNotMatch(budget, /\[redacted\]/, 'a configured value was reaped from the budget notice: ' + budget);
+  const capped = pool.notices.find((n) => /listing capped at/.test(n));
+  assert.ok(capped, 'the cap notice is published: ' + JSON.stringify(pool.notices));
+  assert.match(capped, new RegExp('listing capped at ' + settings.arxiv_max_results + ' entries'),
+    'the capped count must survive: ' + capped);
+  assert.doesNotMatch(capped, /\[redacted\]/, 'a configured value was reaped from the cap notice: ' + capped);
+  const published = JSON.stringify(pool);
+  assert.equal(published.includes('TK1234'), false,
+    'the query credential reached the pool: ' + published.slice(0, 400));
+  assert.equal(published.includes('pw1'), false,
+    'the userinfo password reached the pool: ' + published.slice(0, 400));
 });

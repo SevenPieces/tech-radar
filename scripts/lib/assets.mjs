@@ -281,8 +281,18 @@ function documentFetches(text, nested, depth) {
     if (attrs.style !== undefined && cssFetches(attrs.style)) return true;
   }
 
-  for (const m of text.matchAll(/<style\b[^>]*>([\s\S]*?)<\/style>/gi)) {
-    if (cssFetches(m[1])) return true;
+  // A style element's body is CSS, and its end tag is a tag like any other: whitespace and
+  // attributes are legal on it ('</style >', '</style class=x>', '</style\n>'), so matching only
+  // the literal '</style>' left the CSS behind every other spelling unscanned. The body is read
+  // from the start tag to the first end tag the tokeniser would accept, and an element that is
+  // never closed keeps its text to the end of the file: the start tag is closed, so the element
+  // exists and its text is CSS. That is the reading the end-of-file case for a resource tag does
+  // not share, because a start tag left unclosed before end of file is dropped and no element is
+  // built at all.
+  for (const m of text.matchAll(/<style\b[^>]*>/gi)) {
+    const rest = text.slice(m.index + m[0].length);
+    const end = /<\/style\b[^>]*>/i.exec(rest);
+    if (cssFetches(end ? rest.slice(0, end.index) : rest)) return true;
   }
   return false;
 }

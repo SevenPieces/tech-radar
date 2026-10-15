@@ -1338,3 +1338,23 @@ test('externalAssets does not flag a style URL that is character-encoded twice',
     assert.equal(externalAssets(html), false, what + ' is self-contained: ' + html);
   }
 });
+
+// TR-105 regression test: the CSS scan recognised only the literal closing tag, so a style
+// element a browser still builds hid a remote url() from the predicate: whitespace before the
+// end tag's bracket, an attribute on the end tag, a newline inside it, and a body that runs to
+// the end of the file with no end tag at all. Both the renderer and the gate act on this
+// verdict, so a document that fetches remote CSS was reported self-contained.
+test('externalAssets sees remote CSS in a style element the tokeniser still closes', () => {
+  const css = 'body{background:url(https://evil.example/x.png)}';
+  const hidden = [
+    ['a space before the end tag bracket', '<html><head><style>' + css + '</style ></head></html>'],
+    ['an attribute on the end tag', '<html><head><style>' + css + '</style class=x></head></html>'],
+    ['a newline inside the end tag', '<html><head><style>' + css + '</style\n></head></html>'],
+    ['no end tag before the end of the file', '<html><head><style>' + css],
+  ];
+  for (const [what, html] of hidden) {
+    assert.equal(externalAssets(html), true, what + ' still builds the element, so the CSS applies: ' + html);
+  }
+  // The control keeps its verdict: the same CSS behind the literal end tag was already a fetch.
+  assert.equal(externalAssets('<html><head><style>' + css + '</style></head></html>'), true);
+});
