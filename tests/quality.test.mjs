@@ -2,6 +2,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { cpSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { readSettings, readDomains } from '../scripts/lib/mdtable.mjs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { execFileSync } from 'node:child_process';
@@ -756,6 +757,32 @@ test('a prose mention of #followup does not fail a correctly flagged item', () =
   assert.match(warnings.join('\n'), /2 status tokens; the trailing #new is read as the flag/);
 });
 
+// The documented extra flags are additive: #developing and #watch never decide an item's
+// flag, so a second token must not hide the #new or #followup the item actually carries.
+// The flag is the last token that is #new or #followup, whatever trails it.
+test('an additive status flag resolves to the last #new or #followup', () => {
+  const cases = [
+    ['#new #developing', 'new'],
+    ['#developing #new', 'new'],
+    ['#followup #watch', 'followup'],
+  ];
+  for (const [tokens, expected] of cases) {
+    const digest = good.replace('[prov:primary] #new', '[prov:primary] ' + tokens);
+    const items = parseItems(digest);
+    assert.equal(items.length, 1, tokens + ': the one item is parsed');
+    assert.deepEqual(items[0].flags, [expected], tokens + ': #developing and #watch do not decide the flag');
+    assert.deepEqual(check(digest, config, plan).failures, [], tokens + ': the gate accepts the item');
+  }
+});
+
+test('more than one status token still warns when the flag is additive', () => {
+  const digest = good.replace('[prov:primary] #new', '[prov:primary] #new #developing');
+  const { failures, warnings } = check(digest, config, plan);
+  assert.deepEqual(failures, []);
+  assert.match(warnings.join('\n'), /2 status tokens/, 'the multi-token warning still fires');
+  assert.match(warnings.join('\n'), /read as the flag/, 'and it names the token the gate read');
+});
+
 test('a bullet that looks like an item but does not parse is warned about', () => {
   const five = good.replace(
     '## Watch domains — quiet',
@@ -784,11 +811,27 @@ test('a decoy heading containing "quiet" does not hijack the quiet line', () => 
   assert.deepEqual(check(decoy, config, plan).failures, []);
 });
 
-test('two different stories on one host with similar titles are not duplicates', () => {
+// Regression test: this case used to pin the opposite. The gate's duplicate check
+// added the URL pathname to the story key, so two items that share the documented story
+// key - the normalised title plus the host, per reference/state-schema.md - shipped
+// through the gate, and the merge then collapsed them into one entry and labelled the
+// brand-new one a followup. Design 4.4 makes a shared story key a gate failure.
+test('two items with the same normalised title and host are duplicates even on different paths', () => {
   const two = good.replace(
     '## Watch domains — quiet',
-    '- **Story one** — first. [src:Hugging Face blog 2026-09-20](https://huggingface.co/blog/one) [prov:primary] #new\n'
-    + '- **Story  one!** — second. [src:Hugging Face blog 2026-09-21](https://huggingface.co/blog/two) [prov:primary] #new\n\n## Watch domains — quiet',
+    '- **A model shipped** — first. [src:Hugging Face blog 2026-09-20](https://huggingface.co/blog/one) [prov:primary] #new\n'
+    + '- **A model  shipped!** — second. [src:Hugging Face blog 2026-09-21](https://huggingface.co/blog/two) [prov:primary] #new\n\n## Watch domains — quiet',
+  );
+  const result = check(two, config, plan);
+  assert.match(result.failures.join('\n'), /duplicate story key/);
+  assert.equal(result.failures.filter((f) => /duplicate story key/.test(f)).length, 1, 'named once');
+});
+
+test('two genuinely different stories on one host are still not duplicates', () => {
+  const two = good.replace(
+    '## Watch domains — quiet',
+    '- **A browser shipped** — first. [src:Hugging Face blog 2026-09-20](https://huggingface.co/blog/one) [prov:primary] #new\n'
+    + '- **A compiler shipped** — second. [src:Hugging Face blog 2026-09-21](https://huggingface.co/blog/two) [prov:primary] #new\n\n## Watch domains — quiet',
   );
   assert.doesNotMatch(check(two, config, plan).failures.join('\n'), /duplicate story key/);
 });
@@ -809,6 +852,23 @@ test('an empty --html value is rejected instead of disabling the check', () => {
   const result = gateCli([mdPath, '--plan', planPath, '--config', join(REPO, 'tests', 'fixtures', 'digest', 'config'), '--html', '']);
   assert.equal(result.code, 2);
   assert.match(result.out, /empty value for --html/);
+});
+
+// Regression test: the CLI tested only existsSync for --html, so a directory passed the
+// existence check and the read that consumes it died with EISDIR - an undocumented exit 1
+// and a stack trace, where the usage documents exit 2 for a --html argument that is not
+// what it claims to be.
+test('the CLI refuses a --html path that is a directory with exit 2 and no stack trace', () => {
+  const dir = scratch();
+  const mdPath = join(dir, 'digest.md');
+  const planPath = join(dir, 'plan.json');
+  writeFileSync(mdPath, good);
+  writeFileSync(planPath, JSON.stringify(plan));
+  const result = gateCli([mdPath, '--plan', planPath, '--html', dir]);
+  assert.equal(result.code, 2, result.out);
+  assert.match(result.out, /--html/, 'the message names the flag');
+  assert.doesNotMatch(result.out, /EISDIR/, 'the raw filesystem error is not the message');
+  assert.doesNotMatch(result.out, /\n\s+at /, 'no stack trace is printed');
 });
 
 test('a decoy section whose name contains core or watch does not collect items', () => {
@@ -840,4 +900,141 @@ test('a deep_dive value outside the enum is a gate failure for library callers',
     check(good, bad, plan).failures.join('\n'),
     /deep_dive is "WHEN-WARRANTED", which is not one of when-warranted, always, never/,
   );
+});
+
+// --- a settings row that is missing must not turn a gate rule into a no-op -------------
+
+// A copy of the fixture configuration with the rows named in 'drop' deleted, so the
+// guard can be exercised one setting at a time.
+function configWithRowsDropped(dir, drop) {
+  const cfg = join(dir, 'config-' + drop.join('-'));
+  cpSync(join(REPO, 'tests', 'fixtures', 'digest', 'config'), cfg, { recursive: true });
+  const path = join(cfg, 'settings.md');
+  const lines = readFileSync(path, 'utf8').split('\n').filter((l) => {
+    const key = /^\|\s*([a-z0-9_]+)\s*\|/.exec(l);
+    return !(key && drop.includes(key[1]));
+  });
+  writeFileSync(path, lines.join('\n'));
+  return cfg;
+}
+
+// Regression test: the gate read every budget rule with Number() and never validated it,
+// so a deleted settings row made NaN and every comparison false — five budget rules and
+// the discovery-host rule silently became no-ops while the gate still printed
+// QUALITY: PASS. update-state.mjs has positiveInt for exactly this failure mode; the
+// gate refuses the configuration instead of reporting a clean run.
+test('a settings file missing a gate quantity exits 2 naming the key', () => {
+  const dir = scratch();
+  const mdPath = join(dir, 'digest.md');
+  const planPath = join(dir, 'plan.json');
+  writeFileSync(mdPath, good);
+  writeFileSync(planPath, JSON.stringify(plan));
+  for (const key of ['core_max_items', 'watch_max_items', 'watch_notable_max', 'total_min_items', 'total_max_items', 'discovery_hosts']) {
+    const cfg = configWithRowsDropped(dir, [key]);
+    const result = gateCli([mdPath, '--plan', planPath, '--config', cfg]);
+    assert.equal(result.code, 2, key + ': ' + result.out);
+    assert.match(result.out, new RegExp(key), key + ' must be named: ' + result.out);
+    assert.doesNotMatch(result.out, /QUALITY: PASS/, key + ': a disabled rule must not report a pass');
+  }
+});
+
+// Regression test: scoped counted Object.keys(perDomain), while covered(d) used
+// Boolean(plan.perDomain[d.key]). A plan whose perDomain entry is null therefore failed
+// open - the core-heading and quiet-line rules were disabled - so a digest missing 13 of
+// 14 core headings still printed QUALITY: PASS. The two predicates must agree.
+test('a null perDomain entry does not disable the core-heading check', () => {
+  const digest = realDigest(['ai-llm'], 30);
+  const withoutHeading = digest.replace('### AI / LLM · 人工智能 / 大模型\n', '');
+  const covered = { ...realPlan(['ai-llm']) };
+  const nulled = { ...covered, perDomain: { 'ai-llm': null } };
+  assert.match(
+    check(withoutHeading, REAL, nulled).failures.join('\n'),
+    /core domain AI \/ LLM has no section heading/,
+    'the null entry must not read as "not covered"',
+  );
+  assert.deepEqual(check(withoutHeading, REAL, covered).failures.filter((f) => /core domain/.test(f)).length, 1,
+    'the plan that really covers the domain demands the heading too');
+});
+
+// --- the two documented gate failures no fixture reached ------------------------------
+
+// Design 4.4 fails an item dated after the run window, and no fixture carried one: the
+// check existed and was executed by nothing.
+test('an item published after the window fails the gate', () => {
+  const after = good.replace(
+    '- **A model shipped** — Why it matters. [src:Hugging Face blog 2026-09-20](https://huggingface.co/blog/x) [prov:primary] #new',
+    '- **A model shipped** — Why it matters. [src:Hugging Face blog 2026-09-24](https://huggingface.co/blog/x) [prov:primary] #new',
+  );
+  const { failures, warnings } = check(after, config, plan);
+  assert.match(failures.join('\n'), /published 2026-09-24 is after the window/);
+  assert.deepEqual(warnings.filter((w) => /item grammar/.test(w)), [], 'the item itself still parses');
+});
+
+// Design 4.4 fails a run whose watch domains contributed more than watch_notable_max.
+// The fixture catalogue carried one watch domain, so the ceiling was unreachable; the
+// fixture settings keep the other watch ceilings out of the way so this rule is the one
+// under test.
+test('watch-notable items over watch_notable_max fail the gate', () => {
+  const dir = scratch();
+  const cfg = configWithRowsDropped(dir, []);
+  const path = join(cfg, 'settings.md');
+  writeFileSync(path, readFileSync(path, 'utf8')
+    .replace(/^\| watch_notable_max \|.*$/m, '| watch_notable_max | 3 | fixture |')
+    .replace(/^\| watch_max_items \|.*$/m, '| watch_max_items | 4 | fixture |')
+    .replace(/^\| total_max_items \|.*$/m, '| total_max_items | 45 | fixture |'));
+  const domainsPath = join(cfg, 'domains.md');
+  writeFileSync(domainsPath, readFileSync(domainsPath, 'utf8').replace(/\n$/, '')
+    + '\n| photonics | Photonics | 光子学 | AI and compute | watch | fixtures |\n');
+  const watch = [
+    '- **Q0** — x [src:Hugging Face blog 2026-09-20](https://huggingface.co/blog/q0) [prov:primary] #new',
+    '- **Q1** — x [src:Hugging Face blog 2026-09-20](https://huggingface.co/blog/q1) [prov:primary] #new',
+  ].join('\n');
+  const photonics = Array.from({ length: 2 }, (_, i) =>
+    '- **P' + i + '** — x [src:Hugging Face blog 2026-09-20](https://huggingface.co/blog/p' + i + ') [prov:primary] #new').join('\n');
+  const mdPath = join(dir, 'digest.md');
+  const planPath = join(dir, 'plan.json');
+  writeFileSync(mdPath, good.replace(
+    '## Watch domains — quiet',
+    '## Watch domains — notable this week\n### Quantum technologies · 量子技术\n' + watch
+      + '\n### Photonics · 光子学\n' + photonics + '\n\n## Watch domains — quiet',
+  ));
+  writeFileSync(planPath, JSON.stringify(plan));
+  const result = gateCli([mdPath, '--plan', planPath, '--config', cfg]);
+  assert.equal(result.code, 5, result.out);
+  assert.match(result.out, /watch domains contributed 4 items, over watch_notable_max 3/);
+});
+
+// --- the 18-character chip cap is configuration, like every other quantity ------------
+
+// Regression test: the cap was a literal in the reader, so it contradicted the shipped
+// rule that no quantity is hardcoded and existed in no config file.
+
+const SETTINGS_PATH = fileURLToPath(new URL('../config/settings.md', import.meta.url));
+
+test('the accepted short-label length is the configured cap, not 18', () => {
+  const settings = readSettings(SETTINGS_PATH);
+  assert.ok(Number.isInteger(settings.short_max_chars) && settings.short_max_chars > 0,
+    'config/settings.md must carry a positive integer short_max_chars, got ' + JSON.stringify(settings.short_max_chars));
+  const cap = settings.short_max_chars;
+  const dir = scratch();
+  const write = (short) => {
+    const path = join(dir, 'domains.md');
+    writeFileSync(path, [
+      '| key | domain | short | label_zh | cluster | tier | why |',
+      '|---|---|---|---|---|---|---|',
+      '| ai-llm | AI / LLM | ' + short + ' | 人工智能 / 大模型 | AI and compute | core | models |',
+      '| quantum | Quantum technologies | Quantum | 量子技术 | AI and compute | watch | quantum |',
+      '',
+    ].join('\n'));
+    return path;
+  };
+  const atCap = 'a'.repeat(cap - 2);
+  const overCap = 'a'.repeat(cap + 2);
+  assert.equal(readDomains(write(atCap), { short_max_chars: cap }).length, 2, 'a label at the cap reads');
+  assert.throws(() => readDomains(write(overCap), { short_max_chars: cap }), /short label too long for ai-llm/,
+    'a label over the configured cap is refused');
+  assert.throws(() => readDomains(write(overCap), { short_max_chars: cap }), new RegExp(String(cap)),
+    'the message states the configured cap');
+  assert.equal(readDomains(write(overCap), { short_max_chars: overCap.length }).length, 2,
+    'raising the setting accepts a label the shipped cap refuses');
 });

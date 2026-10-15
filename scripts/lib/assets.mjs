@@ -5,20 +5,51 @@
 //
 // A citation link (a href) is content, not an asset; prose that merely writes
 // "url(https://...)" or "@import" is prose; a data: URI is self-contained. What
-// counts is an element that loads a network resource, a CSS @import, or a remote
-// url() - and both CSS forms count only inside CSS, never in the document at large.
-const EMBEDDED = ['script', 'img', 'iframe', 'video', 'audio', 'source', 'embed', 'object', 'track', 'input'];
+// counts is an element that loads a network resource, a stylesheet or an icon, a
+// meta refresh, a CSS @import, or a remote url() - and both CSS forms count only
+// inside CSS, never in the document at large.
+//
+// The document is tokenised rather than pattern-matched: a tag is its name plus an
+// attribute list, the list is split on whitespace or '/', and a value may be quoted or
+// bare. A document that hides a fetch behind a separator or an unquoted value is the
+// evasion this tokenisation exists to see.
 const REMOTE_URL = /\burl\(\s*["']?(?:https?:)?\/\//i;
 
-function attrValue(attrs, name) {
-  const m = new RegExp(`(?:^|\\s)${name}\\s*=\\s*("([^"]*)"|'([^']*)'|([^\\s>]+))`, 'i').exec(attrs);
-  if (!m) return null;
-  return (m[2] ?? m[3] ?? m[4] ?? '').trim();
-}
+// Attribute: a name, then an optional '=' and a double-quoted, single-quoted or bare
+// value. Worth a full tokeniser because '/' separates attributes just as whitespace does.
+const ATTR = /([^\s/=>]+)(?:\s*=\s*(?:"([^"]*)"|'([^']*)'|([^\s>]*)))?/g;
 
-function relOf(attrs) {
-  const m = /\brel\s*=\s*("([^"]*)"|'([^']*)'|([^\s>]+))/i.exec(attrs);
-  return m ? (m[2] ?? m[3] ?? m[4] ?? '').toLowerCase() : '';
+// A tag whose attribute loads a network resource: the element name decides which
+// attributes are resource references.
+const RESOURCE_ATTRS = {
+  img: ['src', 'srcset'],
+  input: ['src', 'srcset'],
+  script: ['src'],
+  iframe: ['src'],
+  embed: ['src'],
+  track: ['src'],
+  source: ['src', 'srcset'],
+  audio: ['src'],
+  video: ['src', 'poster'],
+  object: ['data'],
+  image: ['href', 'xlink:href'],
+  use: ['href', 'xlink:href'],
+  body: ['background'],
+  table: ['background'],
+};
+
+// A link fetches only when its rel names something the browser pulls in. canonical,
+// alternate and preconnect name relationships, not resources, so they stay content.
+const LINK_RELS = new Set(['stylesheet', 'preload', 'icon']);
+
+function attrsOf(region) {
+  const out = {};
+  for (const m of String(region).matchAll(ATTR)) {
+    const name = m[1].toLowerCase();
+    // The first spelling wins, as it does in a browser.
+    if (!(name in out)) out[name] = m[2] ?? m[3] ?? m[4] ?? '';
+  }
+  return out;
 }
 
 // A data: URI is carried inside the document, so it fetches nothing.
@@ -42,32 +73,49 @@ function cssFetches(css) {
   return false;
 }
 
+// The target a meta refresh navigates to, if it names one at all: a bare delay fetches
+// nothing, while a url= target is a fetch the moment the document is opened.
+function refreshTarget(value) {
+  const m = /url\s*=\s*["']?([^"'\s;]+)/i.exec(value);
+  return m ? m[1] : null;
+}
+
 export function externalAssets(html) {
   const text = String(html);
-  // Elements that embed a resource. A data: URI on one of them is self-contained.
-  for (const m of text.matchAll(/<(script|img|iframe|video|audio|source|embed|object|track|input)\b([^>]*)>/gi)) {
-    const attrs = m[2];
-    for (const name of ['src', 'data']) {
-      const value = attrValue(attrs, name);
-      if (value !== null && !isInline(value)) return true;
+  for (const tag of text.matchAll(/<([a-z][a-z0-9-]*)([^>]*)>/gi)) {
+    const name = tag[1].toLowerCase();
+    const attrs = attrsOf(tag[2]);
+
+    const resourceAttrs = RESOURCE_ATTRS[name];
+    if (resourceAttrs) {
+      for (const attr of resourceAttrs) {
+        const value = attrs[attr];
+        if (value === undefined) continue;
+        if (attr === 'srcset') { if (!srcsetIsInline(value)) return true; }
+        else if (!isInline(value)) return true;
+      }
     }
-    const srcset = attrValue(attrs, 'srcset');
-    if (srcset !== null && !srcsetIsInline(srcset)) return true;
+
+    if (name === 'link' && relOf(attrs).some((rel) => LINK_RELS.has(rel))) {
+      const href = attrs.href;
+      if (href !== undefined && !isInline(href)) return true;
+    }
+
+    if (name === 'meta' && (attrs['http-equiv'] ?? '').toLowerCase() === 'refresh') {
+      const target = refreshTarget(attrs.content ?? '');
+      if (target !== null && !isInline(target)) return true;
+    }
+
+    // CSS forms count inside CSS only: a style element or a style attribute.
+    if (attrs.style !== undefined && cssFetches(attrs.style)) return true;
   }
-  // A stylesheet link is fetched. Other relations - canonical, alternate, preconnect,
-  // icon - are not a fetched asset, so a canonical link to the published URL is fine.
-  for (const m of text.matchAll(/<link\b([^>]*)>/gi)) {
-    const attrs = m[1];
-    if (!relOf(attrs).split(/\s+/).includes('stylesheet')) continue;
-    const href = attrValue(attrs, 'href');
-    if (href !== null && !isInline(href)) return true;
-  }
-  // CSS forms count inside CSS only: a style element or a style attribute.
+
   for (const m of text.matchAll(/<style\b[^>]*>([\s\S]*?)<\/style>/gi)) {
     if (cssFetches(m[1])) return true;
   }
-  for (const m of text.matchAll(/\bstyle\s*=\s*("([^"]*)"|'([^']*)')/gi)) {
-    if (cssFetches(m[2] ?? m[3] ?? '')) return true;
-  }
   return false;
+}
+
+function relOf(attrs) {
+  return String(attrs.rel ?? '').toLowerCase().split(/\s+/).filter(Boolean);
 }

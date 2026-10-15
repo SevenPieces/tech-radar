@@ -1,10 +1,12 @@
 // tests/state-merge.test.mjs
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdirSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, utimesSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { spawn } from 'node:child_process';
 import { emptyState, mergeRun, storyKey, normalizeTitle, normalizeRunDate, findRecordedRun, main } from '../scripts/update-state.mjs';
+import { SKILL_ROOT } from './lib/shipped-files.mjs';
 
 const config = {
   domains: [
@@ -416,3 +418,257 @@ test('a run that has fallen off the run log is accepted again: the documented li
   const again = mergeRun(capped, state, { items: [], date: '2026-09-01', entry: 'weekly', now: NOW }).state;
   assert.deepEqual(again.runs.map((r) => r.date), ['2026-09-15', '2026-09-01'], 'and is accepted again');
 });
+
+// --- TR-04 / TR-13: the state file and the items file are inputs like any other -------
+
+// Writes a starting state and hands back the paths a CLI call needs. The state content
+// is captured so the tests can prove a refusal left it byte-identical.
+function updateFixture(dir, stateBody) {
+  const configDir = writeConfig(dir);
+  const statePath = join(dir, 'state.json');
+  const itemsPath = join(dir, 'items.json');
+  const body = stateBody ?? JSON.stringify(emptyState(['ai-llm', 'quantum']), null, 2) + '\n';
+  writeFileSync(statePath, body);
+  return { configDir, statePath, itemsPath, body };
+}
+
+// Regression test: loadState rejected only a non-object top level, so an array where a
+// map belongs was accepted and rewritten as [] - the silent loss of every watermark and
+// all item history, at exit 0 - and a runs container that was not an array crashed
+// findRecordedRun with a raw TypeError (exit 1) carrying no exit code.
+test('a state container of the wrong shape exits 2 and writes nothing', () => {
+  const cases = [
+    ['domains as an array', '{"domains":[]}'],
+    ['items as an array', '{"items":[]}'],
+    ['watchlist as an object', '{"watchlist":{}}'],
+    ['runs as an object', '{"runs":{}}'],
+    ['runs holding a null entry', '{"runs":[null]}'],
+  ];
+  for (const [name, body] of cases) {
+    const dir = mkdtempSync(join(tmpdir(), 'tech-radar-shape-'));
+    const f = updateFixture(dir, body);
+    writeFileSync(f.itemsPath, '[]');
+    const res = runCli(['update', '--state', f.statePath, '--items', f.itemsPath,
+      '--out', f.statePath, '--date', '2026-09-23', '--config', f.configDir]);
+    assert.equal(res.code, 2, name + ': the shape is a state error, not a degraded run: ' + res.errs);
+    assert.equal(readFileSync(f.statePath, 'utf8'), f.body, name + ': the state file is untouched');
+    assert.doesNotMatch(res.errs, /TypeError/, name + ': no TypeError reaches the caller');
+    assert.doesNotMatch(res.errs, /\n\s+at /, name + ': no stack trace is printed');
+  }
+});
+
+test('a malformed runs field is refused with a named message by plan too', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'tech-radar-runs-'));
+  const f = updateFixture(dir, '{"runs":{}}');
+  const errs = [];
+  const orig = console.error;
+  console.error = (...a) => errs.push(a.join(' '));
+  let code;
+  try {
+    code = runCli(['plan', '--state', f.statePath, '--config', f.configDir]);
+    code = code.code;
+  } finally {
+    console.error = orig;
+    process.exitCode = 0;
+  }
+  assert.equal(code, 2, errs.join('\n'));
+  assert.doesNotMatch(errs.join('\n'), /TypeError|\n\s+at /, 'the refusal is named, with no stack trace');
+});
+
+// Regression test: mergeRun dereferenced item.title for the story key before the only
+// shape check (resolveDomainKey on item.domain), so a non-object entry died with a raw
+// TypeError, a string or number entry died naming "unknown item domain undefined" and
+// exited 3 through the wrong path, and two items with no title or URL collapsed onto one
+// bogus key (String(undefined) plus hostOf(undefined) === ''), storing a single state
+// entry titled "undefined" with no primaryUrl.
+test('an item entry without a title or primary URL is refused with exit 3', () => {
+  const cases = [
+    ['null', [null]],
+    ['a string', ['x']],
+    ['a number', [0]],
+    ['an object with no title or URL', [{}]],
+    ['an item with a title but no URL', [{ title: 'A story', domain: 'ai-llm' }]],
+    ['an item with a URL but no title', [{ primaryUrl: 'https://h.example/a', domain: 'ai-llm' }]],
+  ];
+  for (const [name, items] of cases) {
+    const dir = mkdtempSync(join(tmpdir(), 'tech-radar-items-'));
+    const f = updateFixture(dir);
+    writeFileSync(f.itemsPath, JSON.stringify(items));
+    const res = runCli(['update', '--state', f.statePath, '--items', f.itemsPath,
+      '--out', f.statePath, '--date', '2026-09-23', '--config', f.configDir]);
+    assert.equal(res.code, 3, name + ': the items file is the documented exit-3 input: ' + res.errs);
+    assert.match(res.errs, /item/i, name + ': the message names the item: ' + res.errs);
+    assert.doesNotMatch(res.errs, /TypeError/, name + ': no TypeError reaches the caller');
+    assert.equal(readFileSync(f.statePath, 'utf8'), f.body, name + ': the state is untouched');
+    assert.equal(readFileSync(f.itemsPath, 'utf8'), JSON.stringify(items), name + ': the items file is untouched');
+  }
+});
+
+// Regression test: update-state wrote the state with writeFileSync in place, at the
+// documented --out == --state invocation. The write truncates the file the merge just
+// read, so a failed or interrupted write leaves the state destroyed - no atomic rename,
+// no rollback, and the next plan dies on a JSON parse error.
+test('a failed state write exits 4 and leaves the previous state byte-identical', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'tech-radar-atomic-'));
+  const f = updateFixture(dir);
+  const before = readFileSync(f.statePath, 'utf8');
+  writeFileSync(f.itemsPath, JSON.stringify([item]));
+  chmodSync(f.statePath, 0o444);
+  let res;
+  try {
+    res = runCli(['update', '--state', f.statePath, '--items', f.itemsPath,
+      '--out', f.statePath, '--date', '2026-09-23', '--config', f.configDir]);
+  } finally {
+    chmodSync(f.statePath, 0o644);
+  }
+  assert.equal(res.code, 4, 'the write failure is the documented output exit: ' + res.errs);
+  assert.equal(readFileSync(f.statePath, 'utf8'), before, 'the previous state still parses byte-identically');
+  JSON.parse(readFileSync(f.statePath, 'utf8'));
+  const leftovers = readdirSync(dir).filter((name) => name !== 'state.json' && name !== 'items.json'
+    && name !== 'config' && !/^state\.json\./.test(name));
+  assert.deepEqual(leftovers, [], 'no stray file is left behind: ' + leftovers.join(', '));
+});
+
+// Regression test: the read-modify-write across the state file is unsynchronised -
+// no lock anywhere in scripts/, though .gitignore already ignores the lock names it
+// anticipates - so two concurrent updates silently lose a whole merged run: both exit 0
+// and the last writer wins.
+test('two concurrent updates keep both runs, or one of them fails', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'tech-radar-lock-'));
+  const f = updateFixture(dir);
+  // A state-sized merge widens the window between one process's read and its write.
+  const many = Array.from({ length: 400 }, (_, i) => ({
+    title: 'Concurrent story ' + i,
+    domain: 'ai-llm',
+    outlet: 'Example',
+    primaryUrl: 'https://h.example/concurrent-' + i,
+    flags: ['new'],
+  }));
+  writeFileSync(f.itemsPath, JSON.stringify(many));
+  const spawnUpdate = (date) => new Promise((resolve, reject) => {
+    const child = spawn(process.execPath, ['scripts/update-state.mjs', 'update', '--state', f.statePath,
+      '--items', f.itemsPath, '--out', f.statePath, '--date', date, '--config', f.configDir], { cwd: SKILL_ROOT });
+    let err = '';
+    child.stderr.on('data', (c) => { err += c; });
+    const timer = setTimeout(() => { child.kill('SIGKILL'); reject(new Error('the update did not finish')); }, 60000);
+    child.on('close', (code) => { clearTimeout(timer); resolve({ code, err }); });
+  });
+  const [first, second] = await Promise.all([spawnUpdate('2026-09-23'), spawnUpdate('2026-09-30')]);
+  const state = JSON.parse(readFileSync(f.statePath, 'utf8'));
+  const dates = state.runs.map((r) => r.date).sort();
+  const oneFailed = (first.code !== 0) !== (second.code !== 0);
+  assert.ok(
+    dates.length === 2 || oneFailed,
+    'both updates exited 0 and one run was lost: runs ' + JSON.stringify(dates)
+      + '; stderr ' + JSON.stringify((first.err + second.err).slice(0, 200)),
+  );
+  if (oneFailed) {
+    const failed = first.code === 0 ? second : first;
+    assert.notEqual(failed.err.trim(), '', 'the refused update says why');
+  }
+});
+
+// --- the update lock must not outlive the process that holds it -------------------------
+
+// TR-36 regression test: the lock is an exclusive create, so a run killed between taking it
+// and its finally leaves <state>.lock behind, and every later update is refused at exit 2
+// with no remedy at all. The lock records the process that owns it, so a lock whose process
+// is gone is an orphan: it has to be reclaimed and the update it was blocking has to run.
+const DEAD_PID = 4194305; // just past the kernel's pid ceiling, so no process can hold it
+
+function alive(pid) {
+  try { process.kill(pid, 0); return true; } catch { return false; }
+}
+
+// The lock names its owning process, and its age is a second, independent signal: the
+// orphan fixtures carry both, so a lock is reclaimed whether staleness is decided by the
+// recorded process id or by how long the file has sat there.
+function plantLock(statePath, { pid, ageMs = 0 }) {
+  const lock = statePath + '.lock';
+  const when = new Date(Date.now() - ageMs);
+  writeFileSync(lock, JSON.stringify({ pid, host: 'h.example', startedAt: when.toISOString() }) + '\n');
+  if (ageMs) utimesSync(lock, when, when);
+  return lock;
+}
+
+test('an update reclaims a lock whose owning process is gone', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'tech-radar-stale-lock-'));
+  try {
+    const f = updateFixture(dir);
+    writeFileSync(f.itemsPath, JSON.stringify([item]));
+    assert.equal(alive(DEAD_PID), false, 'the fixture names a process that cannot exist');
+    const lock = plantLock(f.statePath, { pid: DEAD_PID, ageMs: 30 * 864e5 });
+    const res = runCli(['update', '--state', f.statePath, '--items', f.itemsPath,
+      '--out', f.statePath, '--date', '2026-09-23', '--config', f.configDir]);
+    assert.equal(res.code, 0, 'an orphaned lock must not block the update: ' + res.errs);
+    const state = JSON.parse(readFileSync(f.statePath, 'utf8'));
+    assert.deepEqual(state.runs.map((r) => r.date), ['2026-09-23'], 'the blocked run was merged');
+    assert.equal(existsSync(lock), false, 'the reclaimed lock is removed, not left behind');
+    assert.deepEqual(readdirSync(dir).filter((name) => name.endsWith('.lock')), [], 'no lock file survives the update');
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('an update refuses a lock held by a live process and merges nothing', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'tech-radar-held-lock-'));
+  try {
+    const f = updateFixture(dir);
+    writeFileSync(f.itemsPath, JSON.stringify([item]));
+    const lock = plantLock(f.statePath, { pid: process.pid });
+    assert.equal(alive(process.pid), true, 'the lock names this live test process');
+    const res = runCli(['update', '--state', f.statePath, '--items', f.itemsPath,
+      '--out', f.statePath, '--date', '2026-09-23', '--config', f.configDir]);
+    assert.equal(res.code, 2, 'a lock a live process holds is still a refusal: ' + res.errs);
+    assert.match(res.errs, new RegExp(lock.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')),
+      'the refusal names the lock path: ' + res.errs);
+    assert.match(res.errs, /nothing was merged/, 'the refusal says nothing was merged: ' + res.errs);
+    assert.equal(readFileSync(f.statePath, 'utf8'), f.body, 'the state file is untouched');
+    assert.equal(existsSync(lock), true, 'the refusal does not remove a live lock');
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+// The same orphan from the failure the lock was added for: a run killed while it holds the
+// lock leaves a lock that is seconds old, so waiting for it to age out is not a remedy.
+test('an update killed while it holds the lock does not block the next one', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'tech-radar-killed-lock-'));
+  try {
+    const f = updateFixture(dir);
+    const many = Array.from({ length: 60000 }, (_, i) => ({
+      title: 'Interrupted story ' + i,
+      domain: 'ai-llm',
+      outlet: 'Example',
+      primaryUrl: 'https://h.example/interrupted-' + i,
+      flags: ['new'],
+    }));
+    writeFileSync(f.itemsPath, JSON.stringify(many));
+    const lock = f.statePath + '.lock';
+    const child = spawn(process.execPath, ['scripts/update-state.mjs', 'update', '--state', f.statePath,
+      '--items', f.itemsPath, '--out', f.statePath, '--date', '2026-09-16', '--config', f.configDir], { cwd: SKILL_ROOT });
+    let outcome = null;
+    const closed = new Promise((resolve) => child.on('close', (code, signal) => {
+      outcome = { code, signal };
+      resolve(outcome);
+    }));
+    const deadline = Date.now() + 30000;
+    while (!existsSync(lock) && outcome === null && Date.now() < deadline) {
+      await new Promise((resolve) => setTimeout(resolve, 2));
+    }
+    assert.equal(existsSync(lock), true, 'the update took the lock before it exited: ' + JSON.stringify(outcome));
+    if (outcome === null) child.kill('SIGKILL');
+    const killed = await closed;
+    assert.equal(killed.signal, 'SIGKILL', 'the update was killed while it held the lock: ' + JSON.stringify(killed));
+    assert.equal(readFileSync(f.statePath, 'utf8'), f.body, 'the killed run merged nothing');
+    writeFileSync(f.itemsPath, JSON.stringify([item]));
+    const res = runCli(['update', '--state', f.statePath, '--items', f.itemsPath,
+      '--out', f.statePath, '--date', '2026-09-23', '--config', f.configDir]);
+    assert.equal(res.code, 0, 'the lock a killed update left must not block the next one: ' + res.errs);
+    const state = JSON.parse(readFileSync(f.statePath, 'utf8'));
+    assert.deepEqual(state.runs.map((r) => r.date), ['2026-09-23'], 'only the surviving run is merged');
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+

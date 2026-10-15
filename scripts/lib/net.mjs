@@ -13,6 +13,47 @@ export const DEFAULT_UA = 'tech-radar/1.0';
 // transfer on an unknown-option error.
 const WRITE_OUT = '\n%{http_code}';
 
+// A URL reaches a notice, and a notice reaches stdout, the pool and the digest. Userinfo and
+// a credential-named query parameter are where a secret lives, so both are dropped before
+// the URL is quoted; the host, the path and a benign query stay, so the notice is still
+// diagnosable. Pure and offline-testable.
+const SECRET_PARAM = /^(?:access_?token|api_?key|apikey|auth|authorization|credential|key|passwd|password|secret|sig|signature|token)$/i;
+
+export function redactUrl(url) {
+  const raw = String(url ?? '');
+  try {
+    const parsed = new URL(raw);
+    parsed.username = '';
+    parsed.password = '';
+    parsed.hash = '';
+    // A parameter that names a credential is dropped; a benign one is kept, so the notice
+    // keeps the shape of the request it is reporting (the documented ?per_page=10 case).
+    for (const name of [...parsed.searchParams.keys()]) {
+      if (SECRET_PARAM.test(name)) parsed.searchParams.delete(name);
+    }
+    return parsed.toString();
+  } catch {
+    // Not a URL the parser accepts: drop the credential- and secret-bearing parts by hand.
+    return raw.replace(/\/\/[^/?#\s]*@/, '//').replace(/[?#][\s\S]*$/, '');
+  }
+}
+
+// curl's own diagnostic line is quoted in a notice, and a child-process message can carry
+// the whole argv -- which is where an Authorization header lives. Anything shaped like
+// that header or its Bearer value is removed before the text can reach a notice.
+const SECRET_SHAPES = [
+  /\bBearer\s+[^\s,;"']+/gi,
+  /\b(?:proxy-)?authorization\s*:\s*\S+/gi,
+  /\bgh[pousr]_[A-Za-z0-9]{6,}\b/g,
+  /\bgithub_pat_[A-Za-z0-9_]{20,}\b/g,
+];
+
+export function redactSecrets(text) {
+  let out = String(text ?? '');
+  for (const shape of SECRET_SHAPES) out = out.replace(shape, '[redacted]');
+  return out;
+}
+
 // Pure and offline-testable: it splits the status line off the captured bytes and
 // never touches the network. The body keeps its exact bytes, which matters for a
 // body that legitimately ends in a newline and for non-UTF-8 charsets. A buffer
@@ -43,8 +84,8 @@ function requirePositive(value, what) {
 // notice cannot become an unbounded server dump.
 export function shapeHttpError(status, body, url, limit) {
   const source = Buffer.isBuffer(body) ? body : Buffer.from(String(body ?? ''));
-  const snippet = plainText(decodeBuffer(source), requirePositive(limit, 'the error snippet limit in characters'));
-  const shaped = new Error(`HTTP ${status} for ${url}: ${snippet || 'no response body'}`);
+  const snippet = redactSecrets(plainText(decodeBuffer(source), requirePositive(limit, 'the error snippet limit in characters')));
+  const shaped = new Error(`HTTP ${status} for ${redactUrl(url)}: ${snippet || 'no response body'}`);
   shaped.url = url;
   shaped.httpStatus = Number(status);
   shaped.body = snippet;
@@ -60,10 +101,16 @@ export function shapeTransportError(err, url, limit) {
   const bound = requirePositive(limit, 'the error snippet limit in characters');
   const stderr = String(err?.stderr ?? '').trim();
   const first = stderr.split('\n').map((line) => line.trim()).filter(Boolean)[0] ?? '';
-  const cause = first.length > bound ? first.slice(0, bound) : first;
-  const shaped = new Error(
-    `request failed for ${url}: ${cause || err?.message || 'unknown curl failure'}`,
-  );
+  const capped = first.length > bound ? first.slice(0, bound) : first;
+  // err.message is never a cause: Node builds it from the whole argv, and the argv carries
+  // the Authorization header. An empty stderr is reported by naming the binary and its
+  // exit status instead, which tells a missing dependency from an unreachable feed.
+  const cause = capped
+    || (Number.isInteger(err?.status) ? `curl exited with status ${err.status}` : 'curl failed');
+  const shaped = new Error(`request failed for ${redactUrl(url)}: ${redactSecrets(cause)}`);
+  // No cause line of its own means curl never produced a diagnostic: the caller can tell a
+  // broken dependency from a source that answered.
+  shaped.noDiagnostic = capped === '';
   shaped.url = url;
   shaped.httpStatus = null; // a transport failure has no HTTP status
   shaped.exitStatus = Number.isInteger(err?.status) ? err.status : null;
@@ -74,7 +121,8 @@ export function shapeTransportError(err, url, limit) {
 export function curlBuffer(url, ms, headers = {}, ua = DEFAULT_UA, snippetLimit) {
   const args = ['-sSL', '--compressed', '--max-time', String(Math.ceil(requirePositive(ms, 'the request timeout in milliseconds') / 1000)), '-A', ua, '-w', WRITE_OUT];
   for (const [k, v] of Object.entries(headers)) args.push('-H', `${k}: ${v}`);
-  args.push(url);
+  // '--' ends curl's option list, so a target can never be read as a flag.
+  args.push('--', url);
   let raw;
   try {
     // stdio is spelled out so curl's own error line is captured instead of being
@@ -161,9 +209,24 @@ export function splitItems(xml) {
   return out;
 }
 
+// Upstream text is normalised here and nowhere else, so this is where two classes of
+// hostile byte are refused. A control byte can redraw an operator's terminal line or sit
+// in the published pool; a whitespace control becomes a space so words keep their
+// separation, and every other C0, C1 and DEL byte is dropped. The marker vocabulary below
+// is the grammar the renderer trusts, so text that merely spells it must not draw a badge
+// on a published card: the marker opener loses its bracket and colon, and a status token
+// loses its hash. The length bound is applied last, as before.
+const CONTROLS = /[\u0000-\u001f\u007f-\u009f]/g;
+const MARKER_OPENER = /\[(src|alt|prov):/gi;
+const STATUS_FLAG = /#(?=(?:new|followup|developing|watch)\b)/gi;
+
 export function plainText(raw, limit) {
   const bound = requirePositive(limit, 'the character limit');
-  const text = decodeEntities(String(raw).replace(/<[^>]*>/g, ' ')).replace(/\s+/g, ' ').trim();
+  const text = decodeEntities(String(raw).replace(/<[^>]*>/g, ' '))
+    .replace(CONTROLS, (ch) => (/\s/.test(ch) ? ' ' : ''))
+    .replace(MARKER_OPENER, '$1 ')
+    .replace(STATUS_FLAG, '')
+    .replace(/\s+/g, ' ').trim();
   return text.length > bound ? text.slice(0, bound) : text;
 }
 

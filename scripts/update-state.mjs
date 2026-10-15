@@ -3,7 +3,10 @@
 // Run state for the tech-radar skill: the coverage window, item history,
 // the watchlist and per-domain watermarks. Zero dependencies.
 import { createHash } from 'node:crypto';
-import { readFileSync, writeFileSync, existsSync } from 'node:fs';
+import {
+  accessSync, constants, existsSync, readFileSync, renameSync, unlinkSync, writeFileSync,
+} from 'node:fs';
+import { hostname } from 'node:os';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { readConfig } from './lib/mdtable.mjs';
 import { hostOf } from './lib/net.mjs';
@@ -30,7 +33,8 @@ advances the watermarks of the domains the run covered. A run that is already
 recorded for the same date and domains is refused rather than merged twice.
 
 Exit codes: 0 OK, 1 fatal, 2 state, items or config not found or unreadable, an
-invalid --date, an invalid settings value, or the run is already recorded; 3 the items file is not an array or an item failed
+invalid --date, an invalid settings value, the run is already recorded, or another
+update holds the state lock (a lock whose holder is gone is reclaimed); 3 the items file is not an array or an item failed
 validation; 4 output could not be written.`;
 
 // An error that carries the exit code the CLI should return for it.
@@ -109,6 +113,13 @@ export function planWindows(config, state, now = new Date(), only = null, floor 
   const capFloorMs = now.getTime() - capMs;
   const explicit = floor ? new Date(floor) : null;
   if (explicit && Number.isNaN(explicit.getTime())) throw fail(`invalid --since: ${floor}`, 2);
+  // A floor later than now asks for a window that ends before it starts. plan used to
+  // print that inverted window - and a label the digest must repeat verbatim - while
+  // collect refused the very same window, so the plan was unusable and the digest it
+  // labelled was unbuildable. The floor is refused before anything is printed.
+  if (explicit && explicit.getTime() > now.getTime()) {
+    throw fail(`--since ${floor} is after now (${now.toISOString()}): the window would be empty`, 2);
+  }
   const perDomain = {};
   let earliestDeclaredMs = null;
   let earliestMs = null;
@@ -169,8 +180,29 @@ export function storyKey(title, url) {
   return createHash('sha256').update(`${normalizeTitle(title)}|${hostOf(url)}`).digest('hex').slice(0, 12);
 }
 
+// Every entry is validated before a story key is computed from it. Without this a
+// non-object entry died with a raw TypeError - the exit 1 the CLI never returns - and an
+// entry with no title or primaryUrl collapsed every such item onto one bogus key
+// (String(undefined) and hostOf(undefined) both produce ''), so malformed items merged
+// into a single state entry titled "undefined" with no primaryUrl. The exit is the
+// documented exit 3, and it happens before anything is written.
+function validateItems(items) {
+  items.forEach((item, index) => {
+    if (!item || typeof item !== 'object' || Array.isArray(item)) {
+      throw fail(`item ${index} is ${shapeOf(item)}, not an object`, 3);
+    }
+    if (typeof item.title !== 'string' || item.title.trim() === '') {
+      throw fail(`item ${index} has no non-empty string title, got ${JSON.stringify(item.title)}`, 3);
+    }
+    if (typeof item.primaryUrl !== 'string' || item.primaryUrl.trim() === '') {
+      throw fail(`item ${index} has no non-empty string primaryUrl, got ${JSON.stringify(item.primaryUrl)}`, 3);
+    }
+  });
+}
+
 export function mergeRun(config, state, { items, date, entry = 'weekly', now = new Date(), only = null, window = null }) {
   assertKnownDomains(config, only);
+  validateItems(items);
   const next = JSON.parse(JSON.stringify(state));
   next.version = 1;
   next.updatedAt = now.toISOString();
@@ -259,11 +291,40 @@ export function parseArgs(argv) {
   return out;
 }
 
+// The containers are validated, not trusted. An array where a map belongs (or the
+// reverse) used to be accepted and then written back as the wrong container - every
+// watermark and all item history silently gone at exit 0 - and a runs field that was
+// not an array crashed the run-log lookup with a raw TypeError, the exit 1 that
+// reference/state-schema.md says the CLI never returns. A container that is absent is
+// normalised through emptyState, so it can never disable a rule either.
+const STATE_CONTAINERS = [['domains', 'object'], ['items', 'object'], ['watchlist', 'array'], ['runs', 'array']];
+
+function shapeOf(value) {
+  if (value === null) return 'null';
+  if (Array.isArray(value)) return 'an array';
+  return `a ${typeof value}`;
+}
+
+function isContainer(value, kind) {
+  if (kind === 'array') return Array.isArray(value);
+  return typeof value === 'object' && value !== null && !Array.isArray(value);
+}
+
 function loadState(path, config) {
   if (!existsSync(path)) return emptyState(config.domains.map((d) => d.key));
   const raw = readFileSync(path, 'utf8');
   const state = JSON.parse(raw);
-  if (!state || typeof state !== 'object' || Array.isArray(state)) throw new Error('state is not an object');
+  if (!state || typeof state !== 'object' || Array.isArray(state)) throw fail('state is not an object', 2);
+  const base = emptyState(config.domains.map((d) => d.key));
+  for (const [key, kind] of STATE_CONTAINERS) {
+    if (state[key] === undefined) { state[key] = base[key]; continue; }
+    if (!isContainer(state[key], kind)) {
+      throw fail(`state field "${key}" must be ${kind === 'array' ? 'an array' : 'an object'}, got ${shapeOf(state[key])}`, 2);
+    }
+  }
+  if (state.runs.some((run) => !run || typeof run !== 'object' || Array.isArray(run))) {
+    throw fail('state field "runs" must hold only run objects, got an entry that is not an object', 2);
+  }
   return state;
 }
 
@@ -293,9 +354,80 @@ export function normalizeRunDate(value) {
 export function findRecordedRun(state, date, domainKeys) {
   const wanted = [...domainKeys].sort().join(',');
   const day = normalizeRunDate(date);
-  return (state.runs ?? []).find(
-    (r) => normalizeRunDate(r.date) === day && [...(r.domains ?? [])].sort().join(',') === wanted,
+  // A library caller may hand in a state that never passed loadState, so the lookup is
+  // shaped defensively: it reads what it can and never throws (the CLI documents no exit 1).
+  const runs = Array.isArray(state?.runs) ? state.runs : [];
+  return runs.find(
+    (r) => r && typeof r === 'object' && !Array.isArray(r)
+      && normalizeRunDate(r.date) === day
+      && [...(Array.isArray(r.domains) ? r.domains : [])].sort().join(',') === wanted,
   ) ?? null;
+}
+
+// The state is replaced atomically: the new body is written to a temp file in the same
+// directory and renamed over the destination, so a failed or interrupted write can never
+// leave the destination truncated - the previous state survives intact. A destination
+// that exists but is not writable is refused (the rename itself needs only the directory
+// and would otherwise replace a file the operator protected), the temp file is removed
+// on every failure path, and the caller still reports the documented exit 4.
+function writeStateAtomic(out, body) {
+  const tmp = `${out}.tmp`;
+  try {
+    writeFileSync(tmp, body);
+    if (existsSync(out)) accessSync(out, constants.W_OK);
+    renameSync(tmp, out);
+  } catch (err) {
+    try { unlinkSync(tmp); } catch { /* the temp file was never created */ }
+    throw err;
+  }
+}
+
+// The lock is an exclusive create of <state>.lock, the name .gitignore already
+// anticipates; the file is removed in a finally, so a normal run never blocks the next.
+// The lock also records the process that holds it, because a run killed between taking the
+// lock and that finally would otherwise block every later update forever with no remedy.
+// A lock whose recorded process is gone -- or whose contents cannot be read as a holder
+// record at all -- is an orphan and is reclaimed immediately, without waiting for an age.
+function lockHolderAlive(lockPath) {
+  let pid;
+  try {
+    pid = Number(JSON.parse(readFileSync(lockPath, 'utf8'))?.pid);
+  } catch {
+    // Contents that are not a holder record cannot be attributed to a process that is
+    // still alive, so the lock counts as abandoned rather than as a permanent block.
+    return false;
+  }
+  if (!Number.isInteger(pid) || pid <= 0) return false;
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (err) {
+    // EPERM means the process exists but belongs to another user; only ESRCH is gone.
+    return err.code === 'EPERM';
+  }
+}
+
+function acquireLock(path) {
+  const lockPath = `${path}.lock`;
+  const refusal = `another update holds ${lockPath}; nothing was merged. Retry when it finishes.`;
+  const record = JSON.stringify({ pid: process.pid, host: hostname(), startedAt: new Date().toISOString() });
+  for (let attempt = 0; ; attempt += 1) {
+    try {
+      writeFileSync(lockPath, record + '\n', { flag: 'wx' });
+      return lockPath;
+    } catch (err) {
+      if (err.code !== 'EEXIST') throw fail(`cannot lock ${lockPath}: ${err.message}`, 2);
+    }
+    // A lock exists. Reclaim it once when its recorded process is gone; a live holder, or
+    // a lock a concurrent run created while this one was reclaiming the orphan, is a real
+    // refusal. The second attempt never reclaims, so two reclaimers cannot both win.
+    if (attempt > 0 || lockHolderAlive(lockPath)) throw fail(refusal, 2);
+    try {
+      unlinkSync(lockPath);
+    } catch (err) {
+      if (err.code !== 'ENOENT') throw fail(`cannot lock ${lockPath}: ${err.message}`, 2);
+    }
+  }
 }
 
 export function main(argv = process.argv.slice(2)) {
@@ -326,6 +458,31 @@ export function main(argv = process.argv.slice(2)) {
     process.exitCode = 2;
     return 2;
   }
+  // update merges into the state file (the documented --out == --state invocation), so
+  // its read, its merge and its write are one critical section: two concurrent updates
+  // otherwise each read the same state and the later write silently drops the earlier
+  // run. The lock file .gitignore already anticipates serialises them; a held lock is a
+  // named refusal rather than a lost run. plan mutates nothing and takes no lock.
+  let lockPath = null;
+  if (opts.command === 'update') {
+    try {
+      lockPath = acquireLock(opts.state);
+    } catch (err) {
+      console.error(`update-state: ${err.message}`);
+      process.exitCode = err.exitCode ?? 2;
+      return process.exitCode;
+    }
+  }
+  try {
+    return runCommand(opts, config);
+  } finally {
+    if (lockPath) { try { unlinkSync(lockPath); } catch { /* the lock file was already gone */ } }
+  }
+}
+
+// The command body. It runs with the update lock held, so the state is read and written
+// inside one critical section.
+function runCommand(opts, config) {
   let state;
   try {
     state = loadState(opts.state, config);
@@ -421,7 +578,7 @@ export function main(argv = process.argv.slice(2)) {
     return process.exitCode;
   }
   try {
-    writeFileSync(opts.out, `${JSON.stringify(merged.state, null, 2)}\n`);
+    writeStateAtomic(opts.out, `${JSON.stringify(merged.state, null, 2)}\n`);
   } catch (err) {
     console.error(`update-state: cannot write ${opts.out}: ${err.message}`);
     process.exitCode = 4;

@@ -2,7 +2,7 @@
 // scripts/check-quality.mjs
 // The quality gate. Zero dependencies. Prints every violation with its line
 // number and exits 5 if there is at least one failure; warnings never fail a run.
-import { readFileSync, existsSync } from 'node:fs';
+import { readFileSync, existsSync, statSync } from 'node:fs';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { readConfig } from './lib/mdtable.mjs';
 import { hostOf, isDiscoveryOnly } from './lib/net.mjs';
@@ -181,12 +181,15 @@ export function parseItems(md) {
     const body = parts.join(' ').trim();
     const src = SRC.exec(body);
     const tokens = statusTokens(body);
+    // The flag is the last token that is #new or #followup. #developing and #watch are
+    // additive and never decide it, so '#new #developing' is still new and the earlier
+    // tokens stay prose; a token list with neither status yields no flag at all.
+    const flags = tokens.filter((t) => t === 'new' || t === 'followup');
     items.push({
       line: itemLine, section, domain, title: m[1], body,
       src: src ? { outlet: src[1].trim(), date: src[2].trim(), url: src[3] } : null,
       prov: [...body.matchAll(/\[prov:([a-z-]+)\]/g)].map((x) => x[1]),
-      // The trailing status token is the flag; any earlier ones read as prose.
-      flags: tokens.length ? [tokens[tokens.length - 1]] : [],
+      flags: flags.length ? [flags[flags.length - 1]] : [],
       statusTokens: tokens,
       // The language rule judges the headline and the summary together.
       cjk: /[\u4e00-\u9fff]/.test(`${m[1]} ${itemProse(body)}`),
@@ -258,13 +261,13 @@ export function reportedNoticeCount(text) {
   return m ? Number(m[1]) : null;
 }
 
-// The story key is title plus host, so two different stories on one host whose
-// titles normalise alike collapse into one. The gate's duplicate check adds the URL
-// path, which keeps genuinely distinct stories distinct.
+// The duplicate check is the documented story key - the normalised title plus the host
+// (reference/state-schema.md) - which is exactly what mergeRun collapses on. Adding the
+// URL path let two items that share a story key ship through the gate; the merge then
+// stored one entry and labelled the brand-new one a followup. Design 4.4 makes a shared
+// story key a gate failure, so the gate must key on the same thing the merge does.
 export function dedupeKey(title, url) {
-  let path = String(url ?? '');
-  try { path = new URL(String(url)).pathname; } catch { /* keep the raw value */ }
-  return `${storyKey(title, url)}|${path}`;
+  return storyKey(title, url);
 }
 
 // The documented enum. A value outside it - a typo, a capital variance, an empty
@@ -288,6 +291,41 @@ export function planProblem(plan) {
     if (typeof value !== 'string' || Number.isNaN(Date.parse(value))) return `the plan window.${key} is not a date`;
   }
   if (typeof plan.label !== 'string' || plan.label.trim() === '') return 'the plan label is not a string';
+  // perDomain decides which core headings and quiet lines a run answers for, so an entry
+  // that is null or otherwise not an object must be named here rather than read as "not
+  // covered" by one rule and "covered" by another, which disabled both at once.
+  if (plan.perDomain !== undefined) {
+    if (!plan.perDomain || typeof plan.perDomain !== 'object' || Array.isArray(plan.perDomain)) {
+      return 'the plan perDomain is not an object';
+    }
+    for (const [key, value] of Object.entries(plan.perDomain)) {
+      if (!value || typeof value !== 'object' || Array.isArray(value)) {
+        return `the plan perDomain.${key} is not an object`;
+      }
+    }
+  }
+  return null;
+}
+
+// The gate's budget rules are arithmetic, and Number(undefined) is NaN: every comparison
+// against NaN is false, so one deleted settings row turns a rule into a no-op while the
+// gate still prints QUALITY: PASS. Five budget rules and the discovery-host rule were
+// disabled that way. Like update-state's positiveInt, the gate refuses the configuration
+// and names the key instead of reporting a clean run.
+export const GATE_QUANTITIES = ['core_max_items', 'watch_max_items', 'watch_notable_max', 'total_min_items', 'total_max_items'];
+
+export function settingsProblem(settings) {
+  for (const key of GATE_QUANTITIES) {
+    const raw = settings?.[key];
+    const n = Number(raw);
+    if (!Number.isInteger(n) || n <= 0) {
+      return `${key} must be a positive integer, got ${JSON.stringify(raw)}`;
+    }
+  }
+  const hosts = String(settings?.discovery_hosts ?? '').split(',').map((x) => x.trim()).filter(Boolean);
+  if (hosts.length === 0) {
+    return `discovery_hosts must be a non-empty comma-separated list of host names, got ${JSON.stringify(settings?.discovery_hosts)}`;
+  }
   return null;
 }
 
@@ -390,11 +428,16 @@ export function check(md, config, plan, opts = {}) {
   if (items.length > Number(s.total_max_items)) failures.push(`${items.length} items is above total_max_items ${s.total_max_items}`);
 
   const keys = new Map();
+  const named = new Set();
   for (const it of items) {
     if (!it.src) continue;
     const k = dedupeKey(it.title, it.src.url);
-    if (keys.has(k)) failures.push(`line ${it.line}: duplicate story key ${k} with line ${keys.get(k)}`);
-    else keys.set(k, it.line);
+    if (!keys.has(k)) { keys.set(k, it.line); continue; }
+    // One violation per story key: a run of items that all collapse into the same story
+    // is named once, against the earlier line the group first appeared on.
+    if (named.has(k)) continue;
+    named.add(k);
+    failures.push(`line ${it.line}: duplicate story key ${k} with line ${keys.get(k)}`);
   }
 
   // Design 4.4: a quiet core domain keeps its heading with an explicit quiet line,
@@ -404,7 +447,9 @@ export function check(md, config, plan, opts = {}) {
   // so it is treated as unscoped and every core domain is required.
   const planned = plan.perDomain && typeof plan.perDomain === 'object' ? Object.keys(plan.perDomain) : [];
   const scoped = planned.length > 0;
-  const covered = (d) => !scoped || Boolean(plan.perDomain[d.key]);
+  // One predicate for both rules: a domain the plan names is covered, whatever its entry
+  // holds, so a malformed entry cannot read as "not covered" and disable a rule.
+  const covered = (d) => !scoped || planned.includes(d.key);
   for (const d of config.domains.filter((x) => x.tier === 'core' && covered(x))) {
     if (!domainHeadings.some((r) => r.name === d.domain && isCoreSection(r.section))) {
       failures.push(`core domain ${d.domain} has no section heading; a quiet core domain keeps its heading and says so`);
@@ -567,12 +612,30 @@ export function main(argv = process.argv.slice(2)) {
     process.exitCode = 2;
     return 2;
   }
-  // A --html path that does not exist is a typo, not a pass: silently skipping
-  // the check would disable the self-containment rule for the whole run.
-  if (opts.html && !existsSync(opts.html)) {
-    console.error(`check-quality: --html file not found: ${opts.html}`);
-    process.exitCode = 2;
-    return 2;
+  // A --html path that does not exist, is not a file, or cannot be read is a typo or a
+  // permission problem, not a pass: silently skipping the check would disable the
+  // self-containment rule for the whole run. Each case is a named exit 2; a directory
+  // used to pass the existence test and die on the read with an EISDIR stack trace.
+  if (opts.html) {
+    let stat = null;
+    try { stat = statSync(opts.html); } catch { stat = null; }
+    if (!stat) {
+      console.error(`check-quality: --html file not found: ${opts.html}`);
+      process.exitCode = 2;
+      return 2;
+    }
+    if (!stat.isFile()) {
+      console.error(`check-quality: --html is not a file: ${opts.html}`);
+      process.exitCode = 2;
+      return 2;
+    }
+    try {
+      readFileSync(opts.html, 'utf8');
+    } catch (err) {
+      console.error(`check-quality: cannot read --html ${opts.html}: ${err.message}`);
+      process.exitCode = 2;
+      return 2;
+    }
   }
   // The pool is read defensively: a missing, unreadable or malformed file is an input
   // error, never a silently absent check.
@@ -609,6 +672,14 @@ export function main(argv = process.argv.slice(2)) {
     config = readConfig(opts.config);
   } catch (err) {
     console.error(`check-quality: cannot read config ${opts.config}: ${err.message}`);
+    process.exitCode = 2;
+    return 2;
+  }
+  // A missing or unusable budget setting is a configuration error, not a quietly
+  // disabled rule: the CLI names the key and exits 2 like the other invalid-setting paths.
+  const settingsIssue = settingsProblem(config.settings);
+  if (settingsIssue) {
+    console.error(`check-quality: ${settingsIssue}`);
     process.exitCode = 2;
     return 2;
   }

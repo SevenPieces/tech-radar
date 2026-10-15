@@ -1,6 +1,11 @@
 // tests/net.test.mjs
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
+import { chmodSync, copyFileSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { spawnSync } from 'node:child_process';
+import { fileURLToPath } from 'node:url';
 import { decodeBuffer, decodeEntities, field, atomLink, splitItems, plainText, isDiscoveryOnly, hostOf, shapeHttpError, shapeTransportError, splitCurlOutput, fetchText } from '../scripts/lib/net.mjs';
 
 test('decodeBuffer passes UTF-8 through', () => {
@@ -51,6 +56,29 @@ test('splitItems handles RSS 2.0, RDF and Atom', () => {
 test('plainText strips tags and bounds the result', () => {
   assert.equal(plainText('<p>Hello <b>world</b></p>', 100), 'Hello world');
   assert.equal(plainText('x'.repeat(500), 10), 'xxxxxxxxxx');
+});
+
+// Regression test: the length bound was the only rule plainText enforced, so the
+// control bytes a hostile upstream body can carry lived on into the collector notice,
+// the pool and stderr. \s+ collapses none of ESC, NUL, BS or DEL: an ESC sequence that
+// survived into a terminal notice redrew the operator's line, which is the defect this
+// pins.
+test('plainText drops C0, DEL and C1 controls instead of passing them through', () => {
+  const hostile = 'a\u001b[2Kb\u0000c\u0008d\u007f e\u009ff';
+  const out = plainText(hostile, 200);
+  const offenders = [...out].filter((ch) => {
+    const cp = ch.codePointAt(0);
+    return cp < 0x20 || (cp >= 0x7f && cp <= 0x9f);
+  });
+  assert.deepEqual(offenders, [], 'control code points survived: ' + JSON.stringify(out));
+  assert.match(out, /a\[2Kbcd/, 'the printable text around each control is still there');
+});
+
+// Regression test: the length bound must survive the character-class rule, so a
+// bounded result is bounded either way.
+test('plainText still bounds a body that is all control bytes', () => {
+  assert.equal(plainText('\u001b'.repeat(500), 10), '');
+  assert.ok(plainText('x\u0000'.repeat(300), 10).length <= 10);
 });
 
 test('isDiscoveryOnly matches hosts and their subdomains', () => {
@@ -144,3 +172,96 @@ test('the real transport pins a failed loopback fetch to a transport failure, ne
   }
   t.skip('something answered on 127.0.0.1:1, so the failed-transport path was not exercised: ' + String(text).slice(0, 40));
 });
+
+// Regression test: shapeTransportError's cause chain fell back to err.message when
+// stderr was empty, and Node's child_process message carries the whole argv -- which is
+// where curlBuffer puts the Authorization header. A silent-curl shim plus a dead proxy
+// put "curl -sSL ... -H Authorization: Bearer <token>" into the notice, stdout and
+// .pool.json, contradicting README's claim that the token never reaches a notice or an
+// artifact. The literal is assembled from fragments so this file never carries one.
+test('shapeTransportError never falls back to a message that embeds the request arguments', () => {
+  const sentinel = 'ghp_' + 'fakefakefakefake';
+  const failure = {
+    status: 7,
+    signal: null,
+    stdout: Buffer.from('\n000'),
+    stderr: Buffer.from(''),
+    message: 'Command failed: curl -sSL -H "Authorization: Bearer ' + sentinel + '" https://api.github.com/repos/x/y/releases',
+  };
+  const shaped = shapeTransportError(failure, 'https://api.github.com/repos/x/y/releases', 200);
+  assert.doesNotMatch(shaped.message, /Authorization/i, 'the header name must not reach the notice');
+  assert.doesNotMatch(shaped.message, /Bearer/i, 'the scheme must not reach the notice');
+  assert.doesNotMatch(shaped.message, /ghp_/, 'the token shape must not reach the notice');
+  assert.equal(shaped.message.includes(sentinel), false, 'the token value must not reach the notice');
+  assert.match(shaped.message, /^request failed for https:\/\/api\.github\.com\/repos\/x\/y\/releases: /);
+  assert.equal(shaped.exitStatus, 7, "curl's process exit code is still reported");
+});
+
+test('shapeTransportError still quotes curl when it did write a cause line', () => {
+  const failure = {
+    status: 7,
+    stdout: Buffer.from('\n000'),
+    stderr: Buffer.from('curl: (7) Failed to connect to 127.0.0.1 port 1\n'),
+    message: 'Command failed: curl -sSL -H "Authorization: Bearer ' + 'ghp_' + 'x'.repeat(24) + '" http://x/',
+  };
+  const shaped = shapeTransportError(failure, 'http://x/', 200);
+  assert.match(shaped.message, /^request failed for http:\/\/x\/: curl: \(7\) Failed to connect/);
+  assert.doesNotMatch(shaped.message, /Authorization|Bearer|ghp_/, 'the argv fallback stays out');
+});
+
+// Regression test: both shapers interpolated the raw URL, so a credentialised feed
+// target -- userinfo or a secret query parameter -- was published verbatim in the
+// notice and therefore in the digest.
+test('shapeHttpError redacts userinfo and the query string it quotes', () => {
+  const shaped = shapeHttpError(500, Buffer.from('boom'), 'https://u:p4ssw0rd@h.example/x?token=SECRETVAL', 200);
+  assert.equal(shaped.message.includes('p4ssw0rd'), false, 'the password must not reach the notice');
+  assert.equal(shaped.message.includes('SECRETVAL'), false, 'the query value must not reach the notice');
+  assert.doesNotMatch(shaped.message, /u:p4ssw0rd@/, 'userinfo must not reach the notice');
+  assert.match(shaped.message, /^HTTP 500 for https:\/\/h\.example\/x\/?: boom$/, 'the host and path survive');
+});
+
+test('shapeTransportError redacts userinfo and the query string it quotes', () => {
+  const failure = { status: 7, stdout: Buffer.from('\n000'), stderr: Buffer.from('curl: (7) refused\n') };
+  const shaped = shapeTransportError(failure, 'https://u:p4ssw0rd@h.example/x?token=SECRETVAL', 200);
+  assert.equal(shaped.message.includes('p4ssw0rd'), false, 'the password must not reach the notice');
+  assert.equal(shaped.message.includes('SECRETVAL'), false, 'the query value must not reach the notice');
+  assert.match(shaped.message, /^request failed for https:\/\/h\.example\/x\/?: curl: \(7\) refused$/);
+});
+
+// Regression test: the suite required the host curl binary while README promises a
+// standard-library-only skill, and a curl failure whose stderr was empty degraded into
+// the generic "request failed ... unknown curl failure": an operator could not tell a
+// missing dependency from an unreachable feed. A failing curl on PATH exercises the
+// transport the collector really uses (a PATH holding only node still resolves curl
+// through the host's exec path search, so the absence has to be simulated).
+test('a curl failure with no stderr names the binary instead of "unknown curl failure"', () => {
+  const d = mkdtempSync(join(tmpdir(), 'tech-radar-nocurl-'));
+  const repo = fileURLToPath(new URL('../', import.meta.url));
+  const bin = join(d, 'bin');
+  const cfg = join(d, 'config');
+  mkdirSync(bin, { recursive: true });
+  mkdirSync(cfg, { recursive: true });
+  for (const name of ['domains.md', 'settings.md', 'sources.md']) {
+    copyFileSync(join(repo, 'config', name), join(cfg, name));
+  }
+  writeFileSync(join(cfg, 'watchlist.md'), [
+    '| kind | target | domain | note |',
+    '|---|---|---|---|',
+    '| rss | https://blog.example/feed.xml | ai-llm | a row that must reach the transport |',
+    '',
+  ].join('\n'));
+  // The shim is the failure mode: nonzero exit, nothing on stderr.
+  writeFileSync(join(bin, 'curl'), '#!/bin/sh\nexit 127\n');
+  chmodSync(join(bin, 'curl'), 0o755);
+  const res = spawnSync(process.execPath, [
+    join(repo, 'scripts', 'collect.mjs'), '--config', cfg, '--out', join(d, '.pool.json'), '--timeout', '2000',
+  ], { encoding: 'utf8', env: { ...process.env, PATH: bin + ':' + process.env.PATH } });
+  const pool = JSON.parse(res.stdout);
+  assert.equal(pool.candidates.length, 0, 'no candidate came back');
+  assert.equal(pool.notices.length, 1, 'the row produced one notice, not a silent skip');
+  assert.match(pool.notices[0], /curl exited with status 127/, 'the notice names the binary and its exit status');
+  assert.doesNotMatch(pool.notices[0], /unknown curl failure/, 'the uninformative fallback is gone');
+  assert.match(res.stderr, /curl exited with status 127/, 'the operator line carries it too');
+  rmSync(d, { recursive: true, force: true });
+});
+

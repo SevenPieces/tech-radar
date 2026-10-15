@@ -9,7 +9,7 @@ import { dirname, join } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { readConfig } from './lib/mdtable.mjs';
 import {
-  fetchText, hostOf, isDiscoveryOnly, splitItems, field, atomLink, plainText,
+  fetchText, hostOf, isDiscoveryOnly, splitItems, field, atomLink, plainText, redactUrl,
 } from './lib/net.mjs';
 
 // The collector must work from any working directory, so the default configuration
@@ -58,7 +58,12 @@ export function parseArgs(argv) {
     const v = argv[i + 1];
     if (v === undefined) throw new Error(`missing value for ${a}`);
     i += 1;
-    if (a === '--config') out.config = v;
+    if (a === '--config') {
+      // join('', 'domains.md') degrades to a cwd-relative path, so an empty value would
+      // silently resolve the configuration against the working directory.
+      if (String(v).trim() === '') throw new Error('empty value for --config');
+      out.config = v;
+    }
     else if (a === '--since' || a === '--until') {
       const at = new Date(v);
       if (Number.isNaN(at.getTime())) throw new Error(`invalid ${a}: ${v}`);
@@ -87,19 +92,67 @@ export function flag(argv, name) {
   return argv.includes(name);
 }
 
+// The numeric settings are validated once, before the first request, against the rows the
+// run will actually read. A mistyped row is then a configuration error that names the
+// setting (exit 2) instead of a degraded week carrying a script-internal message in the
+// notice stream, and a configuration that carries only what its own rows need stays legal.
+// update-state.mjs validates its own settings the same way. The reserve may be zero; every
+// other quantity must be a positive integer.
+const SOURCE_SETTINGS = {
+  rss: ['title_max_chars', 'summary_max_chars', 'error_snippet_max_chars'],
+  'arxiv-category': ['arxiv_max_results', 'title_max_chars', 'summary_max_chars', 'error_snippet_max_chars'],
+  'github-repo': ['github_releases_per_repo', 'github_tags_per_repo', 'summary_max_chars', 'error_snippet_max_chars'],
+  'github-org': ['github_org_repos', 'github_releases_per_repo', 'github_tags_per_repo', 'summary_max_chars', 'error_snippet_max_chars'],
+  ghsa: ['ghsa_page_size', 'summary_max_chars', 'error_snippet_max_chars'],
+  nvd: ['summary_max_chars', 'error_snippet_max_chars'],
+  npm: ['error_snippet_max_chars'],
+  pypi: ['error_snippet_max_chars'],
+  crates: ['error_snippet_max_chars'],
+  gomod: ['error_snippet_max_chars'],
+};
+
+// The keys this run will read: what main resolves before it dispatches, plus what the
+// selected rows' sources read. A configuration that carries only the settings its own rows
+// need stays legal.
+export function requiredSettingKeys(rows, options) {
+  const keys = new Set();
+  if (!options.since) keys.add('window_cap_weeks');
+  if (!options.timeout) keys.add('request_timeout_ms');
+  for (const row of rows) {
+    for (const key of SOURCE_SETTINGS[row.kind] ?? []) keys.add(key);
+  }
+  return keys;
+}
+
+export function validateSettings(settings, rows, options) {
+  for (const key of requiredSettingKeys(rows, options)) {
+    const n = Number(settings?.[key]);
+    if (!Number.isInteger(n) || n <= 0) {
+      throw new Error(`${key} is missing or invalid in config/settings.md`);
+    }
+  }
+  const github = rows.some((r) => r.kind === 'github-repo' || r.kind === 'github-org');
+  const reserve = Number(settings?.github_rate_limit_reserve);
+  if (github && (!Number.isInteger(reserve) || reserve < 0)) {
+    throw new Error('github_rate_limit_reserve is missing or invalid in config/settings.md');
+  }
+  return settings;
+}
+
 // The pool lands beside the digest. The environment override wins over the
 // configured directory; an empty TECH_RADAR_DIR is not a usable directory, hence
 // || rather than ??. Resolving this after readConfig is what lets the default come
 // from configuration instead of a literal.
 export function resolveOut(options, settings) {
   if (options.out) return options.out;
-  const dir = process.env.TECH_RADAR_DIR || settings.output_dir;
   // A settings file without output_dir reached join() as undefined and left main() as an
   // uncaught TypeError: a bare exit 1 with a stack trace instead of the named exit 2 every
-  // other missing setting produces.
-  if (dir === undefined || String(dir).trim() === '') {
+  // other missing setting produces. The environment override decides the directory, never
+  // whether the configuration is valid, so it cannot mask a missing setting.
+  if (settings.output_dir === undefined || String(settings.output_dir).trim() === '') {
     throw new Error('output_dir is missing or invalid in config/settings.md');
   }
+  const dir = process.env.TECH_RADAR_DIR || settings.output_dir;
   return join(dir, '.pool.json');
 }
 
@@ -186,7 +239,8 @@ export async function collectGithub(rows, ctx) {
   // then one releases request per repository, then one tags request for each
   // repository whose releases produced nothing.
   const left = { value: Math.max(0, budget.remaining - reserve) };
-  const spend = () => { if (left.value <= 0) return false; left.value -= 1; return true; };
+  const charged = { count: 0 };
+  const spend = () => { if (left.value <= 0) return false; left.value -= 1; charged.count += 1; return true; };
   const shortfall = { repos: 0, orgs: 0, tags: 0 };
 
   // Phase 0 -- organisations. /orgs/{org}/releases does not exist (probe 2026-09-23:
@@ -283,7 +337,13 @@ export async function collectGithub(rows, ctx) {
       + '(the tags API has no date, so they cannot be window-filtered)');
   }
   if (shortfall.repos || shortfall.orgs || shortfall.tags) {
-    notices.push(budgetNotice(budget, shortfall, Boolean(token)));
+    // A probe that reports the whole allowance means nothing had been charged before the
+    // block, so its "remaining" is a pre-spend snapshot: the notice states the effective
+    // allowance instead, which is how a fully spent run stops claiming a full one. A probe
+    // that already reports a partial budget keeps its reading.
+    const fresh = budget.limit !== null && budget.remaining === budget.limit;
+    const reported = fresh ? { ...budget, reserve, spent: charged.count } : budget;
+    notices.push(budgetNotice(reported, shortfall, Boolean(token)));
   }
   return { candidates, notices };
 }
@@ -328,12 +388,30 @@ export async function collectArxiv(rows, ctx) {
   return { candidates, notices };
 }
 
+// A watchlist target is configuration, and curl honours whatever it is handed: file://
+// answers with a local file at exit 0 and status 200, and a target beginning with '-' is
+// read as an option. Only http and https are fetched, so every other row becomes a notice
+// instead of a candidate and never reaches the fetcher.
+export function fetchableTarget(target) {
+  const value = String(target ?? '').trim();
+  if (value === '' || value.startsWith('-')) return false;
+  try {
+    const protocol = new URL(value).protocol;
+    return protocol === 'http:' || protocol === 'https:';
+  } catch { return false; }
+}
+
 export async function collectFeeds(rows, ctx) {
   const candidates = [];
   const notices = [];
   for (const row of rows) {
+    const target = String(row.target ?? '').trim();
+    if (!fetchableTarget(target)) {
+      notices.push(`rss ${redactUrl(target) || '(empty target)'}: unsupported scheme (only http and https are fetched)`);
+      continue;
+    }
     try {
-      const xml = await ctx.net.fetchText(row.target, ctx.timeout, {}, ctx.settings.user_agent, ctx.settings.error_snippet_max_chars);
+      const xml = await ctx.net.fetchText(target, ctx.timeout, {}, ctx.settings.user_agent, ctx.settings.error_snippet_max_chars);
       for (const item of splitItems(xml)) {
         const url = field(item, 'link') || atomLink(item);
         if (!url) continue;
@@ -346,13 +424,17 @@ export async function collectFeeds(rows, ctx) {
           title: plainText(field(item, 'title'), ctx.settings.title_max_chars),
           url,
           publishedAt,
-          source: `rss:${row.target}`,
+          // The source labels the feed for the reader, so it is built from the same
+          // redaction the notice uses: a target carrying userinfo or a credential-named
+          // query parameter must not travel into the published pool. It still names the
+          // feed's host, so the candidate stays diagnosable.
+          source: `rss:${redactUrl(target)}`,
           tierHint: 'primary',
           summary: plainText(field(item, 'description') || field(item, 'summary'), ctx.settings.summary_max_chars),
         });
       }
     } catch (err) {
-      notices.push(`rss ${row.target}: ${err.message}`);
+      notices.push(`rss ${redactUrl(target)}: ${err.message}`);
     }
   }
   return { candidates, notices };
@@ -410,7 +492,21 @@ export function budgetNotice(budget, shortfall, token) {
   if (shortfall.repos) parts.push(uncheckedPhrase(shortfall.repos));
   if (shortfall.orgs) parts.push(`${shortfall.orgs} ${shortfall.orgs === 1 ? 'organisation' : 'organisations'} not listed`);
   if (shortfall.tags) parts.push(`${shortfall.tags} tag ${shortfall.tags === 1 ? 'listing' : 'listings'} not checked`);
-  return `github: rate limit reached (remaining ${budget.remaining} of ${budget.limit}${resets}); `
+  // budget.remaining is the value the free probe reported before the block spent anything.
+  // A caller that knows the reserve and the spend reports the effective allowance instead,
+  // so a fully spent run cannot claim a full one and the reserve is named; a caller that
+  // does not keeps the probe's reading.
+  const reserve = Number(budget?.reserve);
+  const spent = Number(budget?.spent);
+  const tracked = Number.isFinite(reserve) || Number.isFinite(spent);
+  const quoted = tracked
+    ? Math.max(0, Number(budget.remaining)
+      - (Number.isFinite(reserve) ? reserve : 0)
+      - (Number.isFinite(spent) ? spent : 0))
+    : budget.remaining;
+  const held = tracked && Number.isFinite(reserve) && reserve > 0
+    ? `, ${reserve} held in reserve` : '';
+  return `github: rate limit reached (remaining ${quoted} of ${budget.limit}${held}${resets}); `
     + `${parts.join('; ')}; ${remedy}`;
 }
 
@@ -589,6 +685,18 @@ export function noticeWarning(count) {
     + `the digest's Coverage note must report them; Collector notices: ${count}`;
 }
 
+// The one line an operator sees for a degraded run. A notice that ends in curl's own exit
+// status is a transport failure that produced no diagnostic of its own -- curl never ran --
+// so the line repeats that reason: a broken dependency should not require reading the pool.
+export function operatorWarning(notices) {
+  const line = noticeWarning(notices.length);
+  for (const notice of notices) {
+    const m = /curl exited with status \d+$/.exec(String(notice));
+    if (m) return `${line} (${m[0]})`;
+  }
+  return line;
+}
+
 export function humanSummary(pool) {
   const counts = new Map();
   for (const c of pool.candidates) counts.set(c.domain, (counts.get(c.domain) ?? 0) + 1);
@@ -632,6 +740,16 @@ export async function main(argv = process.argv.slice(2)) {
   const unknown = (options.domain ?? []).filter((k) => !config.domains.some((d) => d.key === k));
   if (unknown.length) {
     console.error(`collect: unknown domain key(s): ${unknown.join(', ')}`);
+    process.exitCode = 2;
+    return 2;
+  }
+  // Checked against the rows this run will actually read, so a full configuration is not
+  // required for a run that touches only some of the sources.
+  const selected = config.watchlist.filter((r) => !options.domain || options.domain.includes(r.domain));
+  try {
+    validateSettings(config.settings, selected, options);
+  } catch (err) {
+    console.error(`collect: ${err.message}`);
     process.exitCode = 2;
     return 2;
   }
@@ -684,7 +802,7 @@ export async function main(argv = process.argv.slice(2)) {
   // A degraded run must be visible to an operator who never passes --human and to an
   // agent that never reads the pool. Stdout stays byte-identical: this one line goes
   // to stderr, and a clean pool writes nothing at all.
-  if (pool.notices.length > 0) console.error(noticeWarning(pool.notices.length));
+  if (pool.notices.length > 0) console.error(operatorWarning(pool.notices));
   if (pool.candidates.length === 0 && pool.notices.length > 0) {
     process.exitCode = 3;
     return 3;

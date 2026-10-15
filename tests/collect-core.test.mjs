@@ -1,14 +1,14 @@
 // tests/collect-core.test.mjs
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { copyFileSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { chmodSync, copyFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { spawnSync } from 'node:child_process';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { readConfig } from '../scripts/lib/mdtable.mjs';
 import {
-  parseArgs, collectAll, sortCandidates, resolveOut, windowStart, resolveTimeout, noticeWarning, main,
+  parseArgs, collectAll, sortCandidates, resolveOut, windowStart, resolveTimeout, noticeWarning, humanSummary, main,
 } from '../scripts/collect.mjs';
 
 const FIXTURE_CONFIG = fileURLToPath(new URL('./fixtures/config/', import.meta.url));
@@ -334,6 +334,8 @@ test('an inverted window is refused, not reported as a quiet week', async () => 
 // A settings file without output_dir reached join() as undefined, so main() died with an
 // uncaught TypeError: a bare exit 1 and a stack trace, not the named exit 2 every other
 // missing setting produces - and the usage's claim that no shipped path reaches 1 was false.
+// The live watchlist one domain at a time, so the case is driven with a stub curl that
+// answers an empty feed: every row is offline and the shape of the config is what varies.
 test('a settings file with no output_dir is a named configuration error, exit 2', () => {
   const dir = mkdtempSync(join(tmpdir(), 'tech-radar-nodir-'));
   for (const name of ['domains.md', 'sources.md', 'watchlist.md', 'settings.md']) copyFileSync(join(SKILL_CONFIG, name), join(dir, name));
@@ -355,4 +357,159 @@ test('the usage text states the rule the code implements', () => {
   assert.equal(res.status, 0);
   assert.match(res.stdout, /3 the pool came back empty\s+and at least one notice was recorded/);
   assert.doesNotMatch(res.stdout, /every source failed/);
+});
+
+// Regression test: collect validated its settings only where each was first used and
+// swallowed the throw into a notice, so an invalid configuration reported a degraded week
+// (exit 3) with a script-internal message instead of naming the setting. update-state
+// validates its own settings up front with exit 2; the collector now does the same.
+test('a settings file without title_max_chars is a named exit 2, not a degraded week', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'tech-radar-setting-'));
+  for (const name of ['domains.md', 'sources.md', 'watchlist.md', 'settings.md']) {
+    copyFileSync(join(SKILL_CONFIG, name), join(dir, name));
+  }
+  const settings = readFileSync(join(SKILL_CONFIG, 'settings.md'), 'utf8')
+    .split('\n').filter((l) => !/^\|\s*title_max_chars\s*\|/.test(l)).join('\n');
+  writeFileSync(join(dir, 'settings.md'), settings);
+  assert.equal(/title_max_chars/.test(settings), false, 'the fixture really omits it');
+  // One offline row only: without it the collector would reach the live watchlist while
+  // the defect is still present, which is the 138-second failure this case used to have.
+  writeFileSync(join(dir, 'watchlist.md'), [
+    '| kind | target | domain | note |',
+    '|---|---|---|---|',
+    '| rss | http://127.0.0.1:1/feed.xml | ai-llm | deliberately unreachable |',
+    '',
+  ].join('\n'));
+  const cli = fileURLToPath(new URL('../scripts/collect.mjs', import.meta.url));
+  const res = spawnSync(process.execPath, [cli, '--config', dir, '--out', join(dir, '.pool.json'), '--timeout', '2000'], { encoding: 'utf8' });
+  assert.equal(res.status, 2, 'a configuration error is exit 2, not 3: ' + res.stderr.slice(0, 300));
+  assert.match(res.stderr, /title_max_chars/, 'the refused setting is named');
+  assert.doesNotMatch(res.stderr, /must be a positive number, got undefined/, 'no script-internal message');
+  rmSync(dir, { recursive: true, force: true });
+});
+
+// Regression test: --config had no empty-value guard while its sibling flags did, so an
+// empty value resolved the configuration against the current directory: join('', ...)
+// degrades to a cwd-relative path, and from a cwd holding a config directory the run went
+// ahead and wrote a pool from that config, though design 4.2 makes an empty flag value an
+// exit-2 configuration error.
+test('parseArgs refuses an empty --config instead of resolving it against the cwd', () => {
+  assert.throws(() => parseArgs(['--config', '']), /empty value for --config/);
+  assert.throws(() => parseArgs(['--config', ' ']), /empty value for --config/);
+  assert.throws(() => parseArgs(['--config', '\t']), /empty value for --config/);
+  assert.equal(parseArgs(['--config', '/elsewhere']).config, '/elsewhere', 'a real value still reads');
+});
+
+test('the collect CLI exits 2 for an empty --config even when the cwd holds a config', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'tech-radar-empty-config-'));
+  const cfg = join(dir, 'config');
+  mkdirSync(cfg, { recursive: true });
+  for (const name of ['domains.md', 'settings.md', 'sources.md', 'watchlist.md']) {
+    copyFileSync(join(SKILL_CONFIG, name), join(cfg, name));
+  }
+  writeFileSync(join(cfg, 'watchlist.md'), [
+    '| kind | target | domain | note |',
+    '|---|---|---|---|',
+    '| rss | http://127.0.0.1:1/feed.xml | ai-llm | deliberately unreachable |',
+    '',
+  ].join('\n'));
+  const cli = fileURLToPath(new URL('../scripts/collect.mjs', import.meta.url));
+  const res = spawnSync(process.execPath, [cli, '--config', '', '--timeout', '2000', '--out', join(dir, '.pool.json')],
+    { encoding: 'utf8', cwd: dir });
+  assert.equal(existsSync(join(dir, '.pool.json')), false, 'no pool is written from the cwd-relative config');
+  assert.equal(res.status, 2, 'the empty value is refused: ' + res.stderr.slice(0, 200));
+  assert.match(res.stderr, /empty value for --config/);
+  rmSync(dir, { recursive: true, force: true });
+});
+
+// Regression test: resolveOut gives TECH_RADAR_DIR precedence over settings.output_dir, and
+// this case never cleared the variable the way its sibling does. With TECH_RADAR_DIR exported
+// the missing-output_dir case degraded from the named configuration error to a full live
+// watchlist collection that exits 0 and writes its pool into the override - 211 seconds and
+// an 853 KB pool in the run that found it. The spawn sets the override to a scratch
+// directory and proves no source request happens: a stub curl answers one empty feed, so any
+// real fetch is a call the stub records and no pool may appear under the override.
+test('the no-output_dir case is hermetic against an exported TECH_RADAR_DIR', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'tech-radar-envdir-'));
+  for (const name of ['domains.md', 'sources.md', 'watchlist.md', 'settings.md']) {
+    copyFileSync(join(SKILL_CONFIG, name), join(dir, name));
+  }
+  const settings = readFileSync(join(SKILL_CONFIG, 'settings.md'), 'utf8')
+    .split('\n').filter((l) => !/^\|\s*output_dir\s*\|/.test(l)).join('\n');
+  writeFileSync(join(dir, 'settings.md'), settings);
+  const mark = join(dir, 'curl-was-called');
+  writeFileSync(join(dir, 'watchlist.md'), [
+    '| kind | target | domain | note |',
+    '|---|---|---|---|',
+    '| rss | https://example.invalid/feed.xml | ai-llm | the stub answers this |',
+    '',
+  ].join('\n'));
+  const { bin } = curlStub(dir, mark);
+  const override = join(dir, 'radar-dir');
+  mkdirSync(override, { recursive: true });
+  const cli = fileURLToPath(new URL('../scripts/collect.mjs', import.meta.url));
+  const started = Date.now();
+  const res = spawnSync(process.execPath, [cli, '--config', dir], {
+    encoding: 'utf8',
+    env: { ...process.env, TECH_RADAR_DIR: override, PATH: bin + ':' + process.env.PATH },
+  });
+  assert.equal(res.status, 2, 'the missing setting is the named error even with the override set: ' + res.stderr.slice(0, 200));
+  assert.match(res.stderr, /output_dir is missing or invalid/);
+  assert.equal(existsSync(join(override, '.pool.json')), false, 'nothing is written into the override');
+  assert.equal(existsSync(mark), false, 'no source request was made');
+  assert.ok(Date.now() - started < 15000, 'the case is offline and bounded');
+  rmSync(dir, { recursive: true, force: true });
+});
+
+// A curl stub on PATH: it records that it was called and answers an empty RSS channel, so
+// a case that must stay offline cannot reach a live source if the code under test changes.
+function curlStub(dir, mark) {
+  const bin = join(dir, 'bin');
+  mkdirSync(bin, { recursive: true });
+  writeFileSync(join(bin, 'curl'), [
+    '#!/bin/sh',
+    ': > ' + JSON.stringify(mark),
+    "printf '%s\\n%s' '<rss><channel></channel></rss>' '200'",
+    '',
+  ].join('\n'));
+  chmodSync(join(bin, 'curl'), 0o755);
+  return { bin, mark };
+}
+
+// The --human summary is documented in the usage and was exercised by no test.
+test('humanSummary prints the window, the per-domain counts and every notice', () => {
+  const summary = humanSummary({
+    generatedAt: '2026-09-23T01:00:00.000Z',
+    window: { since: '2026-09-16T01:00:00.000Z', until: '2026-09-23T01:00:00.000Z' },
+    candidates: [
+      { domain: 'ai-llm', url: 'https://example.com/a', title: 'A' },
+      { domain: 'ai-llm', url: 'https://example.com/b', title: 'B' },
+      { domain: 'quantum', url: 'https://example.com/c', title: 'C' },
+    ],
+    notices: ['rss https://example.com/feed.xml: curl: (7) refused'],
+  });
+  assert.match(summary, /tech-radar collect {2}2026-09-23T01:00:00\.000Z/);
+  assert.match(summary, /window: 2026-09-16T01:00:00\.000Z \.\. 2026-09-23T01:00:00\.000Z/);
+  assert.match(summary, /candidates: 3/);
+  assert.match(summary, /ai-llm: 2/);
+  assert.match(summary, /quantum: 1/);
+  assert.match(summary, /notices: 1/);
+  assert.match(summary, /- rss https:\/\/example\.com\/feed\.xml: curl: \(7\) refused/);
+});
+
+test('--human prints the summary instead of the JSON pool', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'tech-radar-human-'));
+  const out = join(dir, '.pool.json');
+  const cli = fileURLToPath(new URL('../scripts/collect.mjs', import.meta.url));
+  const res = spawnSync(process.execPath, [
+    cli, '--config', FIXTURE_CONFIG, '--domain', 'ai-llm', '--timeout', '20000',
+    '--since', '2026-09-16T00:00:00Z', '--out', out, '--human',
+  ], { encoding: 'utf8' });
+  assert.equal(res.status, 0, res.stderr);
+  assert.match(res.stdout, /^tech-radar collect {2}/);
+  assert.match(res.stdout, /candidates: 0/);
+  assert.doesNotMatch(res.stdout, /^\{/, 'the JSON pool is not printed with --human');
+  const pool = JSON.parse(readFileSync(out, 'utf8'));
+  assert.deepEqual(pool.candidates, [], 'the pool file is still written');
+  rmSync(dir, { recursive: true, force: true });
 });

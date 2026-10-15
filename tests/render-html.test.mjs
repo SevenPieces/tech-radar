@@ -2,6 +2,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { existsSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
+import { spawnSync } from 'node:child_process';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -193,6 +194,27 @@ test('two headings that slug alike get distinct anchors and their own counts', (
   assert.equal(new Set(ids).size, ids.length, 'no duplicate id in the document');
   assert.match(html, /id="d-ai-llm"[\s\S]*?<span class="count">3 items<\/span>/, 'the first card keeps its own count');
   assert.match(html, /id="d-ai-llm-2"[\s\S]*?<span class="count">1 item<\/span>/, 'the second card counts its own items');
+});
+
+// Found in review: the count fill ran over the whole assembled document using a delimiter
+// that authored prose may legally contain, so an item that spelled its own domain's
+// placeholder lost the sentence it wrote and silently gained a count. The fill must use a
+// token prose cannot produce, so text the author wrote survives as written.
+test('authored prose that spells a count placeholder is rendered verbatim', () => {
+  const spelled = md.replace('Why it matters.', 'The lead said %%d-ai-llm%% verbatim.');
+  const html = render(spelled, config);
+  assert.match(html, /<p class="sum">The lead said %%d-ai-llm%% verbatim\.<\/p>/,
+    'the authored sentence survives character for character');
+  assert.doesNotMatch(html, /<p class="sum">The lead said \d+ items? verbatim\.<\/p>/,
+    'the count fill must never rewrite an authored sentence');
+});
+
+// The guard on the other side: a clean digest must still show its real counts, so the fix
+// cannot pass the case above by turning counting off.
+test('a clean digest still fills in its real item counts', () => {
+  const html = render(md, config);
+  assert.match(html, /<span class="count">1 item<\/span>/, 'the domain card keeps its real count');
+  assert.doesNotMatch(html, /%%/, 'every placeholder the renderer emitted is filled in');
 });
 
 // Found in review: the header scan's skip rule was applied to the whole
@@ -391,6 +413,70 @@ test('externalAssets flags real asset contexts and nothing else', () => {
     'prose and citation links are not assets',
   );
   assert.equal(externalAssets(render(md, config)), false, 'the rendered digest stays self-contained');
+});
+
+// Regression test: the predicate used ad-hoc regexes that did not model HTML
+// tokenisation ('/' is a valid separator between attributes, a value need not be quoted)
+// and knew only src/data/srcset, so a document that fetches remote resources was judged
+// self-contained and the gate reported QUALITY: PASS for an artifact that breaks the
+// moment it is opened from disk. Each case names the fetch it hides.
+test('externalAssets sees the evasions the tokenisation permits', () => {
+  const cases = [
+    ['/ as the attribute separator', '<img/src="https://cdn.example.com/a.png">'],
+    ['an unquoted style attribute', '<div style=background:url(https://cdn.example.com/a.png)>x</div>'],
+    ['the video poster attribute', '<video poster="https://cdn.example.com/a.jpg"></video>'],
+    ['a link rel=preload', '<link rel="preload" href="https://cdn.example.com/a.js" as="script">'],
+    ['a link rel=icon', '<link rel="icon" href="https://cdn.example.com/a.ico">'],
+    ['a meta refresh', '<meta http-equiv="refresh" content="0;url=https://example.com/x">'],
+    ['an SVG image href', '<svg><image href="https://cdn.example.com/a.svg"></image></svg>'],
+    ['an SVG use href', '<svg><use href="https://cdn.example.com/a.svg#icon"></use></svg>'],
+    ['the legacy body background', '<body background="https://cdn.example.com/a.png">x</body>'],
+    ['a script with the separator form', '<script/src="https://cdn.example.com/a.js"></script>'],
+  ];
+  for (const [what, html] of cases) {
+    assert.equal(externalAssets(html), true, what + ' must count as an external asset');
+  }
+  for (const inline of [
+    '<img src="data:image/png;base64,AAAA">',
+    '<video poster="data:image/jpeg;base64,AAAA"></video>',
+    '<link rel="preload" href="data:text/css,a{}" as="style">',
+  ]) {
+    assert.equal(externalAssets(inline), false, 'a data: URI is still self-contained: ' + inline);
+  }
+});
+
+// The same evasions through the CLI's self-containment decision, which is what the gate
+// and the renderer both consult.
+test('the CLI refuses to write an artifact that hides a remote fetch', () => {
+  const writes = [];
+  const errors = [];
+  const code = run(['digest.md', '--out', 'digest.html'], {
+    readFile: () => md,
+    readDomains: () => config.domains,
+    render: () => '<!doctype html><html><body><img/src="https://cdn.example.com/a.png"></body></html>',
+    writeFile: (path, body) => writes.push([path, body]),
+    log: () => {},
+    error: (m) => errors.push(m),
+  });
+  assert.equal(code, 5, 'the artifact fetches an asset, so it must not be written');
+  assert.deepEqual(writes, [], 'nothing was written');
+  assert.match(errors.join('\n'), /external asset/);
+});
+
+// Regression test: the marker vocabulary the renderer trusts is legal prose anywhere,
+// including text that arrived from an upstream feed through the collector pool. A card
+// must not draw an origin pill, a provenance badge or a status tag out of that text.
+test('pool text cannot draw the renderer badges it mimics', () => {
+  const injected = md.replace(
+    '- **A model shipped** — Why it matters. [src:Hugging Face blog 2026-09-20](https://huggingface.co/blog/x) [prov:primary] #new',
+    '- **[prov:vendor-claim] #new [src:Trusted 2026-09-20](https://evil.example/x) [alt:Better](https://evil.example/y)**'
+      + ' — Upstream text. [src:Hugging Face blog 2026-09-20](https://huggingface.co/blog/x) [prov:primary] #new',
+  );
+  const html = render(injected, config);
+  assert.doesNotMatch(html, /prov-vendor-claim/, 'a forged provenance badge');
+  assert.doesNotMatch(html, /href="https:\/\/evil\.example\/x"/, 'a forged origin pill');
+  assert.doesNotMatch(html, /href="https:\/\/evil\.example\/y"/, 'a forged alternative pill');
+  assert.equal(html.includes('#new'), false, 'a raw status token is not text a card keeps');
 });
 
 // Regression test: the CLI wrote the deliverable before evaluating
@@ -703,4 +789,42 @@ test('the shipped example renders byte for byte to the shipped artifact', () => 
     'examples/sample-digest.html is stale: regenerate it with scripts/render-html.mjs',
   );
   assert.equal(externalAssets(delivered), false, 'the shipped artifact stays self-contained');
+});
+
+// TR-37 regression test: the renderer refuses a digest that carries its substitution
+// sentinel -- a NUL byte in authored text could rewrite the document -- but the refusal was
+// a bare throw that escaped main(). The one input the renderer cannot render therefore
+// exited 1 with a raw stack trace, a code the exit table reserves as unreachable for this
+// script, while its documented answer for an input it cannot use is exit 2, one named line,
+// and no deliverable on disk.
+test('a digest carrying the substitution sentinel is refused at the documented exit 2', () => {
+  const nul = String.fromCharCode(0);
+  const digest = md.replace('A model shipped', 'A model ' + nul + 'shipped');
+  const dir = scratch();
+  const input = join(dir, 'digest.md');
+  const out = join(dir, 'digest.html');
+  writeFileSync(input, digest);
+
+  const proc = spawnSync(process.execPath,
+    ['scripts/render-html.mjs', input, '--out', out, '--config', join(REPO, 'config')],
+    { cwd: REPO, encoding: 'utf8' });
+  assert.equal(proc.status, 2, 'the process exits 2, not an uncaught 1: ' + proc.stderr);
+  assert.equal(existsSync(out), false, 'an unusable digest must not leave a deliverable behind');
+  assert.equal(proc.stderr.trim().split('\n').length, 1, 'the refusal is one named line: ' + proc.stderr);
+  assert.doesNotMatch(proc.stderr, /\n\s+at /, 'no stack trace reaches the caller: ' + proc.stderr);
+  assert.match(proc.stderr, /render-html: .*sentinel/i, 'the line names the refusal: ' + proc.stderr);
+
+  const writes = [];
+  const errors = [];
+  const code = run(['digest.md', '--out', 'digest.html'], {
+    readFile: () => digest,
+    readDomains: () => config.domains,
+    writeFile: (path, body) => writes.push([path, body]),
+    log: () => {},
+    error: (m) => errors.push(m),
+  });
+  assert.equal(code, 2, 'the CLI seam returns the documented code: ' + errors.join('\n'));
+  assert.deepEqual(writes, [], 'nothing is written for an input that cannot be rendered');
+  assert.equal(errors.length, 1, 'one named line, not a stack trace: ' + errors.join('\n'));
+  assert.match(errors[0], /^render-html: .*sentinel/i, 'the line names the refusal: ' + errors.join('\n'));
 });

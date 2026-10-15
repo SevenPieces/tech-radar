@@ -5,7 +5,8 @@
 // tables. Cells are trimmed, and a short row yields empty strings for the
 // missing trailing cells.
 import { readFileSync } from 'node:fs';
-import { join } from 'node:path';
+import { dirname, join } from 'node:path';
+import { fileURLToPath } from 'node:url';
 
 const FENCE = /^\s*(?:```|~~~)/;
 const SEPARATOR = /^:?-{2,}:?$/;
@@ -65,7 +66,34 @@ export function readSettings(path) {
   return out;
 }
 
-export function readDomains(path) {
+// The settings that ship beside this module: the last resort for the chip cap when a
+// caller carries no settings and the catalogue has no settings file of its own.
+const SHIPPED_SETTINGS = fileURLToPath(new URL('../../config/settings.md', import.meta.url));
+
+function positiveIntOf(settings, key) {
+  const n = Number(settings?.[key]);
+  return Number.isInteger(n) && n > 0 ? n : null;
+}
+
+// The chip cap is a quantity like every other one, so it is configuration and never a
+// literal here. A caller may pass the settings object; a caller that does not gets the
+// settings file read from the directory beside the catalogue it is reading; a fixture
+// that writes only a catalogue falls back to the shipped settings.
+export function shortCap(settings) {
+  const explicit = positiveIntOf(settings, 'short_max_chars');
+  if (explicit) return explicit;
+  const shipped = positiveIntOf(readSettings(SHIPPED_SETTINGS), 'short_max_chars');
+  if (shipped) return shipped;
+  throw new Error('short_max_chars is missing or invalid in config/settings.md');
+}
+
+export function readDomains(path, settings) {
+  let cap = positiveIntOf(settings, 'short_max_chars');
+  if (!cap) {
+    try { cap = positiveIntOf(readSettings(join(dirname(path), 'settings.md')), 'short_max_chars'); }
+    catch { cap = null; }
+  }
+  if (!cap) cap = shortCap(null);
   const rows = readTableObjects(path);
   const seen = new Set();
   for (const r of rows) {
@@ -80,7 +108,7 @@ export function readDomains(path) {
     // word are ambiguous. An absent column is allowed - the renderer falls back to a clause.
     if (r.short !== undefined && String(r.short).trim() !== '') {
       const label = String(r.short).trim();
-      if (label.length > 18) throw new Error(`short label too long for ${r.key}: ${label}`);
+      if (label.length > cap) throw new Error(`short label too long for ${r.key}: ${label} (short_max_chars ${cap})`);
       if (/[<>"']/.test(label)) throw new Error(`short label must be attribute-safe for ${r.key}: ${label}`);
     }
   }

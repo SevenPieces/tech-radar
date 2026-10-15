@@ -281,3 +281,45 @@ test('plan rejects an empty --domains list instead of printing an epoch window',
   assert.match(errs.join('\n'), /invalid --domains: expected at least one domain key/);
   assert.doesNotMatch(errs.join('\n'), /1970/);
 });
+
+// Regression test: planWindows computed since = max(declared, capFloor) and never
+// compared the start with now, so --since could name a floor AFTER the run's own until
+// and print a window whose since is after its until, with a label the digest must repeat
+// verbatim. collect refuses that very window, so the plan was unusable and the digest it
+// labelled was unbuildable.
+test('plan refuses a --since floor later than now instead of printing an inverted window', () => {
+  const state = emptyState(['ai-llm', 'quantum']);
+  const future = new Date(NOW.getTime() + 90 * 864e5).toISOString();
+  assert.throws(
+    () => planWindows(config, state, NOW, null, future),
+    (err) => {
+      assert.equal(err.exitCode, 2, 'the refusal is the documented configuration exit');
+      assert.match(err.message, /after/i, 'the message says the floor is after now: ' + err.message);
+      return true;
+    },
+  );
+});
+
+test('the plan CLI exits 2 for a --since floor later than now', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'tech-radar-future-floor-'));
+  const future = new Date(Date.now() + 365 * 864e5).toISOString().slice(0, 10);
+  const errs = [];
+  const logs = [];
+  const origErr = console.error;
+  const origLog = console.log;
+  console.error = (...a) => errs.push(a.join(' '));
+  console.log = (...a) => logs.push(a.join(' '));
+  let code;
+  try {
+    code = main(['plan', '--state', join(dir, 'state.json'), '--since', future]);
+  } finally {
+    console.error = origErr;
+    console.log = origLog;
+    process.exitCode = 0;
+  }
+  assert.equal(code, 2, 'the inverted window is refused, not printed: ' + logs.join('\n'));
+  assert.match(errs.join('\n'), /after/i);
+  assert.doesNotMatch(logs.join('\n'), /"since"/, 'no plan JSON is printed for an unusable window');
+  assert.equal(logs.join('').includes(future), false, 'the unusable floor is not published as a plan');
+});
+

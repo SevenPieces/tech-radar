@@ -1,7 +1,7 @@
 // tests/collect-github.test.mjs
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { collectGithub, coreBudget } from '../scripts/collect.mjs';
+import { collectGithub, coreBudget, budgetNotice } from '../scripts/collect.mjs';
 import { shapeHttpError } from '../scripts/lib/net.mjs';
 
 const PROBE = 'https://api.github.com/rate_limit';
@@ -293,6 +293,29 @@ test('an exhausted budget with a token names the token case instead of telling y
   assert.match(notices[0], /GITHUB_TOKEN budget is spent as well, so wait for the reset/);
   assert.doesNotMatch(notices[0], /set GITHUB_TOKEN to raise the limit/);
 }));
+
+
+// Regression test: budgetNotice quoted budget.remaining, the value the free probe
+// returned BEFORE the block spent anything, so a fully spent run claimed a full allowance:
+// a fresh 60/60 budget read "rate limit reached (remaining 60 of 60 ...)" after 59
+// requests had been charged, and neither the reserve nor the tag phase was named. The
+// notice must state the effective remaining after the reserve and the spend, or name the
+// reserve, and it must still say what went unread.
+test('the rate-limit notice does not quote the pre-spend budget', () => {
+  const notice = budgetNotice(
+    { remaining: 60, limit: 60, resetAt: RESET_ISO, reserve: 2, spent: 59 },
+    { repos: 0, orgs: 0, tags: 52 },
+    false,
+  );
+  assert.match(notice, /52 tag listings not checked/, 'what went unread is still named');
+  assert.doesNotMatch(notice, /remaining 60 of 60/,
+    'the untouched probe value must not be quoted as the remaining budget: ' + notice);
+  assert.match(notice, /reserve|effective|remaining \d+ of 60/,
+    'the effective budget or the reserve is stated: ' + notice);
+  assert.equal(/reached/.test(notice) && /remaining 60 of 60/.test(notice), false,
+    'the notice must not claim the limit was reached while reporting a full allowance');
+  assert.match(notice, /set GITHUB_TOKEN to raise the limit/, 'the remedy is unchanged');
+});
 
 test('a missing github_rate_limit_reserve is loud rather than silently zero', () => anonymous(async () => {
   const net = { fetchText: async () => rateLimit(55) };

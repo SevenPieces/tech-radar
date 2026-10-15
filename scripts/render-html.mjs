@@ -4,7 +4,7 @@
 // Inline CSS and JS only; the result opens correctly from file:// offline.
 import { readFileSync, writeFileSync } from 'node:fs';
 import { fileURLToPath, pathToFileURL } from 'node:url';
-import { readDomains } from './lib/mdtable.mjs';
+import { readDomains, readSettings, shortCap } from './lib/mdtable.mjs';
 import { externalAssets } from './lib/assets.mjs';
 
 // The configuration ships with the skill, so the default is the config directory
@@ -157,6 +157,11 @@ const JS = [
   '})();',
 ].join('\n');
 
+// A digest carrying the substitution sentinel (U+0000) in authored text is the one input
+// this renderer cannot turn into a document. The refusal carries its own type so run() can
+// answer it at the documented exit 2 instead of letting it escape main() as exit 1.
+class SentinelInDigestError extends Error {}
+
 export function render(md, config) {
   const domainOf = (name) => config.domains.find((d) => d.domain === name);
   // A chip label is a shortcut, so it must stay short. A catalogue without the column
@@ -166,15 +171,28 @@ export function render(md, config) {
   // A chip is a shortcut: the reader caps an authored one, and a catalogue without the
   // column falls back to a clause of the name clipped at a word boundary, so the cap holds
   // wherever the label comes from.
+  // The cap is configuration, never a literal here: it travels with the catalogue, and a
+  // caller that carries no settings gets it from the settings file the reader resolves.
+  const chipCap = shortCap(config);
   const clipChip = (label) => {
     const text = String(label).trim();
-    if (text.length <= 18) return text;
-    const cut = text.slice(0, 18);
+    if (text.length <= chipCap) return text;
+    const cut = text.slice(0, chipCap);
     const at = cut.lastIndexOf(' ');
     return (at > 0 ? cut.slice(0, at) : cut).trim();
   };
   const chipOf = (row) => clipChip(shortOf[row.domain] || row.domain.split(/,|\s*\(|\s+and\s+/)[0]);
-  const lines = normalizeNewlines(md).split('\n');
+  const digest = normalizeNewlines(md);
+  // The count and card placeholders are replaced before the document is returned, so the
+  // token has to be one no digest can write. A digest is Markdown text, so a control
+  // character is the one thing it cannot legitimately contain; a digest that does carry
+  // one is refused rather than allowed to rewrite authored prose.
+  const SENTINEL = '\u0000';
+  if (digest.includes(SENTINEL)) {
+    throw new SentinelInDigestError('the digest contains the renderer substitution sentinel (U+0000)');
+  }
+  const mark = (key) => `${SENTINEL}${key}${SENTINEL}`;
+  const lines = digest.split('\n');
   // The header block is the title plus the leading underscore lines. The shipped
   // example carries two of them - an illustrative disclaimer and the real window
   // line - so the meta is the last one, the one adjacent to the content; taking the
@@ -289,8 +307,8 @@ export function render(md, config) {
       // with no citation to point at stays a span rather than a dead link.
       const link = SRC.exec(m[2]);
       const headline = link
-        ? `<a class="hl" href="${esc(link[3])}" target="_blank" rel="noopener">${linkify(m[1])}</a>`
-        : `<span class="hl">${linkify(m[1])}</span>`;
+        ? `<a class="hl" href="${esc(link[3])}" target="_blank" rel="noopener">${linkify(stripMarkers(m[1]))}</a>`
+        : `<span class="hl">${linkify(stripMarkers(m[1]))}</span>`;
       out.push(`<li class="story"><div class="hlrow">${dotFor(m[2])}${headline}</div>`
         + (summary ? `<p class="sum">${linkify(summary)}</p>` : '')
         + `${badgeRow(m[2])}</li>`);
@@ -310,7 +328,7 @@ export function render(md, config) {
   const closeFeatured = () => {
     if (featuredOpen === null) return;
     featuredCards.push(featuredOpen);
-    out.push(`%%BADGES-${featuredOpen.key}%%</li></ul>`);
+    out.push(`${mark(`BADGES-${featuredOpen.key}`)}</li></ul>`);
     featuredOpen = null;
   };
 
@@ -350,7 +368,7 @@ export function render(md, config) {
         featuredSeq += 1;
         const key = 'f' + featuredSeq;
         featuredOpen = { key, title: label, prose: [] };
-        out.push(`<ul class="stories"><li class="story featured"><div class="hlrow">%%PROV-${key}%%%%HL-${key}%%</div>`);
+        out.push(`<ul class="stories"><li class="story featured"><div class="hlrow">${mark(`PROV-${key}`)}${mark(`HL-${key}`)}</div>`);
         continue;
       }
       const name = label.split('·')[0].trim();
@@ -368,7 +386,7 @@ export function render(md, config) {
         const tierBadge = row ? `<span class="tier ${esc(row.tier)}">${esc(row.tier)}</span>` : '';
         out.push(`<details class="aspect" id="${key}"${row ? ` data-cluster="${esc(row.cluster)}"` : ''} open>`
           + `<summary><span class="ah">${esc(label)}</span>`
-          + `<span class="badges">${tierBadge}<span class="count">%%${key}%%</span></span></summary>`
+          + `<span class="badges">${tierBadge}<span class="count">${mark(key)}</span></span></summary>`
           + '<div class="aspect-body">');
         openDetails = true;
         currentKey = key;
@@ -415,15 +433,22 @@ export function render(md, config) {
     const headline = link
       ? `<a class="hl" href="${esc(link[3])}" target="_blank" rel="noopener">${esc(card.title)}</a>`
       : `<span class="hl">${esc(card.title)}</span>`;
-    body = body.replaceAll(`%%PROV-${card.key}%%`, dot)
-      .replaceAll(`%%HL-${card.key}%%`, headline)
-      .replaceAll(`%%BADGES-${card.key}%%`, badgeRow(text));
+    body = body.replaceAll(mark(`PROV-${card.key}`), dot)
+      .replaceAll(mark(`HL-${card.key}`), headline)
+      .replaceAll(mark(`BADGES-${card.key}`), badgeRow(text));
   }
   // A card's count is known only after its items are read, so the summary carries a
   // placeholder that is filled in here once every card has been read.
   for (const [key, n] of counts) {
-    body = body.replaceAll(`%%${key}%%`, `${n} item${n === 1 ? '' : 's'}`);
+    body = body.replaceAll(mark(key), `${n} item${n === 1 ? '' : 's'}`);
   }
+  // A provenance style is emitted only for a provenance value this document actually
+  // carries. An artifact then spells the vocabulary of the badges it drew and no other,
+  // so text that merely mimics a marker stays inert in the stylesheet as well as in prose.
+  const css = CSS.split('\n').filter((rule) => {
+    const m = /^\.(?:badge\.)?prov-(primary|secondary|preprint|vendor-claim)\{/.exec(rule);
+    return m === null || body.includes(`prov-${m[1]}`);
+  }).join('\n');
   const nav = navLinks.join('');
   return `<!doctype html>
 <html lang="en">
@@ -432,7 +457,7 @@ export function render(md, config) {
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <title>${esc(title)}</title>
 <style>
-${CSS}
+${css}
 </style>
 </head>
 <body id="top">
@@ -517,7 +542,20 @@ export function run(argv, io = {}) {
     error(`render-html: cannot read config ${opts.config}: ${err.message}`);
     return 2;
   }
-  const html = renderFn(md, { domains });
+  // The chip cap travels with the catalogue it clips. A settings file that cannot be read
+  // leaves the reader's own resolution, so the renderer still has a configured cap.
+  let shortMax = null;
+  try { shortMax = readSettings(`${opts.config}/settings.md`).short_max_chars; } catch { shortMax = null; }
+  let html;
+  try {
+    html = renderFn(md, { domains, short_max_chars: shortMax });
+  } catch (err) {
+    // An unusable input takes the documented exit 2 with one named line and no output
+    // file; anything else is unexpected and still propagates.
+    if (!(err instanceof SentinelInDigestError)) throw err;
+    error(`render-html: ${err.message}`);
+    return 2;
+  }
   // Checked before the write: a self-containment failure must not leave a
   // deliverable on disk that breaks when it is opened from file://.
   if (externalAssets(html)) {

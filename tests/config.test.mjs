@@ -27,6 +27,7 @@ const SETTINGS_KEYS = [
   'github_org_repos', 'github_tags_per_repo', 'arxiv_max_results', 'ghsa_page_size',
   'nvd_severity', 'request_timeout_ms', 'title_max_chars', 'summary_max_chars',
   'error_snippet_max_chars', 'discovery_hosts', 'user_agent', 'runs_history_max',
+  'short_max_chars',
 ];
 
 const config = readConfig(CONFIG_DIR);
@@ -219,14 +220,24 @@ test('the GitHub watchlist floor fits inside the anonymous hourly allowance', ()
   assert.ok(floor <= available, 'the GitHub watchlist floor exceeds the anonymous hourly allowance: ' + detail);
 });
 
-test('config/settings.md declares all twenty-eight keys the code reads', () => {
+test('config/settings.md declares all twenty-nine keys the code reads', () => {
   const settings = readSettings(CONFIG_DIR + 'settings.md');
-  assert.equal(SETTINGS_KEYS.length, 28, 'the documented settings key count');
+  assert.equal(SETTINGS_KEYS.length, 29, 'the documented settings key count');
   assert.ok('watchlist_retention_weeks' in settings, 'watchlist_retention_weeks present');
   const missing = SETTINGS_KEYS.filter((k) => !(k in settings));
   assert.deepEqual(missing, [], 'missing settings keys: ' + missing.join(', '));
   const blank = SETTINGS_KEYS.filter((k) => settings[k] === '');
   assert.deepEqual(blank, [], 'settings keys with an empty value: ' + blank.join(', '));
+});
+
+// Regression test: the 18-character chip cap was a literal in scripts/lib/mdtable.mjs and
+// a second literal in scripts/render-html.mjs, existed in no config file, and could drift
+// between the two copies. R3 says every count and cap is configuration, so the cap is a
+// positive integer setting the reader consumes.
+test('the chip cap is a positive integer setting, not a literal', () => {
+  const settings = readSettings(CONFIG_DIR + 'settings.md');
+  assert.ok(Number.isInteger(settings.short_max_chars), 'short_max_chars must be an integer, got ' + JSON.stringify(settings.short_max_chars));
+  assert.ok(settings.short_max_chars > 0, 'short_max_chars must be positive');
 });
 
 // A stray line is a non-blank line that is neither a heading, prose inside the

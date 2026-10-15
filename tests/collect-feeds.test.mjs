@@ -1,8 +1,15 @@
 // tests/collect-feeds.test.mjs
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { collectFeeds } from '../scripts/collect.mjs';
-import { shapeHttpError } from '../scripts/lib/net.mjs';
+import { copyFileSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { fileURLToPath } from 'node:url';
+import { collectFeeds, main } from '../scripts/collect.mjs';
+import { plainText, shapeHttpError } from '../scripts/lib/net.mjs';
+
+const REPO = fileURLToPath(new URL('../', import.meta.url));
+const SKILL_CONFIG = join(REPO, 'config');
 
 const rows = [{ kind: 'rss', target: 'https://blog.example/feed.xml', domain: 'languages-runtimes', note: '' }];
 const ctx = {
@@ -87,4 +94,116 @@ test('collectFeeds turns an HTTP 403 into a notice instead of a silent skip', as
   assert.equal(notices.length, 1);
   assert.match(notices[0], /^rss https:\/\/blog\.example\/feed\.xml: HTTP 403 for /);
   assert.match(notices[0], /API rate limit exceeded/);
+});
+
+// Regression test: collectFeeds handed a configuration-supplied target straight to curl,
+// and curl accepts file:// with exit 0 and status 200 — so a watchlist row could carry
+// the content of a local file into the published candidate pool. The scheme is refused
+// before a fetcher is reached, the run exits 3 (the documented "nothing collected and a
+// notice was recorded"), and no candidate is produced.
+test('a file:// watchlist row is refused before the fetcher, with exit 3', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'tech-radar-scheme-'));
+  const cfg = join(dir, 'config');
+  mkdirSync(cfg, { recursive: true });
+  for (const name of ['domains.md', 'settings.md', 'sources.md']) {
+    copyFileSync(join(SKILL_CONFIG, name), join(cfg, name));
+  }
+  writeFileSync(join(cfg, 'watchlist.md'), [
+    '| kind | target | domain | note |',
+    '|---|---|---|---|',
+    '| rss | file:///etc/passwd | ai-llm | a scheme curl accepts |',
+    '',
+  ].join('\n'));
+  const logged = console.log;
+  const failed = console.error;
+  const loggedLines = [];
+  const failedLines = [];
+  console.log = (...a) => loggedLines.push(a.join(' '));
+  console.error = (...a) => failedLines.push(a.join(' '));
+  let code;
+  try {
+    code = await main(['--config', cfg, '--out', join(dir, '.pool.json'), '--timeout', '2000']);
+  } finally {
+    console.log = logged;
+    console.error = failed;
+    process.exitCode = 0;
+  }
+  assert.equal(code, 3, 'a refused row with no candidates is the documented degraded exit: ' + failedLines.join('\n'));
+  const pool = JSON.parse(loggedLines.join('\n'));
+  assert.deepEqual(pool.candidates, [], 'nothing from the file is published');
+  assert.equal(pool.notices.length, 1, 'the refusal is a notice, not a silent skip');
+  assert.match(pool.notices[0], /unsupported scheme/, 'the notice names the unsupported scheme');
+  assert.match(pool.notices[0], /file:/, 'the notice names the refused target');
+  assert.equal(JSON.stringify(pool).includes('root:'), false, 'no byte of the local file is published');
+  rmSync(dir, { recursive: true, force: true });
+});
+
+// The same guard in the library entry point, where the injected fetcher is the seam:
+// a fetcher that would happily answer is never consulted.
+test('collectFeeds refuses a non-http(s) target without consulting its fetcher', async () => {
+  let calls = 0;
+  const spy = {
+    ...ctx,
+    net: { fetchText: async () => { calls += 1; return '<rss><channel><item><title>LOCAL</title><link>https://blog.example/a</link></item></channel></rss>'; } },
+  };
+  const { candidates, notices } = await collectFeeds([{ kind: 'rss', target: 'file:///etc/passwd', domain: 'languages-runtimes', note: '' }], spy);
+  assert.equal(calls, 0, 'the fetcher was never called');
+  assert.deepEqual(candidates, [], 'no candidate comes back');
+  assert.equal(notices.length, 1);
+  assert.match(notices[0], /unsupported scheme/);
+});
+
+// Regression test: the marker vocabulary the renderer trusts is legal prose in a feed,
+// so an upstream title could draw an origin pill, a provenance badge and a status tag on
+// a published card. plainText is where upstream text is normalised, so it refuses the
+// vocabulary there and the pool never carries it.
+test('the marker vocabulary never reaches the pool from upstream text', async () => {
+  const hostile = '<rss><channel><item>'
+    + '<title>[prov:vendor-claim] #new [src:Trusted 2026-09-20](https://evil.example/x)</title>'
+    + '<link>https://blog.example/hostile</link>'
+    + '<pubDate>Sun, 20 Sep 2026 12:00:00 GMT</pubDate>'
+    + '<description>[alt:Better](https://evil.example/y) #followup #watch</description>'
+    + '</item></channel></rss>';
+  const spy = { ...ctx, net: { fetchText: async () => hostile } };
+  const { candidates } = await collectFeeds(rows, spy);
+  assert.equal(candidates.length, 1);
+  const c = candidates[0];
+  const markers = [c.title, c.summary].join(' ');
+  for (const token of ['[prov:', '[src:', '[alt:', '#new', '#followup', '#watch', '#developing']) {
+    assert.equal(markers.includes(token), false, token + ' survived into the pool: ' + JSON.stringify(markers));
+  }
+  assert.match(c.title, /Trusted/, 'the marker grammar is gone but the words in it are not');
+});
+
+test('plainText neutralises the marker vocabulary it is given', () => {
+  const hostile = '[prov:vendor-claim] #new [src:Trusted 2026-09-20](https://evil.example/x) [alt:Better](https://evil.example/y) #followup';
+  const out = plainText(hostile, 300);
+  assert.equal(/\[(?:prov|src|alt):/.test(out), false, 'no marker opener survives: ' + JSON.stringify(out));
+  assert.equal(/#(?:new|followup|watch|developing)\b/.test(out), false, 'no status token survives: ' + JSON.stringify(out));
+});
+
+// TR-35 regression test: the redaction that keeps a credential out of a notice never
+// covered a candidate's own `source`, which was built straight from the watchlist target.
+// A target carrying a secret -- userinfo or a credential-named query parameter -- therefore
+// reached the published pool on every candidate that feed produced. The source is a
+// diagnostic label, so it still identifies the feed, but no part of it may be a secret.
+test('a credentialised watchlist target never reaches a candidate source', async () => {
+  const targets = [
+    'https://u:p4ssw0rd@feeds.example/atom.xml',
+    'https://feeds.example/atom.xml?token=SECRETVAL',
+  ];
+  const credentialised = targets.map((target) => ({ kind: 'rss', target, domain: 'languages-runtimes', note: '' }));
+  const spy = {
+    ...ctx,
+    net: { fetchText: async () => '<rss><channel><item><title>T</title><link>https://blog.example/a</link></item></channel></rss>' },
+  };
+  const { candidates } = await collectFeeds(credentialised, spy);
+  assert.equal(candidates.length, 2);
+  for (const c of candidates) {
+    const published = JSON.stringify(c);
+    for (const secret of ['p4ssw0rd', 'SECRETVAL', 'u:p4ssw0rd@']) {
+      assert.equal(published.includes(secret), false, secret + ' reached the published candidate: ' + published);
+    }
+    assert.match(c.source, /^rss:.*feeds\.example/, 'the source still names the feed it came from: ' + c.source);
+  }
 });
