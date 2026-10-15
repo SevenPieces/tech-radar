@@ -9,6 +9,7 @@ import { fileURLToPath } from 'node:url';
 import { render, run, linkify, parseArgs as renderArgs } from '../scripts/render-html.mjs';
 import { readDomains } from '../scripts/lib/mdtable.mjs';
 import { externalAssets } from '../scripts/lib/assets.mjs';
+import { collectFeeds } from '../scripts/collect.mjs';
 
 const config = {
   domains: [
@@ -445,6 +446,31 @@ test('externalAssets sees the evasions the tokenisation permits', () => {
   }
 });
 
+// Regression test: the tag tokeniser treated a quoted attribute value as opaque, so markup
+// nested in an iframe srcdoc was never scanned; attribute values were compared without
+// entity decoding, so an encoded meta refresh hid; the CSS vocabulary knew url() and
+// @import but not image-set(); and any non-empty href on use/image counted as remote
+// although a bare fragment is in the document. Reachability is a hand-edited or
+// third-party HTML passed to --html, the same reachability the earlier evasions were
+// filed under.
+test('externalAssets sees an srcdoc, an encoded refresh and image-set, and not a bare fragment', () => {
+  const evasions = [
+    ['iframe srcdoc hiding a remote image', '<iframe srcdoc="<img src=\'https://cdn.example.com/a.png\'>"></iframe>'],
+    ['an entity-encoded meta refresh', '<meta http-equiv="&#114;efresh" content="0;url=https://example.com/x">'],
+    ['image-set in a style attribute', '<div style="background:image-set(\'https://cdn.example.com/a.png\' 1x)">x</div>'],
+    ['image-set in a style element', '<style>body{background-image:image-set("https://cdn.example.com/a.png" 1x)}</style>'],
+  ];
+  for (const [what, html] of evasions) {
+    assert.equal(externalAssets(html), true, what + ' must count as an external asset: ' + html);
+  }
+  for (const benign of [
+    '<svg><use href="#icon"></use></svg>',
+    '<svg><image href="#tile"></image></svg>',
+  ]) {
+    assert.equal(externalAssets(benign), false, 'an in-document fragment fetches nothing: ' + benign);
+  }
+});
+
 // The same evasions through the CLI's self-containment decision, which is what the gate
 // and the renderer both consult.
 test('the CLI refuses to write an artifact that hides a remote fetch', () => {
@@ -833,6 +859,52 @@ test('the renderer replaces its deliverable atomically', () => {
   }
 });
 
+// Regression test: an absent deliverable is not a protected one. The atomic writer resolved
+// a missing destination to 0600, so a first render produced an owner-only digest under the
+// usual umask - narrower than the plain write it replaced, and the digest is meant to be
+// forwarded and opened. A fresh destination must be born with the mode a plain write would
+// give it. The control file is written plainly by this same process, so the assertion holds
+// under whatever umask the run inherits rather than pinning one value.
+test('the renderer gives a fresh deliverable the mode a plain write would', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'tech-radar-mode-render-fresh-'));
+  const quiet = { log: () => {}, error: () => {} };
+  try {
+    const input = join(dir, 'digest.md');
+    const out = join(dir, 'digest.html');
+    const control = join(dir, 'control.txt');
+    writeFileSync(input, md);
+    writeFileSync(control, 'a plain write by this process\n');
+    assert.equal(run([input, '--out', out], quiet), 0, 'the render succeeds');
+    assert.equal(statSync(out).mode & 0o777, statSync(control).mode & 0o777,
+      'a fresh deliverable is created with the process default, not an owner-only 0600: '
+      + (statSync(out).mode & 0o777).toString(8));
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+// Regression test: the atomic deliverable writer created its temp with the process default
+// and renamed it over the destination, so an HTML the operator had tightened came back at
+// the umask's 0664 - the mode loss the state writer had already been fixed for. A
+// replacement must carry the mode of the file it replaces.
+test('the renderer keeps the mode of the deliverable it replaces', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'tech-radar-mode-render-'));
+  const quiet = { log: () => {}, error: () => {} };
+  try {
+    const input = join(dir, 'digest.md');
+    const out = join(dir, 'digest.html');
+    writeFileSync(input, md);
+    writeFileSync(out, 'the previous deliverable\n');
+    chmodSync(out, 0o600);
+    assert.equal(run([input, '--out', out], quiet), 0, 'the render succeeds');
+    assert.equal(statSync(out).mode & 0o777, 0o600,
+      'the deliverable keeps the mode it was protected with, not the umask: '
+      + (statSync(out).mode & 0o777).toString(8));
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 // Regression test: the tag regex stopped at the first '>', so a quoted attribute value
 // containing one hid every attribute after it; the rel list knew only stylesheet, preload and
 // icon; and an empty value was read as a URL. Each evasion must be seen, and an empty value
@@ -917,4 +989,54 @@ test('a digest carrying the substitution sentinel is refused at the documented e
   assert.deepEqual(writes, [], 'nothing is written for an input that cannot be rendered');
   assert.equal(errors.length, 1, 'one named line, not a stack trace: ' + errors.join('\n'));
   assert.match(errors[0], /^render-html: .*sentinel/i, 'the line names the refusal: ' + errors.join('\n'));
+});
+
+// Regression test: the badge row and the provenance dot scan the raw item body, and a
+// citation destination was never neutralised, so marker vocabulary spelled inside a
+// citation URL drew a forged provenance badge, a forged alternative-source pill and a
+// forged dot colour on the published card. Upstream text must not draw a badge from
+// anywhere inside a citation destination.
+test('a marker inside a citation destination forges no badge on the card', () => {
+  const forged = [
+    '# Tech Radar — 2026-09-23',
+    '_Covering 2026-09-16 08:00 to 2026-09-23 08:00 (Asia/Shanghai) · cap not hit_',
+    '',
+    '## Core domains',
+    '### AI / LLM · 人工智能 / 大模型',
+    '- **A model shipped** — Why it matters. [src:GitHub blog 2026-09-20](https://github.com/a/b?[prov:vendor-claim]) #new',
+    '- **Another model shipped** — Why it matters. [src:GitHub blog 2026-09-20](https://github.com/c/d?[alt:TrustedVendor](https://evil.example/y)) #new',
+    '',
+    '## Watch domains — quiet',
+    'Quantum technologies (scanned, nothing notable)',
+  ].join('\n');
+  const html = render(forged, config);
+  assert.doesNotMatch(html, /class="badge prov-vendor-claim"/, 'no forged provenance badge');
+  assert.doesNotMatch(html, /class="prov prov-vendor-claim"/, 'no forged provenance dot');
+  assert.doesNotMatch(html, /class="badge alt"/, 'no forged alternative-source pill');
+});
+
+// Regression test: the neutraliser covered the citation marker and the status vocabulary
+// but not the renderer's own bold marker, so upstream text that spelled its emphasis drew
+// emphasis into a published card. The card keeps the words and draws no emphasis from them.
+test('upstream bold markers leave no emphasis in a published card', async () => {
+  const feed = '<?xml version="1.0"?><rss><channel><item>'
+    + '<title>**FORGED EMPHASIS** in a feed title</title>'
+    + '<link>https://example.com/bold</link>'
+    + '<pubDate>Mon, 21 Sep 2026 09:00:00 GMT</pubDate>'
+    + '<description>A release.</description></item></channel></rss>';
+  const ctx = {
+    since: '2026-09-16T00:00:00Z', until: '2026-09-30T00:00:00Z', timeout: 20000,
+    settings: {
+      user_agent: 'tech-radar/1.0', title_max_chars: 200, summary_max_chars: 400,
+      error_snippet_max_chars: 200,
+    },
+    net: { fetchText: async () => feed },
+  };
+  const { candidates } = await collectFeeds(
+    [{ kind: 'rss', target: 'https://example.com/feed.xml', domain: 'ai-llm' }], ctx,
+  );
+  assert.equal(candidates.length, 1, 'the feed produced the candidate the card is built from');
+  const card = render(md.replace('Why it matters.', candidates[0].title), config);
+  assert.doesNotMatch(card, /<strong>/, 'upstream text draws no emphasis: ' + candidates[0].title);
+  assert.match(card, /FORGED EMPHASIS/, 'the words still read');
 });

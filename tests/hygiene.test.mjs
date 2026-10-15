@@ -167,3 +167,17 @@ test('.gitignore ignores the lock of a state file it does not name', (t) => {
   assert.equal(ignored, true,
     '.gitignore must cover the lock of any state file, not only the documented spellings');
 });
+
+// Regression test: the earlier ignore rule was written as *.json.lock, so the lock of a
+// state file named without that suffix - "run the update with --state foo" - stayed
+// trackable and a stray `git add -A` can publish it along with the hostname it
+// records. The pattern covers any lock, whatever the state beside it is called.
+test('.gitignore ignores the lock of a state named without the .json suffix', (t) => {
+  const ignored = gitSaysIgnored('custom.lock');
+  if (ignored === null) {
+    t.skip('git is not available, so the ignore rule cannot be consulted');
+    return;
+  }
+  assert.equal(ignored, true,
+    '.gitignore must cover a lock for any state name, not only the .json spellings');
+});

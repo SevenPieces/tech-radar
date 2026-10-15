@@ -5,12 +5,13 @@
 // ranks or scores: judgement stays with the agent. A failing source becomes a
 // notice, never a thrown error and never a silent skip.
 import { randomBytes } from 'node:crypto';
-import { mkdirSync, renameSync, unlinkSync, writeFileSync } from 'node:fs';
+import { chmodSync, mkdirSync, renameSync, statSync, unlinkSync, writeFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { readConfig } from './lib/mdtable.mjs';
 import {
   fetchText, hostOf, isDiscoveryOnly, splitItems, field, atomLink, plainText, redactUrl,
+  neutraliseMarkers,
 } from './lib/net.mjs';
 
 // The collector must work from any working directory, so the default configuration
@@ -25,14 +26,16 @@ const GITHUB_API = 'https://api.github.com';
 // message it raises for a JSON parse failure, so a notice built from that message used to
 // carry a raw ESC (or NUL, or BS) into stdout, stderr and the published pool. Every notice
 // is normalised at the single push: a whitespace control becomes a space, every other C0,
-// C1 and DEL byte is dropped, and the text is bounded so one hostile response cannot become
-// an unbounded notice.
+// C1 and DEL byte is dropped, the marker vocabulary the renderer trusts is neutralised --
+// SKILL.md requires the notices to be carried into the published Coverage note, so a notice
+// is published text -- and the text is bounded so one hostile response cannot become an
+// unbounded notice.
 const NOTICE_CONTROLS = /[\u0000-\u001f\u007f-\u009f]/g;
 const NOTICE_MAX_CHARS = 1000;
 function sanitizeNotice(text) {
-  return String(text)
-    .replace(NOTICE_CONTROLS, (ch) => (/\s/.test(ch) ? ' ' : ''))
-    .slice(0, NOTICE_MAX_CHARS);
+  return neutraliseMarkers(
+    String(text).replace(NOTICE_CONTROLS, (ch) => (/\s/.test(ch) ? ' ' : '')),
+  ).slice(0, NOTICE_MAX_CHARS);
 }
 function pushNotice(notices, text) {
   notices.push(sanitizeNotice(text));
@@ -488,6 +491,14 @@ function uncheckedPhrase(n) {
   return `${n} ${n === 1 ? 'repository' : 'repositories'} not checked`;
 }
 
+// The phase-1 shortfall is a run of release listings that were never requested, not whole
+// repositories that went unread: a repository whose releases request was skipped is still a
+// repository the run reached, and counting its listing as a repository overstated what the
+// notice meant.
+function skippedReleasesPhrase(n) {
+  return `${n} repository release ${n === 1 ? 'listing' : 'listings'} not checked`;
+}
+
 // The rows a failed probe leaves unread are not all repositories: an organisation row stands
 // for up to github_org_repos repositories, so counting it as one repository understates it.
 function uncheckedPhraseFor(rows) {
@@ -509,7 +520,7 @@ export function budgetNotice(budget, shortfall, token) {
     ? 'the supplied GITHUB_TOKEN budget is spent as well, so wait for the reset'
     : 'set GITHUB_TOKEN to raise the limit';
   const parts = [];
-  if (shortfall.repos) parts.push(uncheckedPhrase(shortfall.repos));
+  if (shortfall.repos) parts.push(skippedReleasesPhrase(shortfall.repos));
   if (shortfall.orgs) parts.push(`${shortfall.orgs} ${shortfall.orgs === 1 ? 'organisation' : 'organisations'} not listed`);
   if (shortfall.tags) parts.push(`${shortfall.tags} tag ${shortfall.tags === 1 ? 'listing' : 'listings'} not checked`);
   // budget.remaining is the value the free probe reported before the block spent anything.
@@ -720,15 +731,31 @@ function operatorWarning(notices) {
   return line;
 }
 
+// The mode the replacement carries. The rename replaces the inode, so an existing
+// destination keeps its own permissions only if the temp is born with them: a temp created
+// with the process default silently widened a pool the operator had protected - a 0600 pool
+// came back 0664. A fresh (absent) destination has no mode to keep, so it is left at the
+// mode the create itself gave it - 0666 masked by the process umask - exactly what the
+// plain write this replaced produced. The state writer resolves the same way, so the three
+// writers agree on the rule.
+function destinationMode(out) {
+  try { return statSync(out).mode & 0o777; } catch { return null; }
+}
+
 // A replacement is published by a rename, so a refused or interrupted write leaves the
 // previous pool intact rather than truncated. The temp name is unique and created
 // exclusively, so a pre-planted path is never followed, and it is removed on every failure.
 function writeAtomic(out, text) {
+  const mode = destinationMode(out);
   const dir = dirname(out);
   if (dir) mkdirSync(dir, { recursive: true });
   const tmp = `${out}.${process.pid}.${randomBytes(6).toString('hex')}.tmp`;
   try {
-    writeFileSync(tmp, text, { flag: 'wx' });
+    writeFileSync(tmp, text, { flag: 'wx', mode: mode ?? 0o666 });
+    // chmod after the create, because the umask would otherwise clear bits the destination
+    // held (a 0664 pool under a 022 umask is the common case). Only a destination that
+    // already existed is pinned: a fresh one keeps the create's own 0666 & ~umask.
+    if (mode !== null) chmodSync(tmp, mode);
     renameSync(tmp, out);
   } catch (err) {
     try { unlinkSync(tmp); } catch { /* the temp was never created */ }

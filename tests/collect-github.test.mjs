@@ -215,7 +215,7 @@ test('an exhausted budget makes exactly one notice and no repository request', (
   assert.equal(notices.length, 1);
   assert.equal(notices[0],
     'github: rate limit reached (remaining 0 of 60, resets ' + RESET_ISO + '); '
-    + '55 repositories not checked; set GITHUB_TOKEN to raise the limit');
+    + '55 repository release listings not checked; set GITHUB_TOKEN to raise the limit');
 }));
 
 test('a budget that covers the rows keeps the normal per-repository path', () => anonymous(async () => {
@@ -247,7 +247,7 @@ test('a partial budget requests what it covers and notes the rest once', () => a
   assert.equal(calls.length, 3, 'the probe plus the two rows the budget covers');
   assert.equal(notices.length, 1);
   assert.match(notices[0], /^github: rate limit reached \(remaining 3 of 60, resets /);
-  assert.match(notices[0], /3 repositories not checked; 2 tag listings not checked/);
+  assert.match(notices[0], /3 repository release listings not checked; 2 tag listings not checked/);
   assert.match(notices[0], /set GITHUB_TOKEN to raise the limit/);
 }));
 
@@ -315,6 +315,23 @@ test('the rate-limit notice does not quote the pre-spend budget', () => {
   assert.equal(/reached/.test(notice) && /remaining 60 of 60/.test(notice), false,
     'the notice must not claim the limit was reached while reporting a full allowance');
   assert.match(notice, /set GITHUB_TOKEN to raise the limit/, 'the remedy is unchanged');
+});
+
+// Regression test: the budget notice counted the phase-1 release listings it skipped as
+// "repositories not checked", so a run that never reached a single repository's releases
+// read as if whole repositories had gone unread. A repository is only skipped when its
+// releases request was skipped, and the notice must say what went unread.
+test('the budget notice says which requests it skipped, not that repositories were skipped', () => {
+  const notice = budgetNotice(
+    { remaining: 0, limit: 60, resetAt: RESET_ISO },
+    { repos: 19, orgs: 0, tags: 0 },
+    false,
+  );
+  assert.match(notice, /19[^;]*\breleas/i, 'the skipped release listings are named: ' + notice);
+  assert.doesNotMatch(notice, /19 repositories not checked/,
+    'no whole repository was skipped, only its releases request: ' + notice);
+  const tokens = budgetNotice({ remaining: 0, limit: 60, resetAt: RESET_ISO }, { repos: 0, orgs: 0, tags: 52 }, false);
+  assert.match(tokens, /52 tag listings not checked/, 'the tag phase keeps its own wording: ' + tokens);
 });
 
 

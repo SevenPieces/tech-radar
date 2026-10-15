@@ -4,7 +4,8 @@ import assert from 'node:assert/strict';
 import { chmodSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync, symlinkSync, utimesSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { spawn } from 'node:child_process';
+import { spawn, spawnSync } from 'node:child_process';
+import { fileURLToPath } from 'node:url';
 import { emptyState, mergeRun, storyKey, normalizeTitle, normalizeRunDate, findRecordedRun, main } from '../scripts/update-state.mjs';
 import { SKILL_ROOT } from './lib/shipped-files.mjs';
 
@@ -677,6 +678,31 @@ test('an update killed while it holds the lock does not block the next one', asy
 
 // --- the state is a file on disk: mode, temp path, and the lock's real subject ----------
 
+// Regression test: an absent destination is not a protected one. The atomic write resolved
+// a missing destination to 0600, so the first update to a new state path produced an
+// owner-only file under the usual umask - narrower than the plain write it replaced. A
+// fresh destination must be born with the mode a plain write would give it. The control file
+// is written plainly by this same process, so the assertion holds under whatever umask the
+// run inherits rather than pinning one value.
+test('an update gives a fresh state file the mode a plain write would', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'tech-radar-mode-fresh-'));
+  try {
+    const f = updateFixture(dir);
+    writeFileSync(f.itemsPath, JSON.stringify([item]));
+    const fresh = join(dir, 'fresh-state.json');
+    const control = join(dir, 'control.txt');
+    writeFileSync(control, 'a plain write by this process\n');
+    const res = runCli(['update', '--state', f.statePath, '--items', f.itemsPath,
+      '--out', fresh, '--date', '2026-09-23', '--config', f.configDir]);
+    assert.equal(res.code, 0, res.errs);
+    assert.equal(statSync(fresh).mode & 0o777, statSync(control).mode & 0o777,
+      'a fresh state is created with the process default, not an owner-only 0600: '
+      + (statSync(fresh).mode & 0o777).toString(8));
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 // Regression test: the atomic write created its temp file with the process default and
 // renamed it over the destination, so a state the operator had protected came back with the
 // default mode - the plain write it replaced preserved the file's own permissions.
@@ -790,6 +816,108 @@ test('malformed state entries are refused with a named message and no rewrite', 
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }
+  }
+});
+
+// --- failure modes of the state write and the destination lock -------------------------
+
+// Regression test: writeStateAtomic marked the temp as created only after writeFileSync
+// returned, so a throw inside the write itself - a size limit, a full disk, an I/O error -
+// left a partially written <out>.tmp behind, and no later run ever reclaimed it. The
+// module's own contract is that the temp this process created is removed on every failure
+// path, which is how the pool and deliverable writers already behave.
+test('a state write that fails mid-write leaves no temp beside the state', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'tech-radar-temp-'));
+  try {
+    const f = updateFixture(dir);
+    // A body far larger than the limit the child shell imposes, so the write fails after
+    // the temp file has been created.
+    const many = Array.from({ length: 200 }, (_, i) => ({
+      title: 'Partial write story ' + i + ' with a headline long enough to fill the file',
+      domain: 'ai-llm', outlet: 'Example', primaryUrl: 'https://h.example/partial-' + i, flags: ['new'],
+    }));
+    writeFileSync(f.itemsPath, JSON.stringify(many));
+    const before = readFileSync(f.statePath, 'utf8');
+    const cli = fileURLToPath(new URL('../scripts/update-state.mjs', import.meta.url));
+    const command = 'ulimit -f 1; exec '
+      + [process.execPath, cli, 'update', '--state', f.statePath, '--items', f.itemsPath,
+        '--out', f.statePath, '--date', '2026-09-23', '--config', f.configDir]
+        .map((arg) => JSON.stringify(arg)).join(' ');
+    const res = spawnSync('sh', ['-c', command], { encoding: 'utf8' });
+    assert.equal(res.status, 4, 'the write failure is the documented output exit: ' + res.stderr);
+    assert.equal(readFileSync(f.statePath, 'utf8'), before, 'the previous state survives the failure');
+    const leftovers = readdirSync(dir).filter((name) => name !== 'state.json' && name !== 'items.json' && name !== 'config');
+    assert.deepEqual(leftovers, [], 'no temp file survives the failure: ' + leftovers.join(', '));
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+// Regression test: an unwritable destination directory failed while the lock file was
+// being created and was reported as a lock problem at exit 2, though an unwritable
+// destination is the documented exit 4 and the caller never asked for a lock. Nothing
+// needs serialising when the lock cannot be taken for a permission reason: the writer
+// that follows is what has to report the destination it could not write.
+test('an unwritable destination directory is exit 4 naming the destination, not a lock', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'tech-radar-rodir-'));
+  try {
+    const f = updateFixture(dir);
+    writeFileSync(f.itemsPath, JSON.stringify([item]));
+    chmodSync(dir, 0o500);
+    let res;
+    try {
+      res = runCli(['update', '--state', f.statePath, '--items', f.itemsPath,
+        '--out', f.statePath, '--date', '2026-09-23', '--config', f.configDir]);
+    } finally {
+      chmodSync(dir, 0o700);
+    }
+    assert.equal(res.code, 4, 'an unwritable destination is the documented exit 4: ' + res.errs);
+    assert.match(res.errs, /cannot write/, 'the failure is named as a write: ' + res.errs);
+    assert.equal(res.errs.includes(f.statePath), true, 'the destination is named: ' + res.errs);
+    assert.doesNotMatch(res.errs, /lock/i, 'the caller never asked for a lock: ' + res.errs);
+  } finally {
+    chmodSync(dir, 0o700);
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+// Regression test: the destination lock only excludes overlapping writers, so two
+// sequential updates that named different --state files and one shared --out both exited 0
+// while the second read its own state and wrote the shared destination, silently
+// discarding the first run. The earlier run must survive in the shared destination, or
+// the divergent invocation must refuse rather than lose it.
+test('two sequential updates with different states and one shared destination keep both runs or refuse', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'tech-radar-shared-out-'));
+  try {
+    const f = updateFixture(dir);
+    const stateA = join(dir, 'a.json');
+    const stateB = join(dir, 'b.json');
+    const shared = join(dir, 'shared.json');
+    const empty = JSON.stringify(emptyState(['ai-llm', 'quantum']), null, 2) + '\n';
+    writeFileSync(stateA, empty);
+    writeFileSync(stateB, empty);
+    const itemsA = join(dir, 'items-a.json');
+    const itemsB = join(dir, 'items-b.json');
+    writeFileSync(itemsA, JSON.stringify([{ ...item, title: 'Alpha story headline',
+      primaryUrl: 'https://github.com/a/a/releases/tag/v1' }]));
+    writeFileSync(itemsB, JSON.stringify([{ ...item, title: 'Beta story headline',
+      primaryUrl: 'https://github.com/b/b/releases/tag/v2' }]));
+    const first = runCli(['update', '--state', stateA, '--items', itemsA, '--out', shared,
+      '--date', '2026-10-01', '--config', f.configDir]);
+    assert.equal(first.code, 0, 'the first run merges: ' + first.errs);
+    const second = runCli(['update', '--state', stateB, '--items', itemsB, '--out', shared,
+      '--date', '2026-10-02', '--config', f.configDir]);
+    if (second.code !== 0) {
+      assert.match(second.errs, /shared\.json|--out|destination/i,
+        'a divergence is refused by naming what it refuses: ' + second.errs);
+    } else {
+      const state = JSON.parse(readFileSync(shared, 'utf8'));
+      assert.deepEqual(state.runs.map((run) => run.date).sort(), ['2026-10-01', '2026-10-02'],
+        'both runs are recorded in the shared destination');
+      assert.equal(Object.keys(state.items).length, 2, 'both runs\' items are in the shared destination');
+    }
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
   }
 });
 

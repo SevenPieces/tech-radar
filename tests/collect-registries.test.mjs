@@ -2,6 +2,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { collectRegistries, collectAdvisories, nvdStamp } from '../scripts/collect.mjs';
+import { linkify } from '../scripts/render-html.mjs';
 
 const ctx = {
   since: '2026-09-16T00:00:00Z', until: '2026-09-23T00:00:00Z', timeout: 5000,
@@ -281,4 +282,25 @@ test('a Go module path is case-escaped for the proxy', async () => {
   assert.deepEqual(notices, []);
   assert.equal(seen, 'https://proxy.golang.org/github.com/!burnt!sushi/toml/@latest');
   assert.equal(candidates[0].url, 'https://pkg.go.dev/github.com/BurntSushi/toml', 'the human page keeps its case');
+});
+
+// Regression test: the collector's notice sanitiser stripped control characters but not
+// the marker vocabulary the renderer trusts, so an upstream body quoted in a notice drew
+// a forged provenance badge in the Coverage note that SKILL.md requires the digest to
+// publish. A notice is published text and is neutralised like any other.
+test('a notice carrying the marker vocabulary draws no badge when it is published', async () => {
+  const cases = [
+    ['a provenance marker', '[prov:vendor-claim]'],
+    ['a status flag', '#new'],
+  ];
+  for (const [what, body] of cases) {
+    const stub = { ...ctx, net: { fetchText: async () => body } };
+    const { notices } = await collectRegistries([{ kind: 'npm', target: 'serde', domain: 'ai-llm' }], stub);
+    assert.equal(notices.length, 1, what + ': the quoted body produced one notice');
+    const notice = notices[0];
+    assert.doesNotMatch(notice, /\[(?:src|alt|prov):/, what + ': the marker opener is neutralised: ' + notice);
+    assert.doesNotMatch(notice, /#(?:new|followup|developing|watch)\b/, what + ': the status flag is neutralised: ' + notice);
+    const published = linkify(notice);
+    assert.doesNotMatch(published, /class="badge|class="tag t-/, what + ': no badge is drawn from a notice: ' + published);
+  }
 });

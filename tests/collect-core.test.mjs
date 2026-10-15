@@ -331,26 +331,6 @@ test('an inverted window is refused, not reported as a quiet week', async () => 
   rmSync(dir, { recursive: true, force: true });
 });
 
-// A settings file without output_dir reached join() as undefined, so main() died with an
-// uncaught TypeError: a bare exit 1 and a stack trace, not the named exit 2 every other
-// missing setting produces - and the usage's claim that no shipped path reaches 1 was false.
-// The live watchlist one domain at a time, so the case is driven with a stub curl that
-// answers an empty feed: every row is offline and the shape of the config is what varies.
-test('a settings file with no output_dir is a named configuration error, exit 2', () => {
-  const dir = mkdtempSync(join(tmpdir(), 'tech-radar-nodir-'));
-  for (const name of ['domains.md', 'sources.md', 'watchlist.md', 'settings.md']) copyFileSync(join(SKILL_CONFIG, name), join(dir, name));
-  const settings = readFileSync(join(SKILL_CONFIG, 'settings.md'), 'utf8')
-    .split('\n').filter((l) => !/^\|\s*output_dir\s*\|/.test(l)).join('\n');
-  writeFileSync(join(dir, 'settings.md'), settings);
-  assert.equal(/output_dir/.test(settings), false, 'the fixture really omits it');
-  const cli = fileURLToPath(new URL('../scripts/collect.mjs', import.meta.url));
-  const res = spawnSync(process.execPath, [cli, '--config', dir], { encoding: 'utf8' });
-  assert.equal(res.status, 2, 'exit 2, not a TypeError: ' + res.stderr.slice(0, 200));
-  assert.match(res.stderr, /collect: output_dir is missing or invalid in config\/settings\.md/);
-  assert.doesNotMatch(res.stderr, /TypeError|at join|node:path/, 'no stack trace');
-  rmSync(dir, { recursive: true, force: true });
-});
-
 test('the usage text states the rule the code implements', () => {
   const cli = fileURLToPath(new URL('../scripts/collect.mjs', import.meta.url));
   const res = spawnSync(process.execPath, [cli, '-h'], { encoding: 'utf8' });
@@ -430,6 +410,8 @@ test('the collect CLI exits 2 for an empty --config even when the cwd holds a co
 // directory, so the two branches are pinned separately.
 //
 // (a) No output_dir and no usable override: the named configuration error, and no request.
+// This case and (b) replace the superseded single case whose spawn inherited the environment:
+// with the variable exported it asserted exit 2, got 0 and ran a full live collection.
 test('a settings file with no output_dir and no usable override is a named exit 2', () => {
   const dir = mkdtempSync(join(tmpdir(), 'tech-radar-envunset-'));
   for (const name of ['domains.md', 'sources.md', 'watchlist.md', 'settings.md']) {
@@ -455,7 +437,8 @@ test('a settings file with no output_dir and no usable override is a named exit 
     env: { ...process.env, TECH_RADAR_DIR: '', PATH: bin + ':' + process.env.PATH },
   });
   assert.equal(res.status, 2, 'the missing setting is a named error: ' + res.stderr.slice(0, 200));
-  assert.match(res.stderr, /output_dir is missing or invalid/);
+  assert.match(res.stderr, /collect: output_dir is missing or invalid in config\/settings\.md/);
+  assert.doesNotMatch(res.stderr, /TypeError|at join|node:path/, 'a named error, not a stack trace');
   assert.equal(existsSync(join(dir, '.pool.json')), false, 'no pool is written');
   assert.equal(existsSync(mark), false, 'no source request was made');
   assert.ok(Date.now() - started < 15000, 'the case is offline and bounded');
@@ -579,5 +562,48 @@ test('the collector replaces its pool atomically', () => {
   }
   const leftovers = readdirSync(dir).filter((name) => name !== '.pool.json');
   assert.deepEqual(leftovers, [], 'no temp file is left behind: ' + leftovers.join(', '));
+  rmSync(dir, { recursive: true, force: true });
+});
+
+// Regression test: an absent pool is not a protected one. The atomic writer resolved a
+// missing destination to 0600, so the first render of a digest produced an owner-only file
+// under the usual umask - narrower than the plain write it replaced, and awkward to forward
+// and open. A fresh destination must be born with the mode a plain write would give it.
+// The control file is written plainly by this same process, so the assertion holds under
+// whatever umask the run inherits rather than pinning one value.
+test('the collector gives a fresh pool the mode a plain write would', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'tech-radar-mode-pool-fresh-'));
+  try {
+    const out = join(dir, '.pool.json');
+    const control = join(dir, 'control.txt');
+    writeFileSync(control, 'a plain write by this process\n');
+    const cli = fileURLToPath(new URL('../scripts/collect.mjs', import.meta.url));
+    const res = spawnSync(process.execPath, [cli, '--config', FIXTURE_CONFIG, '--domain', 'ai-llm',
+      '--timeout', '20000', '--since', '2026-09-16T00:00:00Z', '--out', out], { encoding: 'utf8' });
+    assert.equal(res.status, 0, res.stderr);
+    assert.equal(statSync(out).mode & 0o777, statSync(control).mode & 0o777,
+      'a fresh pool is created with the process default, not an owner-only 0600: '
+      + (statSync(out).mode & 0o777).toString(8));
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+// Regression test: the atomic pool writer created its temp with the process default and
+// renamed it over the destination, so a pool the operator had tightened came back at the
+// umask's 0664 - the very class of mode loss the state writer had already been fixed for.
+// A replacement must carry the mode of the file it replaces.
+test('the collector keeps the mode of the pool it replaces', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'tech-radar-mode-pool-'));
+  const out = join(dir, '.pool.json');
+  const cli = fileURLToPath(new URL('../scripts/collect.mjs', import.meta.url));
+  writeFileSync(out, 'the previous pool\n');
+  chmodSync(out, 0o600);
+  const res = spawnSync(process.execPath, [cli, '--config', FIXTURE_CONFIG, '--domain', 'ai-llm',
+    '--timeout', '20000', '--since', '2026-09-16T00:00:00Z', '--out', out], { encoding: 'utf8' });
+  assert.equal(res.status, 0, res.stderr);
+  assert.equal(statSync(out).mode & 0o777, 0o600,
+    'the pool keeps the mode it was protected with, not the umask: '
+    + (statSync(out).mode & 0o777).toString(8));
   rmSync(dir, { recursive: true, force: true });
 });

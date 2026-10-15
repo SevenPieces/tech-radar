@@ -3,7 +3,7 @@
 // Markdown digest -> one self-contained HTML file. Zero dependencies.
 // Inline CSS and JS only; the result opens correctly from file:// offline.
 import { randomBytes } from 'node:crypto';
-import { readFileSync, renameSync, unlinkSync, writeFileSync } from 'node:fs';
+import { chmodSync, readFileSync, renameSync, statSync, unlinkSync, writeFileSync } from 'node:fs';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { readDomains, readSettings, shortCap } from './lib/mdtable.mjs';
 import { externalAssets } from './lib/assets.mjs';
@@ -242,13 +242,46 @@ export function render(md, config) {
     return seen === 1 ? base : `${base}-${seen}`;
   };
 
-  const SRC = new RegExp('\\[src:([^\\]]+?)\\s+(\\d{4}-\\d{2}-\\d{2}[^\\]]*)\\]\\((https?:\\/\\/' + URL_PART + '+)\\)');
-  const ALT = new RegExp('\\[alt:([^\\]]+?)\\]\\((https?:\\/\\/' + URL_PART + '+)\\)');
   const ITEM = /^\*\*(.+?)\*\*\s+—\s+([\s\S]*)$/;
-  const stripCitations = (text) => String(text)
+  // Two readings of the same text. The link grammar (the one linkify draws with) decides
+  // which citations become pills; a slightly more permissive one decides what lies *inside a
+  // destination*. A URL's own query string can hold '[prov:vendor-claim]' or a nested
+  // '[alt:...](...)', and reading either forged a provenance dot, a provenance badge and an
+  // alternative-source pill pointing wherever the destination said. A hostile link can carry
+  // a space, which the link grammar rejects, so the permissive reading is what keeps a marker
+  // inside such a destination from becoming the item's own marker; the destination itself is
+  // still used, untouched, to build the link it belongs to.
+  const CITATION_DEST = '(?:[^()\\n]|\\([^()\\n]*\\))+';
+  const CITATION_SOURCE = '\\[(src|alt):([^\\]]+?)\\]\\((https?:\\/\\/' + URL_PART + '+)\\)';
+  const SPAN_SOURCE = '\\[(src|alt):[^\\]]*\\]\\(' + CITATION_DEST + '\\)';
+  const citationSpans = (text) => [...String(text).matchAll(new RegExp(SPAN_SOURCE, 'g'))]
+    .map((m) => [m.index, m.index + m[0].length]);
+  // The citations the item carries: a citation the link grammar accepts, unless it sits inside
+  // a destination of the permissive reading. A nested one is part of the link, not a marker.
+  const citationsIn = (text) => {
+    const spans = citationSpans(text);
+    return [...String(text).matchAll(new RegExp(CITATION_SOURCE, 'g'))]
+      .filter((m) => !spans.some(([start, end]) => m.index > start && m.index < end));
+  };
+  // The form the marker scans read: every citation span removed, read permissively. The
+  // published prose is never built from this form - linkify draws the citation itself.
+  const withoutMarkerSources = (text) => String(text)
+    .replace(new RegExp('\\[src:[^\\]]*\\]\\(' + CITATION_DEST + '\\)', 'g'), ' ')
+    .replace(new RegExp('\\[alt:[^\\]]*\\]\\(' + CITATION_DEST + '\\)', 'g'), ' ');
+  const withoutCitations = (text) => String(text)
     .replace(new RegExp('\\[src:[^\\]]*\\]\\(' + URL_PART + '+\\)', 'g'), ' ')
-    .replace(new RegExp('\\[alt:[^\\]]*\\]\\(' + URL_PART + '+\\)', 'g'), ' ')
-    .replace(/\[prov:[a-z-]+\]/g, ' ');
+    .replace(new RegExp('\\[alt:[^\\]]*\\]\\(' + URL_PART + '+\\)', 'g'), ' ');
+  const stripCitations = (text) => withoutCitations(text).replace(/\[prov:[a-z-]+\]/g, ' ');
+  // The origin pill repeats the citation's own label and date as the prose grammar writes
+  // them: a labelled citation whose label carries no date draws no pill, exactly as before.
+  const srcPill = (citations) => {
+    for (const c of citations) {
+      if (c[1] !== 'src') continue;
+      const parts = /^([\s\S]+?)\s+(\d{4}-\d{2}-\d{2}[^\]]*)$/.exec(c[2]);
+      if (parts) return { url: c[3], label: `${parts[1]} ${parts[2]}` };
+    }
+    return null;
+  };
   // The summary keeps the prose only; the status scan keeps the flags, because a
   // #new inside a citation URL is part of an href and a #new in prose is not the
   // item's flag - the trailing token is.
@@ -261,7 +294,7 @@ export function render(md, config) {
   // item's provenance: the same marker that is drawn as a pill on the badge row, so the
   // colour tells a reader at a glance how the item is sourced.
   const dotFor = (text, missing = 'No provenance marker') => {
-    const prov = /\[prov:([a-z-]+)\]/.exec(text);
+    const prov = /\[prov:([a-z-]+)\]/.exec(withoutMarkerSources(text));
     return prov
       ? `<span class="prov prov-${esc(prov[1])}" title="Provenance: ${esc(prov[1])}"></span>`
       : `<span class="prov prov-default" title="${esc(missing)}"></span>`;
@@ -272,14 +305,17 @@ export function render(md, config) {
   // citation is never part of a sentence.
   const badgeRow = (text) => {
     const bits = [];
-    const src = SRC.exec(text);
+    const citations = citationsIn(text);
     // The origin and the alternatives are pills that open the page; only the provenance
     // marker and the status tag are not links, because they name something this document
     // decided, not a page.
-    if (src) bits.push(`<a class="badge src" href="${esc(src[3])}" target="_blank" rel="noopener">${esc(`${src[1]} ${src[2]}`)}</a>`);
-    const alt = ALT.exec(text);
-    if (alt) bits.push(`<a class="badge alt" href="${esc(alt[2])}" target="_blank" rel="noopener">${esc(alt[1])}</a>`);
-    for (const m of text.matchAll(/\[prov:([a-z-]+)\]/g)) {
+    const src = srcPill(citations);
+    if (src) bits.push(`<a class="badge src" href="${esc(src.url)}" target="_blank" rel="noopener">${esc(src.label)}</a>`);
+    const alt = citations.find((c) => c[1] === 'alt');
+    if (alt) bits.push(`<a class="badge alt" href="${esc(alt[3])}" target="_blank" rel="noopener">${esc(alt[2])}</a>`);
+    // A provenance marker inside a citation destination is part of the link, not the item's
+    // own marker: the scan reads the text with every citation removed.
+    for (const m of withoutMarkerSources(text).matchAll(/\[prov:([a-z-]+)\]/g)) {
       bits.push(`<span class="badge prov-${esc(m[1])}">${esc(m[1])}</span>`);
     }
     // The status tag is the item's new-or-follow-up state, which the gate and the state
@@ -309,9 +345,9 @@ export function render(md, config) {
       const summary = tidyProse(stripMarkers(m[2]));
       // The headline is the primary link, as it is on a briefing story card; a headline
       // with no citation to point at stays a span rather than a dead link.
-      const link = SRC.exec(m[2]);
+      const link = srcPill(citationsIn(m[2]));
       const headline = link
-        ? `<a class="hl" href="${esc(link[3])}" target="_blank" rel="noopener">${linkify(stripMarkers(m[1]))}</a>`
+        ? `<a class="hl" href="${esc(link.url)}" target="_blank" rel="noopener">${linkify(stripMarkers(m[1]))}</a>`
         : `<span class="hl">${linkify(stripMarkers(m[1]))}</span>`;
       out.push(`<li class="story"><div class="hlrow">${dotFor(m[2])}${headline}</div>`
         + (summary ? `<p class="sum">${linkify(summary)}</p>` : '')
@@ -433,9 +469,9 @@ export function render(md, config) {
   for (const card of featuredCards) {
     const text = card.prose.join(' ');
     const dot = dotFor(text, 'No provenance marker: the deep dive names its sources in the prose');
-    const link = SRC.exec(text);
+    const link = srcPill(citationsIn(text));
     const headline = link
-      ? `<a class="hl" href="${esc(link[3])}" target="_blank" rel="noopener">${esc(card.title)}</a>`
+      ? `<a class="hl" href="${esc(link.url)}" target="_blank" rel="noopener">${esc(card.title)}</a>`
       : `<span class="hl">${esc(card.title)}</span>`;
     body = body.replaceAll(mark(`PROV-${card.key}`), dot)
       .replaceAll(mark(`HL-${card.key}`), headline)
@@ -505,13 +541,30 @@ export function parseArgs(argv) {
   return out;
 }
 
+// The mode the replacement carries. The rename replaces the inode, so an existing
+// destination keeps its own permissions only if the temp is born with them: a temp created
+// with the process default silently widened a deliverable the operator had protected - a
+// 0600 HTML came back 0664. A fresh (absent) destination has no mode to keep, so it is left
+// at the mode the create itself gave it - 0666 masked by the process umask - exactly what
+// the plain write this replaced produced, so a newly rendered digest is not owner-only.
+// The state writer resolves the same way, so the three writers agree on the rule.
+function destinationMode(path) {
+  try { return statSync(path).mode & 0o777; } catch { return null; }
+}
+
 // A replacement is published by a rename, so a refused or interrupted write leaves the
 // previous deliverable intact rather than truncated. The temp name is unique and created
 // exclusively, so a pre-planted path is never followed, and it is removed on every failure.
 function writeAtomic(path, text) {
+  const mode = destinationMode(path);
   const tmp = `${path}.${process.pid}.${randomBytes(6).toString('hex')}.tmp`;
   try {
-    writeFileSync(tmp, text, { flag: 'wx' });
+    writeFileSync(tmp, text, { flag: 'wx', mode: mode ?? 0o666 });
+    // chmod after the create, because the umask would otherwise clear bits the destination
+    // held (a 0664 deliverable under a 022 umask is the common case). Only a destination
+    // that already existed is pinned: a fresh deliverable keeps the create's own
+    // 0666 & ~umask, so a newly rendered digest is not owner-only.
+    if (mode !== null) chmodSync(tmp, mode);
     renameSync(tmp, path);
   } catch (err) {
     try { unlinkSync(tmp); } catch { /* the temp was never created */ }

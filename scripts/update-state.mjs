@@ -34,11 +34,12 @@ first run, not an error. update merges the run's items into the state and
 advances the watermarks of the domains the run covered. A run that is already
 recorded for the same date and domains is refused rather than merged twice.
 
-Exit codes: 0 OK, 1 fatal, 2 state, items or config not found or unreadable, an
-invalid --date, an invalid settings value, the run is already recorded, or another
-update holds the lock on the state or the output (a lock whose holder is gone is
-reclaimed); 3 the items file is not an array or an item failed validation; 4 the
-output could not be written.`;
+Exit codes: 0 OK, 1 fatal, 2 state, items or config not found or unreadable,
+an invalid --date, an invalid settings value, the run is already recorded, --out
+naming an existing file other than --state, or another update holds the lock on
+the state or the output (a lock whose holder is gone is reclaimed); 3 the items
+file is not an array or an item failed validation; 4 the output could not be
+written.`;
 
 // An error that carries the exit code the CLI should return for it.
 function fail(message, exitCode) {
@@ -76,6 +77,25 @@ function positiveInt(config, key) {
   return n;
 }
 
+// The timezone is configuration like every other settings value, and the plan label
+// interpolates it verbatim. A missing row published "Covering ... (undefined)", which the
+// gate accepted because it only checks that the digest repeats the label, and an unusable
+// name failed inside Intl with a zone-library message that named no settings row at all.
+// Checked before the plan is built, so the refusal names the row the operator has to fix.
+function planTimezone(config) {
+  const raw = config.settings.timezone;
+  if (typeof raw !== 'string' || raw.trim() === '') {
+    throw fail('timezone is missing or empty: the plan label needs an IANA time zone name', 2);
+  }
+  try {
+    // Throws a RangeError when the runtime does not know the name.
+    new Intl.DateTimeFormat('en-CA', { timeZone: raw }).format(0);
+  } catch {
+    throw fail(`timezone is not a time zone Intl accepts, got ${JSON.stringify(raw)}`, 2);
+  }
+  return raw;
+}
+
 // The run log's own cap.
 function runsCap(config) {
   return positiveInt(config, 'runs_history_max');
@@ -111,7 +131,7 @@ function resolveDomainKey(config, value) {
 // is the only artifact a run has.
 export function planWindows(config, state, now = new Date(), only = null, floor = null) {
   assertKnownDomains(config, only);
-  const s = config.settings;
+  const tz = planTimezone(config);
   const capMs = positiveInt(config, 'window_cap_weeks') * WEEK;
   const capFloorMs = now.getTime() - capMs;
   const explicit = floor ? new Date(floor) : null;
@@ -159,7 +179,7 @@ export function planWindows(config, state, now = new Date(), only = null, floor 
   const capped = skippedMs > 0;
   const sinceIso = new Date(earliestMs).toISOString();
   const untilIso = now.toISOString();
-  const label = `Covering ${stamp(new Date(earliestMs), s.timezone)} to ${stamp(now, s.timezone)} (${s.timezone}) · cap ${capped ? 'hit' : 'not hit'}`;
+  const label = `Covering ${stamp(new Date(earliestMs), tz)} to ${stamp(now, tz)} (${tz}) · cap ${capped ? 'hit' : 'not hit'}`;
   return {
     since: sinceIso,
     until: untilIso,
@@ -434,12 +454,14 @@ export function findRecordedRun(state, date, domainKeys) {
   ) ?? null;
 }
 
-// The mode the replacement carries. The rename replaces the inode, so the destination
-// keeps its own permissions only if the temp is born with them: a temp created with the
-// process default silently widened a state the operator had protected - a 0600 state came
-// back 0664 - where the plain write this replaced preserved the mode.
+// The mode the replacement carries. The rename replaces the inode, so an existing
+// destination keeps its own permissions only if the temp is born with them: a temp created
+// with the process default silently widened a state the operator had protected - a 0600
+// state came back 0664 - where the plain write this replaced preserved the mode. A fresh
+// (absent) destination has no mode to preserve and keeps the create's own 0666 & ~umask,
+// exactly what the plain write produced.
 function destinationMode(out) {
-  try { return statSync(out).mode & 0o777; } catch { return 0o600; }
+  try { return statSync(out).mode & 0o777; } catch { return null; }
 }
 
 // The temp path. The documented name is the destination plus .tmp and the create is
@@ -469,17 +491,22 @@ function tempPathFor(out) {
 function writeStateAtomic(out, body) {
   const mode = destinationMode(out);
   const tmp = tempPathFor(out);
-  let created = false;
   try {
-    writeFileSync(tmp, body, { flag: 'wx', mode });
-    created = true;
+    writeFileSync(tmp, body, { flag: 'wx', mode: mode ?? 0o666 });
     // chmod after the create, because the umask would otherwise clear bits the
-    // destination held (a 0664 state under a 022 umask is the common case).
-    chmodSync(tmp, mode);
+    // destination held (a 0664 state under a 022 umask is the common case). Only a
+    // destination that already existed is pinned; a fresh one keeps 0666 & ~umask.
+    if (mode !== null) chmodSync(tmp, mode);
     if (existsSync(out)) accessSync(out, constants.W_OK);
     renameSync(tmp, out);
   } catch (err) {
-    if (created) { try { unlinkSync(tmp); } catch { /* the temp file was never created */ } }
+    // Unconditionally: the flag this used to carry was set only after writeFileSync
+    // returned, so a write that failed part way through - a size limit, a full disk, an
+    // I/O error - left its partial temp behind for no later run to reclaim. tempPathFor
+    // returns only a name that was absent, or one carrying this process's id and a random
+    // suffix, so anything at that name is this write's own output. The collector and the
+    // renderer already unlink on every failure path.
+    try { unlinkSync(tmp); } catch { /* the temp was never created */ }
     throw err;
   }
 }
@@ -547,6 +574,12 @@ function acquireLock(path) {
       writeFileSync(lockPath, record + '\n', { flag: 'wx' });
       return lockPath;
     } catch (err) {
+      // A lock that cannot be created for a permission reason - the destination directory
+      // is not writable, or the filesystem is read-only - is not a lock the caller asked
+      // for. Taking none is safe: no writer can write there, so there is nothing to
+      // serialise, and the write that follows reports the destination it could not write
+      // (exit 4) instead of exit 2 naming a lock the caller never asked for.
+      if (err.code === 'EACCES' || err.code === 'EROFS' || err.code === 'EPERM') return null;
       if (err.code !== 'EEXIST') throw fail(`cannot lock ${lockPath}: ${err.message}`, 2);
     }
     // A lock exists. Reclaim it once when its recorded process is gone; a live holder, or
@@ -663,6 +696,16 @@ function runCommand(opts, config) {
   }
   if (!/^\d{4}-\d{2}-\d{2}$/.test(opts.date)) {
     console.error(`update-state: --date must be YYYY-MM-DD, got ${JSON.stringify(opts.date)}`);
+    process.exitCode = 2;
+    return 2;
+  }
+  // --out is the file the merge writes; --state is the file it reads. The documented
+  // invocation names one path for both, and the update lock only excludes overlapping
+  // writers. When the two differ and the destination already exists, this run would
+  // overwrite the runs recorded there without ever reading them and silently drop the
+  // earlier run, so the divergent invocation is refused instead.
+  if (opts.out !== opts.state && existsSync(opts.out)) {
+    console.error(`update-state: --out ${opts.out} already exists and is not --state ${opts.state}; refusing to overwrite the runs recorded there. Pass the same path for --state and --out, or remove the destination first.`);
     process.exitCode = 2;
     return 2;
   }

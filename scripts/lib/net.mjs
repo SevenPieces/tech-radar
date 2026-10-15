@@ -36,16 +36,74 @@ export function redactUrl(url) {
 
 // curl's own diagnostic line is quoted in a notice, and a child-process message can carry
 // the whole argv -- which is where an Authorization header lives. Anything shaped like
-// that header or its Bearer value is removed before the text can reach a notice.
+// that header or its Bearer value is removed before the text can reach a notice. The
+// authorization shape consumes the scheme as well as the first word: matching only up to the
+// first space deleted the word 'Basic' and left the credential behind in full.
 const SECRET_SHAPES = [
   /\bBearer\s+[^\s,;"']+/gi,
-  /\b(?:proxy-)?authorization\s*:\s*\S+/gi,
+  /\b(?:proxy-)?authorization\s*:\s*(?:\S+\s+)?\S+/gi,
   /\bgh[pousr]_[A-Za-z0-9]{6,}\b/g,
   /\bgithub_pat_[A-Za-z0-9_]{20,}\b/g,
 ];
 
-function redactSecrets(text) {
-  let out = String(text ?? '');
+// A Basic credential is the base64 of 'user:password', so it is recognised as one: the token
+// decodes to printable text carrying the colon. Matching by that property leaves a body that
+// merely says 'Basic authentication' readable while a server that echoes the request's
+// credential gives it up.
+function redactBasicCredentials(text) {
+  return String(text).replace(/\bBasic\s+([A-Za-z0-9+/]{8,}={0,2})/gi, (whole, token) => {
+    let decoded = '';
+    try { decoded = Buffer.from(token, 'base64').toString('utf8'); } catch { return whole; }
+    if (!decoded.includes(':') || !/^[\x20-\x7e]+$/.test(decoded)) return whole;
+    return whole.slice(0, whole.length - token.length) + '[redacted]';
+  });
+}
+
+// A 4xx/5xx body is quoted into a notice and can echo the request back -- "token=<value>
+// auth=Basic <base64>" -- so the request's own values are removed by value, not by name: no
+// shape list can know the operator's spelling. A value is removed literally (split/join, so a
+// regex metacharacter in it is not read as a pattern) and a value shorter than a credential
+// is left alone rather than replacing every occurrence of two characters in the diagnostic.
+function requestSecrets(url, headers) {
+  const out = new Set();
+  const add = (value) => {
+    const v = String(value ?? '');
+    if (v.length >= 3) out.add(v);
+  };
+  const addBoth = (value) => {
+    add(value);
+    try { add(decodeURIComponent(String(value ?? ''))); } catch { /* not percent-encoded */ }
+  };
+  const raw = String(url ?? '');
+  try {
+    const parsed = new URL(raw);
+    addBoth(parsed.username);
+    addBoth(parsed.password);
+    for (const value of parsed.searchParams.values()) addBoth(value);
+    // The Basic header curl would send is the base64 of the userinfo: a request with none
+    // contributes nothing here rather than the base64 of a bare colon.
+    if (parsed.username !== '' || parsed.password !== '') {
+      const userinfo = `${parsed.username}:${parsed.password}`;
+      try { add(Buffer.from(decodeURIComponent(userinfo)).toString('base64')); } catch { add(Buffer.from(userinfo).toString('base64')); }
+    }
+  } catch {
+    const userinfo = /\/\/([^/?#\s]*)@/.exec(raw);
+    if (userinfo) addBoth(userinfo[1]);
+    for (const m of raw.matchAll(/[?&][^=&#\s]+=([^&#\s]*)/g)) addBoth(m[1]);
+  }
+  // A credential the request carried in a header is the request's own secret too: the token
+  // the GitHub path sends is never in the URL, so it is taken from the headers by value.
+  for (const [name, value] of Object.entries(headers ?? {})) {
+    if (!/authorization|cookie|token|key|secret/i.test(String(name))) continue;
+    addBoth(value);
+    for (const part of String(value).split(/\s+/)) add(part);
+  }
+  return [...out];
+}
+
+function redactSecrets(text, secrets) {
+  let out = redactBasicCredentials(String(text ?? ''));
+  for (const value of secrets ?? []) out = out.split(value).join('[redacted]');
   for (const shape of SECRET_SHAPES) out = out.replace(shape, '[redacted]');
   return out;
 }
@@ -78,9 +136,12 @@ function requirePositive(value, what) {
 // An HTTP status we obtained ourselves, from a transfer that completed (curl exit
 // 0). Pure and offline-testable. The body snippet is bounded and tag-stripped so a
 // notice cannot become an unbounded server dump.
-export function shapeHttpError(status, body, url, limit) {
+export function shapeHttpError(status, body, url, limit, headers) {
   const source = Buffer.isBuffer(body) ? body : Buffer.from(String(body ?? ''));
-  const snippet = redactSecrets(plainText(decodeBuffer(source), requirePositive(limit, 'the error snippet limit in characters')));
+  const snippet = redactSecrets(
+    plainText(decodeBuffer(source), requirePositive(limit, 'the error snippet limit in characters')),
+    requestSecrets(url, headers),
+  );
   const shaped = new Error(`HTTP ${status} for ${redactUrl(url)}: ${snippet || 'no response body'}`);
   shaped.url = url;
   shaped.httpStatus = Number(status);
@@ -104,7 +165,7 @@ function transportCause(err) {
 // plus the write-out status line, so neither is read as an HTTP status; the cause
 // is curl's own first stderr line, bounded like every other snippet. Pure and
 // offline-testable.
-export function shapeTransportError(err, url, limit) {
+export function shapeTransportError(err, url, limit, headers) {
   const bound = requirePositive(limit, 'the error snippet limit in characters');
   const stderr = String(err?.stderr ?? '').trim();
   const first = stderr.split('\n').map((line) => line.trim()).filter(Boolean)[0] ?? '';
@@ -114,7 +175,7 @@ export function shapeTransportError(err, url, limit) {
   // carries instead, which tells a missing dependency from an unreachable feed: curl's own
   // process exit status when it ran, and the spawn's error code when it never started.
   const cause = capped || transportCause(err);
-  const shaped = new Error(`request failed for ${redactUrl(url)}: ${redactSecrets(cause)}`);
+  const shaped = new Error(`request failed for ${redactUrl(url)}: ${redactSecrets(cause, requestSecrets(url, headers))}`);
   // No cause line of its own means curl never produced a diagnostic: the caller can tell a
   // broken dependency from a source that answered.
   shaped.noDiagnostic = capped === '';
@@ -139,12 +200,12 @@ function curlBuffer(url, ms, headers = {}, ua = DEFAULT_UA, snippetLimit) {
     // configuration value here would only let a typo take the run down.
     raw = execFileSync('curl', args, { stdio: ['ignore', 'pipe', 'pipe'], maxBuffer: 64 * 1024 * 1024 });
   } catch (err) {
-    throw shapeTransportError(err, url, snippetLimit);
+    throw shapeTransportError(err, url, snippetLimit, headers);
   }
   const { body, status } = splitCurlOutput(raw);
   // curl completed the exchange (exit 0) and the server answered 4xx/5xx: the only
   // case where a status is ours to report.
-  if (status >= 400) throw shapeHttpError(status, body, url, snippetLimit);
+  if (status >= 400) throw shapeHttpError(status, body, url, snippetLimit, headers);
   return body;
 }
 
@@ -235,14 +296,29 @@ const MARKER_OPENER = /\[(?:src|alt|prov):/gi;
 // The hash is replaced by a space rather than deleted: a title that merely spells '#new' is
 // still prose, and 'C#new' must not fuse into one word.
 const STATUS_FLAG = /#(?=(?:new|followup|developing|watch)\b)/gi;
+// The renderer draws emphasis from '**like this**', so the bold marker is the same class of
+// trusted vocabulary as a citation and a status token: upstream text that spells it drew real
+// emphasis into a published card. Both asterisks become a space, so the words keep their
+// separation and no emphasis is drawn.
+const BOLD = /\*\*/g;
 
-export function plainText(raw, limit) {
-  const bound = requirePositive(limit, 'the character limit');
-  const text = decodeEntities(String(raw).replace(/<[^>]*>/g, ' '))
-    .replace(CONTROLS, (ch) => (/\s/.test(ch) ? ' ' : ''))
+// The vocabulary the renderer trusts, as one step with one contract: upstream text must not
+// draw a badge, a status tag or emphasis on a published card. A candidate field is normalised
+// with this, and so is every notice - a notice is published text in the coverage note.
+export function neutraliseMarkers(text) {
+  return String(text)
     .replace(MARKER, ' $1 $2 ')
     .replace(MARKER_OPENER, ' ')
     .replace(STATUS_FLAG, ' ')
+    .replace(BOLD, ' ');
+}
+
+export function plainText(raw, limit) {
+  const bound = requirePositive(limit, 'the character limit');
+  const text = neutraliseMarkers(
+    decodeEntities(String(raw).replace(/<[^>]*>/g, ' '))
+      .replace(CONTROLS, (ch) => (/\s/.test(ch) ? ' ' : '')),
+  )
     .replace(/\s+/g, ' ').trim();
   return text.length > bound ? text.slice(0, bound) : text;
 }

@@ -344,3 +344,28 @@ test('a curl that cannot be started is reported by cause, not as a generic failu
   rmSync(d, { recursive: true, force: true });
 });
 
+// Regression test: redactUrl cleaned the request the notice prints, but the notice also
+// quotes a bounded snippet of the server's own body, and the redactor that shaped it knew
+// only Bearer, authorization:-prefixed, gh*_ and github_pat_ shapes. An upstream that
+// echoes the request in its error page - "auth=Basic <base64 of user:password>" and the
+// query token again in the body - put the operator's feed credential in the pool, on
+// stdout and in the published digest. The request's own values must be removed from the
+// snippet it echoes, and the Basic shape must be recognised. The literals below are
+// assembled from fragments so this file never carries a credential-shaped string.
+test('shapeHttpError removes the request credential a server body echoes back', () => {
+  const user = 'feed' + 'user';
+  const password = 's3cret' + '-PASSVALUE';
+  const token = 'echo' + '-TOKENVALUE1234';
+  const url = 'http://' + user + ':' + password + '@feed.example/echo?token=' + token;
+  const basic = Buffer.from(user + ':' + password).toString('base64');
+  assert.equal(Buffer.from(basic, 'base64').toString(), user + ':' + password,
+    'the fixture really encodes the request credential');
+  const body = 'denied: echo token=' + token + ' auth=Basic ' + basic;
+  const shaped = shapeHttpError(500, Buffer.from(body), url, 200);
+  assert.match(shaped.message, /^HTTP 500 for http:\/\/feed\.example\/echo: /,
+    'the notice still names the request it reports');
+  assert.equal(shaped.message.includes(token), false, 'the echoed token must not survive: ' + shaped.message);
+  assert.equal(shaped.message.includes(basic), false, 'the Basic value must not survive: ' + shaped.message);
+  assert.equal(shaped.message.includes(password), false, 'the password must not survive: ' + shaped.message);
+});
+
