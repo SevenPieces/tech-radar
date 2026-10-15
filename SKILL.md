@@ -147,7 +147,8 @@ than a guarantee.
 **Know a notice's redaction boundary.** A URL in a notice keeps its scheme, host and path and loses its userinfo and
 its whole query string, so a secret embedded in a path survives redaction and reaches the notice and the candidate's
 published `source`. The text a notice quotes is scrubbed by value, and there a parameter name does tell a credential
-from a benign one: the request's userinfo is removed however short it is, and the value of a parameter whose name is
+from a benign one: the request's userinfo password is removed whatever its length while a username of under eight
+characters is not, and the value of a parameter whose name is
 credential-shaped (a name carrying a stem such as `token`, `key`, `secret` or `auth`, however it is spelled) from
 three characters up. Nothing else the request put in its URL is removed — a value under a benign parameter name is
 kept however long it is, so the notice keeps its own wording — and a server's echo in a spelling none of that covers

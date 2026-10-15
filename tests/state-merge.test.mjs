@@ -8,6 +8,7 @@ import { spawn, spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import { emptyState, mergeRun, storyKey, normalizeTitle, normalizeRunDate, findRecordedRun, main } from '../scripts/update-state.mjs';
 import { SKILL_ROOT } from './lib/shipped-files.mjs';
+import { shellAvailable } from './lib/commands.mjs';
 
 const config = {
   domains: [
@@ -860,7 +861,14 @@ test('malformed state entries are refused with a named message and no rewrite', 
 // left a partially written <out>.tmp behind, and no later run ever reclaimed it. The
 // module's own contract is that the temp this process created is removed on every failure
 // path, which is how the pool and deliverable writers already behave.
-test('a state write that fails mid-write leaves no temp beside the state', () => {
+test('a state write that fails mid-write leaves no temp beside the state', (t) => {
+  // The failure is imposed by a shell's own file-size limit, so the case can only run where a
+  // shell starts. Without one there is no way to make the write fail after the temp exists,
+  // and the skip names that rather than reporting a failure the case never reached.
+  if (!shellAvailable()) {
+    t.skip('sh is not on PATH, so a mid-write failure cannot be imposed');
+    return;
+  }
   const dir = mkdtempSync(join(tmpdir(), 'tech-radar-temp-'));
   try {
     const f = updateFixture(dir);

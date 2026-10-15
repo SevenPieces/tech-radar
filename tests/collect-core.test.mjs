@@ -11,6 +11,7 @@ import {
   parseArgs, collectAll, sortCandidates, resolveOut, windowStart, resolveTimeout, noticeWarning, humanSummary, main,
 } from '../scripts/collect.mjs';
 import { shapeHttpError } from '../scripts/lib/net.mjs';
+import { curlAvailable } from './lib/commands.mjs';
 
 const FIXTURE_CONFIG = fileURLToPath(new URL('./fixtures/config/', import.meta.url));
 const SKILL_CONFIG = fileURLToPath(new URL('../config/', import.meta.url));
@@ -235,32 +236,44 @@ test('noticeWarning names the count and the Coverage-note contract in one line',
     "collect: 52 source notices (GitHub rate limit and others) — the digest's Coverage note must report them; Collector notices: 52");
 });
 
-test('a degraded pool writes one stderr line and leaves stdout byte-identical', () => {
+test('a degraded pool writes one stderr line and leaves stdout byte-identical', (t) => {
   const dir = mkdtempSync(join(tmpdir(), 'tech-radar-notices-'));
-  const cfg = join(dir, 'config');
-  const out = join(dir, '.pool.json');
-  mkdirSync(cfg, { recursive: true });
-  for (const f of ['domains.md', 'settings.md', 'sources.md']) {
-    copyFileSync(join(SKILL_CONFIG, f), join(cfg, f));
-  }
-  // One row that cannot be reached on loopback, so the run is offline and degraded.
-  writeFileSync(join(cfg, 'watchlist.md'), [
-    '| kind | target | domain | note |',
-    '|---|---|---|---|',
-    '| rss | http://127.0.0.1:1/feed.xml | ai-llm | deliberately unreachable |',
-  ].join('\n') + '\n');
+  try {
+    const cfg = join(dir, 'config');
+    const out = join(dir, '.pool.json');
+    mkdirSync(cfg, { recursive: true });
+    for (const f of ['domains.md', 'settings.md', 'sources.md']) {
+      copyFileSync(join(SKILL_CONFIG, f), join(cfg, f));
+    }
+    // One row that cannot be reached on loopback, so the run is offline and degraded.
+    writeFileSync(join(cfg, 'watchlist.md'), [
+      '| kind | target | domain | note |',
+      '|---|---|---|---|',
+      '| rss | http://127.0.0.1:1/feed.xml | ai-llm | deliberately unreachable |',
+    ].join('\n') + '\n');
 
-  const cli = fileURLToPath(new URL('../scripts/collect.mjs', import.meta.url));
-  const res = spawnSync(process.execPath, [cli, '--config', cfg, '--out', out, '--timeout', '2000'], { encoding: 'utf8' });
-  assert.equal(res.status, 3, 'every source failed: the documented exit for that case');
-  const lines = res.stderr.split('\n').filter((l) => l !== '');
-  assert.equal(lines.length, 1, 'exactly one line on stderr');
-  assert.equal(lines[0],
-    "collect: 1 source notice (GitHub rate limit and others) — the digest's Coverage note must report them; Collector notices: 1");
-  const pool = JSON.parse(res.stdout);
-  assert.equal(pool.notices.length, 1, 'the count in the line is the pool count');
-  assert.equal(res.stdout, readFileSync(out, 'utf8'), 'stdout is unchanged: exactly the pool file');
-  rmSync(dir, { recursive: true, force: true });
+    const cli = fileURLToPath(new URL('../scripts/collect.mjs', import.meta.url));
+    const res = spawnSync(process.execPath, [cli, '--config', cfg, '--out', out, '--timeout', '2000'], { encoding: 'utf8' });
+    assert.equal(res.status, 3, 'every source failed: the documented exit for that case');
+    const lines = res.stderr.split('\n').filter((l) => l !== '');
+    assert.equal(lines.length, 1, 'exactly one line on stderr');
+    const pool = JSON.parse(res.stdout);
+    assert.equal(pool.notices.length, 1, 'the count in the line is the pool count');
+    assert.equal(res.stdout, readFileSync(out, 'utf8'), 'stdout is unchanged: exactly the pool file');
+    // The exact line repeats the cause of the one transport failure that produced no
+    // diagnostic of its own. A failed connection on loopback is one curl reports itself, so
+    // the line is the bare warning; where curl cannot be started the notice names the missing
+    // binary and the line carries that cause instead, which is the other case's subject. The
+    // structure above -- one line, one notice, byte-identical stdout -- is asserted either way.
+    if (!curlAvailable()) {
+      t.skip('curl is not on PATH, so the failed transport carries the missing-binary cause');
+      return;
+    }
+    assert.equal(lines[0],
+      "collect: 1 source notice (GitHub rate limit and others) — the digest's Coverage note must report them; Collector notices: 1");
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
 });
 
 test('a clean pool writes nothing to stderr', () => {

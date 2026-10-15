@@ -318,6 +318,14 @@ to notices instead of throwing and still exits 0. The practical consequence is t
 the same hour loses most of its GitHub sources, and the remedy is the optional `GITHUB_TOKEN` — the
 operator's choice, not a change to the registry.
 
+**The `/rate_limit` reading is advisory, not this run's own budget.** The probe reports the allowance of the
+address the run leaves from, so on a shared egress it can report `used 0, remaining 60` while that address is
+already being charged and the API is refusing requests from it. The probe date shows the two readings side by
+side: `GET /rate_limit` reported `used 0, remaining 60` immediately before the second full run, yet the first
+full run of the same date met `HTTP 403` bodies reading `API rate limit exceeded`. A healthy
+reading therefore does not mean the run will be served — the first refused response is the fact that settles
+the budget, and it is what a run has to report.
+
 Two further facts, both verified on the probe date:
 
 - The HTML pages the registry rows cite — `github.com/opencv/opencv/releases`,

@@ -6,7 +6,8 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
-import { decodeBuffer, decodeEntities, field, atomLink, splitItems, neutraliseMarkers, plainText, isDiscoveryOnly, hostOf, shapeHttpError, shapeTransportError, splitCurlOutput, redactUrl, fetchText, neutraliseUrl, requestSecrets, redactSecrets } from '../scripts/lib/net.mjs';
+import { decodeBuffer, decodeEntities, field, atomLink, splitItems, neutraliseMarkers, plainText, isDiscoveryOnly, hostOf, shapeHttpError, shapeTransportError, splitCurlOutput, redactUrl, fetchText, neutraliseUrl, requestSecrets, redactSecrets, neutraliseEntityTags } from '../scripts/lib/net.mjs';
+import { curlAvailable } from './lib/commands.mjs';
 
 test('decodeBuffer passes UTF-8 through', () => {
   assert.equal(decodeBuffer(Buffer.from('中文 test', 'utf8')), '中文 test');
@@ -79,6 +80,64 @@ test('plainText drops C0, DEL and C1 controls instead of passing them through', 
 test('plainText still bounds a body that is all control bytes', () => {
   assert.equal(plainText('\u001b'.repeat(500), 10), '');
   assert.ok(plainText('x\u0000'.repeat(300), 10).length <= 10);
+});
+
+// Regression test: the literal tag strip ran before the entities were decoded, so text that
+// carried an encoded tag decoded into live markup only after the strip had gone past it - the
+// one candidate path where upstream bytes reach the normaliser undecoded. The encoded opener is
+// refused by the same rule the notice push draws, so the two boundaries cannot disagree, while
+// ordinary entity text and a comparison keep the bytes they had.
+test('plainText refuses an entity-encoded tag and leaves ordinary entity text alone', () => {
+  const encoded = [
+    '&lt;a href=https://evil.example/pwn&gt;click&lt;/a&gt;',
+    '&lt;img src=https://evil.example/a.png&gt;',
+    '&lt;script&gt;alert(1)&lt;/script&gt;',
+  ];
+  for (const text of encoded) {
+    const out = plainText(text, 400);
+    assert.doesNotMatch(out, /<[A-Za-z/!]/, 'an encoded tag decoded into the pool: ' + out);
+    assert.doesNotMatch(out, /&(?:lt|#0*60|#x0*3c)/i, 'the encoded opener survived: ' + out);
+  }
+  assert.equal(plainText('fish &amp; chips &lt; 3', 400), 'fish & chips < 3',
+    'ordinary entity text is decoded exactly as before');
+  assert.equal(plainText('a < b', 400), 'a < b', 'a literal comparison stays byte-identical');
+});
+
+// The spellings the one rule reads: named, decimal and hexadecimal, any case, with or without
+// the semicolon. A reference with no semicolon ends only at its own terminator, so a longer
+// reference is not mistaken for a '<' ('&#x3cb;' is the code point U+03CB), and a reference that
+// no tag name, closer or declaration follows is returned byte-identical. The named spelling is
+// read by the same text-context rule as the numeric ones (TR-124): '&lt' with no semicolon is
+// refused as soon as a tag name follows it, so '&ltscript&gt;' and '&lta href=x&gt;' are read as
+// the tags they spell rather than passed through as text.
+test('neutraliseEntityTags reads every spelling of an encoded opener', () => {
+  for (const opener of ['&lt;', '&LT;', '&Lt;', '&#60;', '&#060;', '&#x3c;', '&#X3C;', '&#x03c;']) {
+    const out = neutraliseEntityTags(opener + 'script&gt;');
+    assert.doesNotMatch(out, /&(?:lt|#0*60|#x0*3c)/i, opener + ' survived: ' + out);
+    assert.match(out, /script&gt;/, opener + ': the name and the rest stay legible: ' + out);
+  }
+  for (const opener of ['&lt/', '&lt', '&LT', '&Lt', '&#60/', '&#60', '&#x3c/', '&#x3c']) {
+    const out = neutraliseEntityTags(opener + 'script&gt;');
+    assert.doesNotMatch(out, /&(?:lt|#0*60|#x0*3c)/i,
+      opener + ' without a semicolon survived: ' + out);
+  }
+  // A tag name after the opener is the shape that makes it a tag, semicolon or not: a reader
+  // draws '<a href=x>' out of '&lta href=x&gt;' and '<a x>' out of '&lta x&gt;', in either case.
+  for (const [opens, legible] of [
+    ['&lta href=x&gt;', /href=x&gt;/],
+    ['&LTa href=x&gt;', /href=x&gt;/],
+    ['&lta x&gt;', /a x&gt;/],
+    ['&LTa x&gt;', /a x&gt;/],
+  ]) {
+    const out = neutraliseEntityTags(opens);
+    assert.doesNotMatch(out, /&lt/i, opens + ' survived: ' + out);
+    assert.match(out, legible, opens + ': the rest stays legible: ' + out);
+  }
+  for (const kept of ['fish &amp; chips', 'a &lt; b', '&lt; b', 'x &lt;3', '&#x3cb; code point',
+    'the answer is &lt; 10']) {
+    assert.equal(neutraliseEntityTags(kept), kept,
+      'text that opens no tag stays byte-identical: ' + kept);
+  }
 });
 
 test('isDiscoveryOnly matches hosts and their subdomains', () => {
@@ -156,6 +215,13 @@ test('shapeTransportError reads the real execFileSync failure shape as a transpo
 });
 
 test('the real transport pins a failed loopback fetch to a transport failure, never an HTTP status', async (t) => {
+  // The fetch this case pins is curl's, so the case can only run where curl starts. A machine
+  // without it has no transport to test, and the skip names that rather than reporting a
+  // failure the case never reached; where curl is present the whole case runs, unskipped.
+  if (!curlAvailable()) {
+    t.skip('curl is not on PATH, so the real transport cannot be attempted');
+    return;
+  }
   // Loopback to a closed port: offline-safe, never leaves the host. The cause is
   // deliberately not pinned to one curl code, because the same fetch is refused
   // (7) with a direct connection and times out (28) behind a proxy that accepts

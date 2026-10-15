@@ -641,10 +641,90 @@ export function neutraliseUrl(url) {
   return out;
 }
 
+// The tag shape itself, as one rule with one contract: a '<' that opens a markup tag has a tag
+// name or a closer slash or a declaration marker immediately after it, so '<a href=x>', '</a>',
+// '<img src=x>' and '<!DOCTYPE html>' are tag-shaped while an ordinary comparison is not. The
+// name may run on to any '>' on the same span, which is what makes the rule reach the tags that
+// carry no '>' of their own ('<script' cut off by a length bound or a hostile body). One rule is
+// shared because the same text crosses two boundaries -- a candidate field and the notice push --
+// and a second spelling of the shape would let one boundary drift from the other (TR-122). Every
+// span is read, not the first: a message carrying a live anchor and a live closer after it is a
+// message carrying two tags, and the second one is markup whether or not the first was.
+const TAG_SHAPE = '<\\/[A-Za-z][\\w:.-]*\\s*>|<![^<>]*>|<[A-Za-z][\\w:.-]*[^<>]*>';
+export const TAG_SPAN = new RegExp(TAG_SHAPE);
+const TAG_SPANS = new RegExp(TAG_SHAPE, 'g');
+
+// The bare names that are markup rather than an ordinary angle-bracketed word. A span carrying an
+// attribute list, a closer or a declaration is markup whatever its name is; a span that is only a
+// word in brackets is markup only when the word is one of these, and 'see <id>' or '<apiVersion>'
+// in a server's own wording is a comparison the reader must still be able to read (TR-122). The
+// list is the vocabulary a reader -- and a Markdown renderer that passes raw HTML through -- draws
+// an element from.
+const TAG_NAMES = new Set([
+  'a', 'abbr', 'address', 'area', 'article', 'aside', 'audio', 'base', 'b', 'basefont',
+  'bdi', 'bdo', 'blockquote', 'body', 'br', 'button', 'canvas', 'caption', 'center', 'cite',
+  'code', 'col', 'colgroup', 'data', 'datalist', 'dd', 'del', 'details', 'dfn', 'dialog',
+  'div', 'dl', 'dt', 'em', 'embed', 'fieldset', 'figcaption', 'figure', 'font', 'footer',
+  'form', 'frame', 'frameset', 'h1', 'h2', 'h3', 'h4', 'h5', 'h6', 'head', 'header', 'hgroup',
+  'hr', 'html', 'i', 'iframe', 'img', 'input', 'ins', 'kbd', 'label', 'legend', 'li', 'link',
+  'main', 'map', 'mark', 'marquee', 'menu', 'meta', 'meter', 'nav', 'noframes', 'noscript',
+  'object', 'ol', 'optgroup', 'option', 'output', 'p', 'param', 'picture', 'plaintext', 'pre',
+  'progress', 'q', 'rb', 'rp', 'rt', 'rtc', 'ruby', 's', 'samp', 'script', 'search', 'section',
+  'select', 'slot', 'small', 'source', 'span', 'strike', 'strong', 'style', 'sub', 'summary',
+  'sup', 'svg', 'table', 'tbody', 'td', 'template', 'textarea', 'tfoot', 'th', 'thead', 'time',
+  'title', 'tr', 'track', 'tt', 'u', 'ul', 'var', 'video', 'wbr',
+]);
+
+// Whether a '<...>' span is tag-shaped. An attribute list is what tells '<a href=x>' from the
+// ordinary '<a>' a comparison can spell, so a bare name needs the markup vocabulary above; every
+// other shape -- a closer, a declaration, an opener with attributes or a self-closing slash -- is
+// markup on its own.
+function isTagSpan(span) {
+  const body = span.slice(1, -1);
+  if (body.startsWith('/') || body.startsWith('!')) return true;
+  if (/^[A-Za-z][\w:.-]*$/.test(body)) return TAG_NAMES.has(body.toLowerCase());
+  const name = /^[A-Za-z][\w:.-]*/.exec(body);
+  return name !== null && (body[name[0].length] === '/' || /\s/.test(body[name[0].length] ?? ''));
+}
+
+// The tag shape with no markup left behind: the '<' becomes a space and the rest of the span
+// stays, so the text is still legible -- 'a href=x>click /a>' reads as the rejected answer it
+// was -- while no reader, a Markdown renderer included, can draw an element from it. Only a span
+// the shape rule reads as markup is touched, so an ordinary comparison a server's own message
+// carries ('a < b', 'see <id>') is returned byte-identical. The candidate normaliser keeps its
+// own, wider tag strip -- it drops the whole span, because a candidate is prose rather than a
+// notice quoted from a server -- and this rule is the one the notice push draws, so a value that
+// crosses both boundaries is read the same way by both (TR-122).
+export function neutraliseTagSpans(raw) {
+  return String(raw).replace(TAG_SPANS, (m) => (isTagSpan(m) ? ' ' + m.slice(1) : m));
+}
+
+// The tag shape has a second spelling: an entity reference to '<'. The literal rule above cannot
+// read it, and the two boundaries decode at different points -- the candidate normaliser decodes
+// after its own literal strip, so a decoded opener arrives too late to be stripped, while the
+// notice push never decodes at all, so an encoded anchor is published for the reader to decode --
+// so the encoded opener is refused by one rule that both boundaries draw (TR-123). The reference
+// is read the way a reader reads it: case is free, and the semicolon is optional for every
+// spelling alike. A reference with no semicolon ends only at its own terminator, so a longer
+// reference is a different character and is not mistaken for a '<' ('&#x3cb;' is the code point
+// U+03CB). The terminator rule belongs to the text context, which is the one a reader applies
+// here: '&lt' without its semicolon is the '<' whenever no longer name extends it, and only the
+// attribute context would hold it literal before an alphanumeric -- so '&ltscript&gt;' and
+// '&lta href=x&gt;' spell '<script>' and '<a href=x>' and are refused exactly as '&#60script' is,
+// while '&lt a href=x&gt;', where the reference ends at the space, is not an opener at all. What
+// follows the reference must be the shape that makes it a tag: a name, a closer slash or a
+// declaration marker. Everything else is returned byte-identical, so a comparison ('a &lt; b',
+// 'x &lt;3') and ordinary entity text ('&amp;') keep the bytes they had.
+const ENTITY_LT = /&(?:lt;|lt|#0*60;|#0*60(?![0-9])|#x0*3c;|#x0*3c(?![0-9A-Fa-f]))(?=\/?[A-Za-z]|!)/gi;
+
+export function neutraliseEntityTags(raw) {
+  return String(raw).replace(ENTITY_LT, ' ');
+}
+
 export function plainText(raw, limit) {
   const bound = requirePositive(limit, 'the character limit');
   const text = neutraliseMarkers(
-    decodeEntities(String(raw).replace(/<[^>]*>/g, ' '))
+    decodeEntities(neutraliseEntityTags(String(raw)).replace(/<[^>]*>/g, ' '))
       .replace(CONTROLS, (ch) => (/\s/.test(ch) ? ' ' : '')),
   )
     .replace(/\s+/g, ' ').trim();

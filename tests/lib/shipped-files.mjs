@@ -6,9 +6,10 @@
 //
 // The publication rule belongs to the repository, not to this file: .gitignore states that
 // docs/ ships only its design, and the suite's sibling test asserts exactly that. The walk
-// applies the stated rule from the tree, and when git can answer it also drops every other
-// path the repository ignores -- a run's own pools, digests and scratch trees are machine
-// artifacts, so a guard over the published skill must not read them.
+// applies the stated rule from the tree, at every docs/ it meets, so a tree carrying a nested
+// copy of this layout is read by the rule that copy states for itself; and when git can answer
+// the walk also drops every other path the repository ignores -- a run's own pools, digests and
+// scratch trees are machine artifacts, so a guard over the published skill must not read them.
 import { lstatSync, readdirSync, statSync } from 'node:fs';
 import { spawnSync } from 'node:child_process';
 import { dirname, join, relative } from 'node:path';
@@ -20,24 +21,32 @@ export const SKILL_ROOT = join(dirname(fileURLToPath(import.meta.url)), '..', '.
 // out a name the guards forbid.
 export const WORKING_NAMES = ['implementation' + '-plan', 'build' + '-plan', 'baseline' + '-failures',
   'implementation' + '-report', 'verification' + '-report'];
-export const WORKING_FILES = WORKING_NAMES.map((name) => 'docs/' + name + '.md')
-  .concat(['docs/verification' + '-report.html']);
 
-// The rule .gitignore states, applied from the tree itself: everything under docs/ is
-// working material except the design document the reader receives.
+// The rule .gitignore states, applied from the tree itself: a docs/ directory ships only the
+// design document that sits directly inside it. A tree carrying a nested copy of this layout
+// states the same rule in its own .gitignore, so the rule is read at every docs/ in the tree
+// and not only at its root. That is what keeps the fallback -- the answer the walk gives when
+// git cannot be asked -- in agreement with the answer git gives for the same layout: git reads
+// the nested copy's own rule, and the fallback now reads it too.
+function designOf(rel) {
+  const parts = rel.split('/');
+  const at = parts.indexOf('docs');
+  return at === -1 ? null : parts.slice(0, at + 1).join('/') + '/design.md';
+}
+
 function isWorkingDoc(rel) {
-  if (rel === 'docs' || rel.startsWith('docs/')) return rel !== 'docs/design.md';
-  return WORKING_FILES.includes(rel);
+  const design = designOf(rel);
+  return design !== null && rel !== design;
 }
 
 // Whether a directory can hold a shipped path, decided from its name alone. Only the name is
 // read here, and the walk has already read the entry's kind by the time it asks: an entry that
 // cannot ship is still stat'ed, and this rule is what then keeps the walk from descending into
-// such a directory and keeps a working file from reaching a guard. docs/ itself stays walkable
-// because the one document it ships (docs/design.md) sits directly under it; everything below
-// it is a working document and cannot hold a shipped file.
+// such a directory and keeps a working file from reaching a guard. A docs/ directory at any
+// depth stays walkable because the one document it ships sits directly under it; everything
+// below it is a working document and cannot hold a shipped file.
 function canHoldShipped(rel) {
-  if (rel === 'docs') return true;
+  if (rel.split('/').pop() === 'docs') return true;
   return !isWorkingDoc(rel);
 }
 

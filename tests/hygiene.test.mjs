@@ -113,6 +113,26 @@ test('the shipping scan judges the shipping set, not the working tree', () => {
       'a shipped file naming the build process is still caught');
     assert.deepEqual(scan(dir, SECRET, 'carries'), ['tests/helper.mjs carries a GitHub token'],
       'a shipped file carrying a credential shape is still caught');
+    // A tree can carry a nested copy of this layout, and that copy states the publication rule
+    // in its own .gitignore -- which is the rule git reads when it answers for such a tree. The
+    // walk's fallback applied the rule only at the root, so the copy's working material entered
+    // the shipping set and both scans above went red over paths the reader never receives. The
+    // stated rule is read at every docs/ in the tree now, so the fallback agrees with git's own
+    // answer for the same layout instead of reporting the copy's scratch work as unpublished.
+    const nested = join(dir, 'nested-copy');
+    mkdirSync(join(nested, 'docs'), { recursive: true });
+    writeFileSync(join(nested, '.gitignore'), readFileSync(join(SKILL_ROOT, '.gitignore')));
+    writeFileSync(join(nested, 'docs', 'design.md'), '# the specification\n');
+    writeFileSync(join(nested, 'docs', 'working-notes.md'), processLeak + secretLeak);
+    const walked = shippedFiles(dir);
+    assert.equal(walked.includes('nested-copy/docs/design.md'), true,
+      'a nested copy of this layout ships the document its own docs/ publishes');
+    assert.equal(walked.includes('nested-copy/docs/working-notes.md'), false,
+      "a nested copy's working material never enters the shipping set");
+    assert.deepEqual(scan(dir, PROCESS, 'names'), ['config/settings.md names a build task number'],
+      "a nested copy's working material never reaches the build-process guard");
+    assert.deepEqual(scan(dir, SECRET, 'carries'), ['tests/helper.mjs carries a GitHub token'],
+      "a nested copy's credential shape never reaches the credential guard");
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }

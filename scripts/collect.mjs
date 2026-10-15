@@ -15,7 +15,7 @@ import { readConfig } from './lib/mdtable.mjs';
 import {
   fetchText, hostOf, isDiscoveryOnly, splitItems, field, atomLink, plainText, redactUrl,
   neutraliseMarkers, neutraliseLinkSeams, neutraliseUrl, redactSecrets, requestSecrets,
-  requestSecretSets,
+  requestSecretSets, neutraliseTagSpans, neutraliseEntityTags,
 } from './lib/net.mjs';
 
 // The collector must work from any working directory, so the default configuration
@@ -44,12 +44,26 @@ const GITHUB_API = 'https://api.github.com';
 const NOTICE_CONTROLS = /[\u0000-\u001f\u007f-\u009f]/g;
 const NOTICE_MAX_CHARS = 1000;
 function sanitizeNotice(text) {
+  // The tag shape is the one class a notice cannot carry: a notice is published verbatim in the
+  // Coverage note, and a Markdown reader draws a live anchor or fetches a remote image from
+  // upstream markup that reached the text. It is neutralised here, at the one push every notice
+  // crosses, whatever built the notice -- a transport shaper, a caller's own wording, or a thrown
+  // message that quotes a server answer -- because the per-site normalisation above is a property
+  // of two callers rather than of the boundary. The '<' opens the tag, so replacing exactly it
+  // ends the markup while the rest of the span stays legible, and only a span the shape rule
+  // reads is touched: a legitimate server message that says 'a < b' or 'see <id>' is returned
+  // byte-identical. The encoded spelling of the same opener is the second half of the class: a
+  // notice is never decoded, so '&lt;a href=...&gt;' was published as the anchor it spells.
+  // neutraliseEntityTags refuses that spelling before the literal rule runs, and both rules are
+  // the ones the candidate normaliser draws too, so the two boundaries cannot drift apart
+  // (TR-122, TR-123).
+  const spaced = neutraliseTagSpans(neutraliseEntityTags(
+    String(text).replace(NOTICE_CONTROLS, (ch) => (/\s/.test(ch) ? ' ' : '')),
+  ));
   // The markdown link seam belongs to this path and not to the neutraliser a candidate field
   // uses: a notice is published verbatim in the Coverage note, while a release body's links are
   // ordinary Markdown that the pool has to keep.
-  return neutraliseLinkSeams(neutraliseMarkers(
-    String(text).replace(NOTICE_CONTROLS, (ch) => (/\s/.test(ch) ? ' ' : '')),
-  )).slice(0, NOTICE_MAX_CHARS);
+  return neutraliseLinkSeams(neutraliseMarkers(spaced)).slice(0, NOTICE_MAX_CHARS);
 }
 function pushNotice(notices, text, secrets) {
   notices.push(sanitizeNotice(redactSecrets(text, secrets)));

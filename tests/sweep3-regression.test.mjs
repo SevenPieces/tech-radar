@@ -1,14 +1,15 @@
 // tests/sweep3-regression.test.mjs
-// Independent regression tests for TR-115..TR-119, the five redaction and notice regressions
-// the third adversarial sweep recorded against fdfb7ea. Each case pins both directions of its
-// rule: what must still be protected, and what must not be damaged. The cases drive the seams
-// the sweep named - requestSecretSets/requestSecrets/redactSecrets, the collector's candidate
-// pass, and the two notice sites that interpolate an upstream value - not a private helper, so
-// a fix that only moves the symptom does not satisfy them.
+// Independent regression tests for TR-115..TR-119 and TR-122: the redaction and notice
+// regressions the third adversarial sweep recorded against fdfb7ea, and the notice-push residual
+// its tag-shaped-value fix left behind. Each case pins both directions of its rule: what must
+// still be protected, and what must not be damaged. The cases drive the seams the sweep named -
+// requestSecretSets/requestSecrets/redactSecrets, the collector's candidate pass, the two notice
+// sites that interpolate an upstream value, and the single push every notice crosses - not a
+// private helper, so a fix that only moves the symptom does not satisfy them.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { collectAdvisories, collectAll, collectRegistries } from '../scripts/collect.mjs';
-import { redactSecrets, requestSecrets, requestSecretSets, shapeHttpError } from '../scripts/lib/net.mjs';
+import { collectAdvisories, collectAll, collectGithub, collectRegistries } from '../scripts/collect.mjs';
+import { decodeEntities, plainText, redactSecrets, requestSecrets, requestSecretSets, shapeHttpError } from '../scripts/lib/net.mjs';
 
 // The percent-encoded spelling of a name, one escape per character: this is the spelling the
 // server reads as the same parameter, so the name rule has to test the decoded form as well.
@@ -266,4 +267,280 @@ test('TR-119 a legitimate upstream message still reads in the notice', async () 
   assert.equal(registries.notices.length, 1);
   assert.match(registries.notices[0], /no release time for 1\.2\.3; candidate skipped/,
     'a legitimate version still reads in the notice: ' + registries.notices[0]);
+});
+
+// TR-122 regression test: the tag shape is the one upstream spelling a notice cannot carry. A
+// notice is published verbatim in the digest's Coverage note, which ships as Markdown, and a
+// Markdown reader passes inline HTML through: an upstream-chosen <a href> draws a live anchor
+// with an upstream-chosen label and address, an <img src> fetches a remote URL when the file is
+// viewed, and a <script> tag is script. The two sites that interpolate an upstream value were
+// normalised one at a time, but a notice also quotes the message a fetch implementation throws -
+// no call site normalises that text - so the class is only closed at the one push every notice
+// crosses. The push replaces the '<' that opens a tag-shaped span, which ends the markup while
+// the span stays legible.
+const NOTICE_MARKUP = [
+  ['an anchor', '<a href=https://evil.example/pwn>click</a>', /click/],
+  ['an image', '<img src=https://evil.example/a.png>', /a\.png/],
+  ['a script tag', '<script>alert(1)</script>', /alert\(1\)/],
+];
+
+// The one rendering rule these cases read a notice through: a Markdown reader passes raw inline
+// HTML through to the rendered document, so the tag a notice carries is the tag the published
+// Coverage note draws. The case pins the reading on the upstream spelling itself, so a reading
+// that drew no tag could not make the markup case pass.
+const MARKDOWN_TAG = /<\s*\/?\s*[A-Za-z][\w:.-]*(?:\s[^<>]*)?>/;
+const renderMarkdown = (text) => String(text);
+
+// A fetch implementation may throw whatever it likes, and every failure is reported through the
+// one push that builds a notice, so the same thrown message is driven through a whole run, a
+// registry row and an advisory row. Nothing between the throw and the push normalises it, which
+// is what makes these cases a test of the boundary rather than of a caller's own tidy-up.
+async function noticesFromThrownFetch(message) {
+  const throwing = (ctx) => ({ ...ctx, net: { fetchText: async () => { throw new Error(message); } } });
+  const run = await collectAll(
+    { settings: RUN_SETTINGS, watchlist: [{ kind: 'rss', target: 'https://feeds.example/rss.xml', domain: 'ai-llm', note: '' }] },
+    {
+      since: '2026-09-16T00:00:00Z', until: '2026-09-23T00:00:00Z',
+      net: { fetchText: async () => { throw new Error(message); } },
+    },
+  );
+  const registries = await collectRegistries(NPM_ROW, throwing(registryContext('1.2.3')));
+  const advisories = await collectAdvisories(NVD_ROW, throwing(advisoryContext('CVE-2026-0001')));
+  return [
+    ['the run', run.notices],
+    ['a registry row', registries.notices],
+    ['an advisory row', advisories.notices],
+  ];
+}
+
+test('TR-122 tag-shaped upstream markup reaches no notice and draws no tag in the Markdown', async () => {
+  for (const [what, span, legible] of NOTICE_MARKUP) {
+    assert.match(renderMarkdown('the upstream answer was ' + span), MARKDOWN_TAG,
+      what + ': the reading draws the upstream spelling as a tag, so the case can mean something');
+    for (const [path, notices] of await noticesFromThrownFetch('the upstream answer was ' + span)) {
+      assert.equal(notices.length, 1,
+        what + ' from ' + path + ': the failure is reported, not swallowed: ' + notices.join(' | '));
+      const notice = notices[0];
+      assert.equal(notice.includes(span), false,
+        what + ' from ' + path + ' reached the notice verbatim: ' + notice);
+      noLiveTag(notice);
+      assert.doesNotMatch(renderMarkdown(notice), MARKDOWN_TAG,
+        what + ' from ' + path + ' draws a tag in the published Markdown: ' + notice);
+      assert.match(notice, legible,
+        what + ' from ' + path + ': the span stays legible: ' + notice);
+      assert.match(notice, /the upstream answer was/,
+        what + ' from ' + path + ': the notice keeps its own wording: ' + notice);
+    }
+  }
+});
+
+test('TR-122 a legitimate server message with an angle bracket still reads in the notice', async () => {
+  const message = 'the server said a < b and see <id> (retry later); see [1] of the log';
+  for (const [path, notices] of await noticesFromThrownFetch(message)) {
+    assert.equal(notices.length, 1, path + ': the failed fetch is reported: ' + notices.join(' | '));
+    const notice = notices[0];
+    assert.match(notice, /a < b/,
+      path + ': an angle-bracket comparison is not a tag and stays byte-identical: ' + notice);
+    assert.match(notice, /\bid\b/,
+      path + ': the bracketed word stays legible: ' + notice);
+    assert.match(notice, /\(retry later\); see \[1\] of the log/,
+      path + ': the punctuation of the message is untouched: ' + notice);
+  }
+});
+
+// TR-123 (fourth-sweep): the tag shape has a second spelling -- the entity -- and it slipped past
+// both boundaries. The candidate normaliser stripped literal tags before it decoded entities, so
+// text that reached it undecoded (a GitHub release body is JSON, not XML: nothing decodes it
+// first) decoded into a live '<a href>' after the strip had gone past it. The notice push never
+// decodes at all, so a thrown message quoting the encoded anchor published it verbatim for the
+// reader to decode. One rule refuses the encoded opener now and both boundaries draw it, so a
+// second spelling cannot let them drift apart.
+const ENCODED_MARKUP = [
+  ['an anchor', '&lt;a href=https://evil.example/pwn&gt;click&lt;/a&gt;', /click/],
+  ['an image', '&lt;img src=https://evil.example/a.png&gt;', /a\.png/],
+  ['a script tag', '&lt;script&gt;alert(1)&lt;/script&gt;', /alert\(1\)/],
+];
+const ENCODED_LT = /&(?:lt|#0*60|#x0*3c)/i;
+
+// The candidate half of the boundary, driven through the collector path that really carries an
+// entity to the normaliser: a release body arrives as JSON text, so its entities are still
+// encoded when plainText reads them.
+async function releaseSummary(body) {
+  const net = {
+    fetchText: async (url) => {
+      if (url.endsWith('/rate_limit')) {
+        return JSON.stringify({ resources: { core: { limit: 60, remaining: 55, reset: 1790177128 } } });
+      }
+      if (url.includes('/releases')) {
+        return JSON.stringify([{
+          tag_name: 'v1.0.0', html_url: 'https://github.com/org/repo/releases/tag/v1.0.0',
+          published_at: '2026-09-21T10:00:00Z', draft: false, body,
+        }]);
+      }
+      throw new Error('unexpected request: ' + url);
+    },
+  };
+  const { candidates } = await collectGithub(
+    [{ kind: 'github-repo', target: 'org/repo', domain: 'ai-llm', note: '' }],
+    {
+      since: '2026-09-16T00:00:00Z', until: '2026-09-23T00:00:00Z', timeout: 5000, net,
+      settings: {
+        ...SOURCE_SETTINGS, user_agent: 'tech-radar/1.0', github_org_repos: 10,
+        github_releases_per_repo: 10, github_tags_per_repo: 5, github_rate_limit_reserve: 0,
+      },
+    },
+  );
+  return candidates[0]?.summary ?? '';
+}
+
+test('TR-123 entity-encoded markup reaches no notice and no candidate field', async () => {
+  for (const [what, encoded, legible] of ENCODED_MARKUP) {
+    // The premise: the collector's own decoder draws the tag out of this spelling, so the case
+    // can mean something and is not pinning an inert string.
+    assert.match(decodeEntities(encoded), MARKDOWN_TAG,
+      what + ': the encoded spelling decodes into a tag');
+    for (const [path, notices] of await noticesFromThrownFetch('the upstream answer was ' + encoded)) {
+      assert.equal(notices.length, 1,
+        what + ' from ' + path + ': the failure is reported, not swallowed: ' + notices.join(' | '));
+      const notice = notices[0];
+      assert.equal(notice.includes(encoded), false,
+        what + ' from ' + path + ' reached the notice verbatim: ' + notice);
+      assert.doesNotMatch(notice, ENCODED_LT,
+        what + ' from ' + path + ' still carries an encoded opener: ' + notice);
+      noLiveTag(notice);
+      assert.doesNotMatch(renderMarkdown(notice), MARKDOWN_TAG,
+        what + ' from ' + path + ' draws a tag in the published Markdown: ' + notice);
+      assert.match(notice, legible, what + ' from ' + path + ': the value stays legible: ' + notice);
+    }
+    const title = await releaseSummary('a title ' + encoded);
+    const summary = await releaseSummary(encoded);
+    for (const [where, value] of [['the title', title], ['the summary', summary]]) {
+      assert.equal(value.includes(encoded), false,
+        what + ' reached ' + where + ' of a candidate verbatim: ' + value);
+      assert.doesNotMatch(value, ENCODED_LT,
+        what + ' reached ' + where + ' of a candidate as an opener: ' + value);
+      noLiveTag(value);
+    }
+  }
+});
+
+test('TR-123 an ordinary entity and a comparison keep their bytes at both boundaries', async () => {
+  const benign = 'the server said a < b and the feed is fish &amp; chips (retry later)';
+  for (const [path, notices] of await noticesFromThrownFetch(benign)) {
+    assert.equal(notices.length, 1, path + ': the failure is reported: ' + notices.join(' | '));
+    const notice = notices[0];
+    assert.equal(notice.includes('a < b'), true,
+      path + ': the comparison stays byte-identical: ' + notice);
+    assert.equal(notice.includes('fish &amp; chips'), true,
+      path + ': the entity text stays byte-identical: ' + notice);
+  }
+  const pool = await poolForOneFeed('https://feeds.example/rss.xml', 'a < b title', 'fish &amp; chips');
+  const feed = pool.candidates.find((c) => String(c.source).startsWith('rss'));
+  assert.ok(feed, 'the feed row still contributes: ' + JSON.stringify(pool.candidates));
+  assert.equal(feed.title, 'a < b title',
+    'the comparison stays byte-identical in the pool: ' + feed.title);
+  assert.equal(feed.summary, 'fish & chips',
+    'the ordinary entity decodes exactly as before: ' + feed.summary);
+});
+
+// TR-123 residual (independent test design): the encoded opener is refused for the semicolon
+// spellings, but the named reference without its semicolon and directly followed by a tag name
+// is passed over. A named reference ends at the longest name that matches, and for '&ltscript'
+// that name is 'lt': the 'script' that follows is the tag name, so a reader that decodes the
+// reference draws '<script>', exactly as it does for '&lt;script&gt;'. The same spelling crosses
+// the candidate normaliser, where the decoded opener arrives after the literal strip. Both
+// boundaries have to refuse '&lt' with or without its semicolon, in any case.
+
+// The reading these cases pin: a reader that decodes a character reference the way the HTML
+// layer under the published deliverable does, and then draws the element the decoded text
+// spells. A named reference in text is decoded without its semicolon too, so every spelling
+// below is read to the same '<'.
+const READER_ENTITY = /&#[xX]([0-9a-fA-F]+);?|&#([0-9]+);?|&(lt|gt|amp|quot|apos|nbsp);?/gi;
+const READER_NAMED = { lt: '<', gt: '>', amp: '&', quot: '"', apos: "'", nbsp: ' ' };
+function readDeliverable(text) {
+  return String(text).replace(READER_ENTITY, (match, hex, dec, named) => {
+    if (hex !== undefined) return String.fromCodePoint(parseInt(hex, 16));
+    if (dec !== undefined) return String.fromCodePoint(Number(dec));
+    return READER_NAMED[named.toLowerCase()];
+  });
+}
+
+// The shape a reader draws from a tag, and the shape an encoded opener still has when a tag
+// name, a closer slash or a declaration marker follows it.
+const DRAWN_TAG = /<[a-zA-Z/!]/;
+const ENCODED_TAG_OPENER = /&(?:lt;?|#0*60;?|#x0*3c;?)(?=\/?[A-Za-z]|!)/i;
+
+// Every spelling of the opener the requirement names: named, decimal and hexadecimal, any case,
+// with and without the semicolon. The hex spelling is decoded without a semicolon only while the
+// next character is not another hex digit, so the tag is 'script' and no case here leans on that
+// ambiguity.
+const ENCODED_TAG_SPELLINGS = [
+  '&lt', '&LT', '&lt;', '&LT;',
+  '&#60', '&#60;',
+  '&#x3c', '&#X3c', '&#x3C', '&#X3C',
+  '&#x3c;', '&#X3c;', '&#x3C;', '&#X3C;',
+];
+const encodedScript = (spelling) => spelling + 'script&gt;alert(1)&lt;/script&gt;';
+const ENCODED_PAYLOADS = ENCODED_TAG_SPELLINGS.map((spelling) => [spelling, encodedScript(spelling)])
+  .concat([
+  ['the anchor', '&lt;a href=https://evil.example/pwn&gt;click&lt;/a&gt;'],
+  ['the anchor without its semicolon', '&lta href=https://evil.example/pwn&gt;click&lt;/a&gt;'],
+  ['the anchor without its semicolon, upper case', '&LTa href=https://evil.example/pwn&gt;click&lt;/a&gt;'],
+]);
+
+test('TR-123 every encoded tag opener is refused at the notice push', async () => {
+  const leaked = [];
+  for (const [spelling, payload] of ENCODED_PAYLOADS) {
+    assert.match(readDeliverable(payload), DRAWN_TAG,
+      spelling + ': the spelling decodes into a tag, so the case can mean something');
+    for (const [path, notices] of await noticesFromThrownFetch('the upstream answer was ' + payload)) {
+      assert.equal(notices.length, 1,
+        spelling + ' from ' + path + ': the failure is reported, not swallowed: ' + notices.join(' | '));
+      const notice = notices[0];
+      if (notice.includes(payload) || ENCODED_TAG_OPENER.test(notice)
+        || DRAWN_TAG.test(readDeliverable(notice))) {
+        leaked.push(spelling + ' from ' + path + ': ' + notice);
+      }
+      assert.match(notice, /the upstream answer was/,
+        spelling + ' from ' + path + ': the notice keeps its own wording: ' + notice);
+    }
+  }
+  assert.deepEqual(leaked, [], 'an encoded tag opener still reaches a notice: ' + leaked.join(' | '));
+});
+
+test('TR-123 every encoded tag opener yields no tag in the pool', async () => {
+  const leaked = [];
+  for (const [spelling, payload] of ENCODED_PAYLOADS) {
+    const text = plainText(payload, 400);
+    if (DRAWN_TAG.test(text) || DRAWN_TAG.test(readDeliverable(text))) {
+      leaked.push(spelling + ' in the candidate normaliser: ' + text);
+    }
+    const summary = await releaseSummary(payload);
+    if (DRAWN_TAG.test(summary) || DRAWN_TAG.test(readDeliverable(summary))) {
+      leaked.push(spelling + ' in a release summary: ' + summary);
+    }
+    const pool = await poolForOneFeed('https://feeds.example/rss.xml', 'Weekly digest', payload);
+    const feed = pool.candidates.find((c) => String(c.source).startsWith('rss'));
+    assert.ok(feed, 'the feed row still contributes: ' + JSON.stringify(pool.candidates));
+    if (DRAWN_TAG.test(feed.summary) || DRAWN_TAG.test(readDeliverable(feed.summary))) {
+      leaked.push(spelling + ' in a feed field: ' + feed.summary);
+    }
+  }
+  assert.deepEqual(leaked, [], 'an encoded tag opener still yields a tag in the pool: ' + leaked.join(' | '));
+});
+
+test('TR-123 ordinary entity text and a literal comparison keep their bytes', async () => {
+  const message = 'the server said a &amp; b and a < b (retry later); see &lt; 3';
+  for (const [path, notices] of await noticesFromThrownFetch(message)) {
+    assert.equal(notices.length, 1, path + ': the failed fetch is reported: ' + notices.join(' | '));
+    const notice = notices[0];
+    assert.equal(notice.includes('a &amp; b'), true,
+      path + ': an ordinary entity was rewritten: ' + notice);
+    assert.equal(notice.includes('a < b'), true,
+      path + ': a literal comparison was rewritten: ' + notice);
+    assert.equal(notice.includes('&lt; 3'), true,
+      path + ': a reference that opens no tag was rewritten: ' + notice);
+  }
+  assert.equal(plainText('a &amp; b and a < b', 400), 'a & b and a < b',
+    'the candidate path rewrote ordinary entity text or a comparison');
 });
