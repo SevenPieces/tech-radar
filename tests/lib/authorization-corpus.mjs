@@ -36,6 +36,17 @@ export const KEYWORDS = [
   'authorization&colon; ',
   'authorization&#x3A; ',
   'authorization\uFF1A',
+  // Batch 72 (closing sweep F34-5). The small colon (U+FE55) and the ratio (U+2236) are two more
+  // characters a typographic surface writes where a header name is joined to its value, and measured,
+  // a credential behind either of them reached the PUBLISHED POOL of the shipped keyless collectors -
+  // not the module surface alone. The two entity-encoded name spellings are the closing sweep's
+  // 'authoriz&#97;tion:' and its leading-letter form: a name character handed over as the character
+  // reference that spells it is read wherever it stands, and the reference has to spell the letter
+  // at its own position.
+  'authorization\uFE55 ',
+  'authorization\u2236 ',
+  'authoriz&#97;tion: ',
+  '&#97;uthorization: ',
 ];
 export const CREDENTIAL_SHAPES = [
   { id: 'bare shaped token', value: TOKEN, gone: [TOKEN] },

@@ -153,13 +153,35 @@ const SECRET_SHAPES = [
 //     that begins 'request failed' is refused below. The last-resort alternatives are therefore after
 //     the closed ones, so a value that does close is read as the closed token it is.
 // The separator a header NAME is joined to its value by, in every spelling a surface writes it:
-// the ASCII colon, the fullwidth colon (U+FF1A -- the same character in a fullwidth form), and the
-// three entity spellings an undecoded surface hands over ('&#58;', '&#x3A;', '&colon;'). The last
-// three were read by nothing, so a credential behind one was published byte for byte on both entry
-// points (closing verification F32-2). One matcher reads them all, so the value that follows is
-// read exactly as it is behind the ASCII colon.
-const AUTH_COLON = '(?:[:\uFF1A]|&#0*58;|&#[xX]0*3[aA];|&colon;)';
-const AUTHORIZATION_KEYWORD = new RegExp('(?<!\\/)\\b(?:proxy-)?authorization["\']?\\s*' + AUTH_COLON + '\\s*', 'gi');
+// the ASCII colon, the fullwidth colon (U+FF1A -- the same character in a fullwidth form), the
+// small colon (U+FE55) and the ratio (U+2236), the two spellings a typographic surface writes in
+// its place, and the three entity spellings an undecoded surface hands over ('&#58;', '&#x3A;',
+// '&colon;'). The last three were read by nothing, so a credential behind one was published byte
+// for byte on both entry points (closing verification F32-2); the two typographic characters were
+// read by nothing either, and measured, a credential behind U+FE55 or U+2236 reached the PUBLISHED
+// POOL of the shipped keyless collectors, not the module surface alone (closing sweep F34-5). One
+// matcher reads them all, so the value that follows is read exactly as it is behind the ASCII colon.
+const AUTH_COLON = '(?:[:\uFF1A\uFE55\u2236]|&#0*58;|&#[xX]0*3[aA];|&colon;)';
+// The NAME's own letters, in the two spellings a surface can hand over: the letter itself, or the
+// character reference that spells it (decimal or hexadecimal, either case, any number of leading
+// zeros). Closing sweep F34-5: 'authoriz&#97;tion:' was read by nothing, because every matcher
+// spelled the name with literal letters only. The reference is read wherever it stands in the name,
+// and it has to spell the letter at its own position -- 'authoriz&#122;tion:' is not this name. The
+// boundary that keeps 'xauthorization' out is a lookbehind rather than '\\b', so a name whose FIRST
+// letter is a reference is read too ('&#97;uthorization:'); the two are otherwise the same test, and
+// the '/'-lookbehind the notice seam depends on is kept beside it.
+function nameCharacter(letter) {
+  const lower = letter.charCodeAt(0);
+  const upper = letter.toUpperCase().charCodeAt(0);
+  return '(?:' + letter + '|&#0*' + lower + ';|&#[xX]0*' + lower.toString(16) + ';'
+    + '|&#0*' + upper + ';|&#[xX]0*' + upper.toString(16) + ';)';
+}
+const keywordName = (word) => word.split('').map(nameCharacter).join('');
+const AUTH_NAME = keywordName('authorization');
+const AUTH_NAME_BRITISH = keywordName('authorisation');
+const AUTH_NAME_UNDERSCORED = keywordName('authori')
+  + '(?:' + nameCharacter('s') + '|' + nameCharacter('z') + ')' + keywordName('ation');
+const AUTHORIZATION_KEYWORD = new RegExp('(?<![\\w\\/])(?:proxy-)?' + AUTH_NAME + '["\']?\\s*' + AUTH_COLON + '\\s*', 'gi');
 // Sweep F31-4's neighbour rows: the keyword was that one spelling with a word boundary on each
 // side, so two header NAMES a real surface writes were read by nothing. 'authorisation' is the
 // British spelling of the same header - the colon and the value after it are identical, only the
@@ -171,8 +193,9 @@ const AUTHORIZATION_KEYWORD = new RegExp('(?<!\\/)\\b(?:proxy-)?authorization["\
 // prefix through. The underscore matcher is the one deliberate exception, and it is the shape a
 // dump writes ('HTTP_AUTHORIZATION', 'X_AUTHORIZATION', 'HTTP_X_AUTHORIZATION'); it keeps the same
 // lookbehind for '/', so the notice seam ('.../authorization: HTTP 503') is still refused.
-const AUTHORIZATION_KEYWORD_BRITISH = new RegExp('(?<!\\/)\\bauthorisation["\']?\\s*' + AUTH_COLON + '\\s*', 'gi');
-const AUTHORIZATION_KEYWORD_UNDERSCORED = new RegExp('(?<![\\w.\\/-])(?:[A-Za-z0-9]+_)+(?:proxy-)?authori(?:s|z)ation["\']?\\s*' + AUTH_COLON + '\\s*', 'gi');
+const AUTHORIZATION_KEYWORD_BRITISH = new RegExp('(?<![\\w\\/])' + AUTH_NAME_BRITISH + '["\']?\\s*' + AUTH_COLON + '\\s*', 'gi');
+const AUTHORIZATION_KEYWORD_UNDERSCORED = new RegExp('(?<![\\w.\\/-])(?:[A-Za-z0-9]+_)+(?:proxy-)?'
+  + AUTH_NAME_UNDERSCORED + '["\']?\\s*' + AUTH_COLON + '\\s*', 'gi');
 const AUTHORIZATION_KEYWORDS = [AUTHORIZATION_KEYWORD, AUTHORIZATION_KEYWORD_BRITISH, AUTHORIZATION_KEYWORD_UNDERSCORED];
 // The atoms a header VALUE is built from (see 'readAuthorizationValue' below): a quoted string --
 // double or single, an escaped quote inside it read as one character, or a quote that is never
@@ -1596,6 +1619,16 @@ function protectScaffold(text) {
 // (TR-160). A kill that is not the ceiling reads the same signal from the same field, so a child
 // the system ended is never published as one that could not be started, nor as the bare failure
 // literal that names neither (TR-163).
+// The slot a spawned-tool code or a signal name is published in, beside the cause phrase. Node's
+// own are alphabetic names ('ENOENT', 'EACCES', 'SIGTERM', even the numbered 'SIGUSR1'), so a value
+// the module's own shape test calls a credential is not a diagnosis -- and no removal can read it
+// where it stands, because the phrase beside it is a scaffold span kept byte for byte and the shaped
+// text is published as it is. A shaped slot is therefore given up rather than published (closing
+// sweep F34-5: 'curl could not be started (tok_...)' reached the notice through a custom transport).
+// The phrase survives whole, so the notice still says what became of the tool.
+function causeSlot(value) {
+  return credentialShapedToken(String(value)) ? '' : ` (${value})`;
+}
 function transportCause(err) {
   if (Number.isInteger(err?.status)) {
     const phrase = CURL_EXIT_CAUSES.get(err.status);
@@ -1604,17 +1637,17 @@ function transportCause(err) {
       : `${phrase} (curl exit ${err.status})`;
   }
   if (CAPTURE_CEILING_CODES.has(err?.code)) {
-    const ended = typeof err?.signal === 'string' && err.signal !== '' ? ` (${err.signal})` : '';
+    const ended = typeof err?.signal === 'string' && err.signal !== '' ? causeSlot(err.signal) : '';
     return `curl was terminated${ended} at the ${CAPTURE_CEILING_MIB} MiB capture ceiling`;
   }
   // A killed child reports no exit status and no spawn code, so both branches below would read it
   // as a tool that never started; the signal is the cause, and it is named as the one that ended
   // the tool. A genuine spawn failure carries a code and no signal, and keeps its own wording.
   if (typeof err?.signal === 'string' && err.signal !== '') {
-    return `curl was terminated (${err.signal})`;
+    return `curl was terminated${causeSlot(err.signal)}`;
   }
   if (typeof err?.code === 'string' && err.code !== '') {
-    return `curl could not be started (${err.code})`;
+    return `curl could not be started${causeSlot(err.code)}`;
   }
   return 'curl failed';
 }
