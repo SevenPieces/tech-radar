@@ -317,6 +317,21 @@ function looseValue(value) {
   return new RegExp(pattern, 'g');
 }
 
+// A value can also be republished in the URL's own spelling of it: redactUrl is the URL
+// serializer, which percent-encodes the characters a path may not carry literally, so a value
+// that travelled in the request's URL is quoted as 'a%20b' where its literal form is 'a b' and
+// the by-value removal missed it exactly where the shaped error quotes it. The respelling is
+// read from the same serializer, and accepted only when it decodes back to the value: a URL
+// that normalises a path ('../../etc' becoming '/etc') is not a respelling of the value and
+// must not put a shorter word into the removal set.
+function urlSpelling(value) {
+  try {
+    const spelled = new URL(`https://notice.invalid/${value}`).pathname.slice(1);
+    if (spelled === value) return null;
+    return decodeURIComponent(spelled) === value ? spelled : null;
+  } catch { return null; }
+}
+
 // The removal itself, and the second half of the boundary: every notice in the collector is
 // pushed through this, so a path that quotes a server answer cannot forget it. A value is
 // removed against the request's own values -- longest first, so a value that contains another is
@@ -326,10 +341,15 @@ function looseValue(value) {
 // know.
 export function redactSecrets(text, secrets) {
   let out = redactBasicCredentials(String(text ?? ''));
-  const values = [...new Set((secrets ?? []).map((v) => String(v ?? '')))]
-    .filter((v) => v !== '')
-    .sort((a, b) => b.length - a.length);
-  for (const value of values) {
+  const values = new Set();
+  for (const raw of secrets ?? []) {
+    const value = String(raw ?? '');
+    if (value === '') continue;
+    values.add(value);
+    const respelled = urlSpelling(value);
+    if (respelled !== null) values.add(respelled);
+  }
+  for (const value of [...values].sort((a, b) => b.length - a.length)) {
     if (value.length >= MIN_SECRET_CHARS) {
       out = out.split(value).join('[redacted]');
       out = out.replace(looseValue(value), '[redacted]');
@@ -408,8 +428,8 @@ function transportCause(err) {
 // A child-process failure: curl exited non-zero, so no HTTP exchange completed.
 // err.status is curl's *process* exit code and err.stdout may hold a partial body
 // plus the write-out status line, so neither is read as an HTTP status; the cause
-// is curl's own first stderr line, bounded like every other snippet. Pure and
-// offline-testable.
+// is curl's own first stderr line and the whole shaped text is bounded like every
+// other snippet. Pure and offline-testable.
 export function shapeTransportError(err, url, limit, headers) {
   const bound = requirePositive(limit, 'the error snippet limit in characters');
   const stderr = String(err?.stderr ?? '').trim();
@@ -419,8 +439,16 @@ export function shapeTransportError(err, url, limit, headers) {
   // the Authorization header. An empty stderr is reported from what the failure itself
   // carries instead, which tells a missing dependency from an unreachable feed: curl's own
   // process exit status when it ran, and the spawn's error code when it never started.
-  const cause = capped || transportCause(err);
-  const shaped = new Error(`request failed for ${redactUrl(url)}: ${redactSecrets(cause, requestSecrets(url, headers))}`);
+  const cause = redactSecrets(capped || transportCause(err), requestSecrets(url, headers));
+  // The whole shaped text is bounded, and the cause is the part that stays whole: a notice
+  // quotes this message after a source of its own, and a target can be far longer than the
+  // bound, so the request the cause belongs to is what gives way first. The redacted request
+  // keeps the head of its path, and the diagnosis -- curl's own line -- is never lost to the
+  // bound.
+  const prefix = 'request failed for ';
+  const room = Math.max(0, bound - prefix.length - cause.length - 2);
+  const shown = redactUrl(url);
+  const shaped = new Error(`${prefix}${shown.length > room ? shown.slice(0, room) : shown}: ${cause}`);
   // No cause line of its own means curl never produced a diagnostic: the caller can tell a
   // broken dependency from a source that answered.
   shaped.noDiagnostic = capped === '';

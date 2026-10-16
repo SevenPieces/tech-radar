@@ -26,8 +26,8 @@ const SETTINGS_KEYS = [
   'github_rate_limit_reserve',
   'github_org_repos', 'github_tags_per_repo', 'arxiv_max_results', 'ghsa_page_size',
   'nvd_severity', 'request_timeout_ms', 'title_max_chars', 'summary_max_chars',
-  'error_snippet_max_chars', 'discovery_hosts', 'user_agent', 'runs_history_max',
-  'short_max_chars',
+  'error_snippet_max_chars', 'notice_max_chars', 'discovery_hosts', 'user_agent',
+  'runs_history_max', 'short_max_chars',
 ];
 
 const config = readConfig(CONFIG_DIR);
@@ -220,12 +220,20 @@ test('the GitHub watchlist floor fits inside the anonymous hourly allowance', ()
   assert.ok(floor <= available, 'the GitHub watchlist floor exceeds the anonymous hourly allowance: ' + detail);
 });
 
-test('config/settings.md declares all twenty-nine keys the code reads', () => {
+// The settings table is the whole configuration surface, so the keys the skill reads (the list
+// above) and the rows the table declares must be one and the same set. The expectation is derived
+// from the file, never from a count: the literal that used to sit here agreed with the list rather
+// than with the file, so notice_max_chars could be added to the table while this case still passed.
+// Both directions are checked, so a key the skill reads that the table omits and a row the table
+// declares that the skill never reads each fail here.
+test('config/settings.md declares exactly the settings keys the skill reads', () => {
   const settings = readSettings(CONFIG_DIR + 'settings.md');
-  assert.equal(SETTINGS_KEYS.length, 29, 'the documented settings key count');
+  const declared = Object.keys(settings);
   assert.ok('watchlist_retention_weeks' in settings, 'watchlist_retention_weeks present');
   const missing = SETTINGS_KEYS.filter((k) => !(k in settings));
-  assert.deepEqual(missing, [], 'missing settings keys: ' + missing.join(', '));
+  assert.deepEqual(missing, [], 'settings keys the skill reads but settings.md never declares: ' + missing.join(', '));
+  const unread = declared.filter((k) => !SETTINGS_KEYS.includes(k));
+  assert.deepEqual(unread, [], 'settings.md rows the skill never reads: ' + unread.join(', '));
   const blank = SETTINGS_KEYS.filter((k) => settings[k] === '');
   assert.deepEqual(blank, [], 'settings keys with an empty value: ' + blank.join(', '));
 });

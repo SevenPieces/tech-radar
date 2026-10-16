@@ -309,7 +309,8 @@ note. Both outcomes were observed on the probe date:
 
 - **From a partly spent budget the tail fails.** On the probe date the first full run met an hour whose budget
   was already consumed. It printed `HTTP 403` notices for the trailing repositories and for the advisory
-  request, each recording the rate limit as the cause.
+  request, each naming the status and the URL of the refused request; the rate limit and the reset were
+  recorded only by the separate budget notice.
 - **From a fresh budget the run completes.** The second full run started at `used 0, remaining 60`, exited 0
   with **0 notices**, and produced **841 candidates** across 22 domains.
 

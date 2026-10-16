@@ -11,7 +11,7 @@ import {
 } from 'node:fs';
 import { dirname, isAbsolute, join, resolve } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
-import { readConfig } from './lib/mdtable.mjs';
+import { readConfig, readSettings } from './lib/mdtable.mjs';
 import {
   fetchText, hostOf, isDiscoveryOnly, splitItems, field, atomLink, plainText, redactUrl,
   neutraliseMarkers, neutraliseLinkSeams, neutraliseUrl, redactSecrets, requestSecrets,
@@ -32,8 +32,8 @@ const GITHUB_API = 'https://api.github.com';
 // is normalised at the single push: a whitespace control becomes a space, every other C0,
 // C1 and DEL byte is dropped, the marker vocabulary and the markdown link syntax the
 // renderers trust are neutralised -- SKILL.md requires the notices to be carried into the
-// published Coverage note, so a notice is published text -- and the text is bounded so one
-// hostile response cannot become an unbounded notice.
+// published Coverage note, so a notice is published text -- and the text is bounded by the
+// configured notice cap so one hostile response cannot become an unbounded notice.
 //
 // The request's own credential is removed here too, at the one boundary every notice crosses.
 // The transport shapers redact the messages they build, but the shapers are not the only
@@ -42,8 +42,56 @@ const GITHUB_API = 'https://api.github.com';
 // the push. A caller that knows the request passes its secret list (requestSecrets); a notice
 // that quotes nothing the request sent needs none.
 const NOTICE_CONTROLS = /[\u0000-\u001f\u007f-\u009f]/g;
-const NOTICE_MAX_CHARS = 1000;
-function sanitizeNotice(text) {
+
+// The notice cap is a quantity like every other one, so it is configuration and never a literal
+// here. A caller may pass the settings object it read; a caller that carries none -- a fixture,
+// a direct call -- falls back to the settings that ship beside this script, exactly as the
+// catalogue reader's chip cap does. Only a key that is genuinely absent falls back: a key that
+// is present but unusable is a configuration error that names itself.
+const SHIPPED_SETTINGS = join(DEFAULT_CONFIG, 'settings.md');
+let shippedNoticeLimit;
+function shippedNoticeCap() {
+  if (shippedNoticeLimit === undefined) {
+    let value = null;
+    try { value = Number(readSettings(SHIPPED_SETTINGS).notice_max_chars); } catch { value = null; }
+    shippedNoticeLimit = Number.isInteger(value) && value > 0 ? value : null;
+  }
+  return shippedNoticeLimit;
+}
+function noticeLimit(settings) {
+  if (settings && Object.prototype.hasOwnProperty.call(settings, 'notice_max_chars')
+    && settings.notice_max_chars !== undefined) {
+    const n = Number(settings.notice_max_chars);
+    if (!Number.isInteger(n) || n <= 0) {
+      throw new Error(`notice_max_chars is invalid in config/settings.md: ${JSON.stringify(settings.notice_max_chars)}`);
+    }
+    return n;
+  }
+  const shipped = shippedNoticeCap();
+  if (shipped) return shipped;
+  throw new Error('notice_max_chars is missing or invalid in config/settings.md');
+}
+// A cap that arrives as anything else means a call site forgot to resolve one, and an undefined
+// cap silently returns the text unbounded -- the defect this cap closes -- so it is refused.
+function requireNoticeLimit(value) {
+  if (!Number.isInteger(value) || value <= 0) {
+    throw new Error(`the notice limit in characters must be a positive integer, got ${JSON.stringify(value)}`);
+  }
+  return value;
+}
+
+// The source a notice names is bounded, because the assembled notice is capped afterwards: a
+// watchlist target or an organisation row's name may be any length, and an unbounded source
+// used to fill the cap and cut the status and the cause away. Half the cap is the source's room
+// -- label included -- so the rest of the notice is left to the cause, which the shaped error
+// already bounds, and 'HTTP <status> for' and the reason after it survive even a very long
+// target.
+function noticeSource(label, name, limit) {
+  const room = Math.max(0, Math.floor(requireNoticeLimit(limit) / 2) - String(label).length - 1);
+  const text = String(name ?? '');
+  return `${label} ${text.length > room ? text.slice(0, room) : text}`;
+}
+function sanitizeNotice(text, limit) {
   // The tag shape is the one class a notice cannot carry: a notice is published verbatim in the
   // Coverage note, and a Markdown reader draws a live anchor or fetches a remote image from
   // upstream markup that reached the text. It is neutralised here, at the one push every notice
@@ -63,10 +111,10 @@ function sanitizeNotice(text) {
   // The markdown link seam belongs to this path and not to the neutraliser a candidate field
   // uses: a notice is published verbatim in the Coverage note, while a release body's links are
   // ordinary Markdown that the pool has to keep.
-  return neutraliseLinkSeams(neutraliseMarkers(spaced)).slice(0, NOTICE_MAX_CHARS);
+  return neutraliseLinkSeams(neutraliseMarkers(spaced)).slice(0, requireNoticeLimit(limit));
 }
-function pushNotice(notices, text, secrets) {
-  notices.push(sanitizeNotice(redactSecrets(text, secrets)));
+function pushNotice(notices, text, secrets, limit) {
+  notices.push(sanitizeNotice(redactSecrets(text, secrets), limit));
 }
 
 // TR-99: a notice is redacted at the push against the request that produced it, and a shared
@@ -87,9 +135,9 @@ function rowsSecrets(rows, headers) {
 // against its own request's secrets, which the push already removed. Applying it again is
 // idempotent - a value that is gone stays gone - and the notice keeps the host and the reason
 // it exists, so it stays diagnosable.
-function redactNotices(notices, secrets) {
+function redactNotices(notices, secrets, limit) {
   const out = [];
-  for (const notice of notices) pushNotice(out, notice, secrets);
+  for (const notice of notices) pushNotice(out, notice, secrets, limit);
   return out;
 }
 
@@ -204,6 +252,9 @@ function requiredSettingKeys(rows, options) {
   const keys = new Set();
   if (!options.since) keys.add('window_cap_weeks');
   if (!options.timeout) keys.add('request_timeout_ms');
+  // Every collector can push a notice, so a run with a row to read reads the notice cap too. A
+  // run whose rows were all deselected pushes no notice and needs no cap.
+  if (rows.length > 0) keys.add('notice_max_chars');
   for (const row of rows) {
     for (const key of SOURCE_SETTINGS[row.kind] ?? []) keys.add(key);
   }
@@ -290,7 +341,7 @@ async function runSource(name, rows, fn, ctx, acc) {
   } catch (err) {
     // No request is in scope here: a failure that escapes a whole source is not a request's
     // answer, and the per-request notices the source pushed already carried their own secrets.
-    pushNotice(acc.notices, `${name}: ${err.message}`);
+    pushNotice(acc.notices, `${name}: ${err.message}`, undefined, noticeLimit(ctx.settings));
   }
 }
 
@@ -311,6 +362,20 @@ function isRateLimitRefusal(err) {
   return /rate limit/i.test(String(err?.body ?? '')) || /rate limit/i.test(String(err?.message ?? ''));
 }
 
+// A target a configuration named is configuration text; a target an organisation listing handed
+// back is the answer's text, and a notice may quote the first and never the second. For a
+// discovered repository the notice names the organisation row, which configuration supplied, and
+// the repository's ordinal in that listing, which is arithmetic. The discovered name travels
+// only as a value the notice is redacted against, so it can reach neither the notice text nor
+// the URL the shaped error quotes.
+function githubSource(label, t, limit) {
+  const name = t.discovered ? `${t.org} repository ${t.ordinal}` : String(t.target ?? '');
+  return noticeSource(label, name, limit);
+}
+function targetSecrets(t, secrets) {
+  return t.discovered ? [...secrets, String(t.target)] : secrets;
+}
+
 export async function collectGithub(rows, ctx) {
   const candidates = [];
   const notices = [];
@@ -318,6 +383,7 @@ export async function collectGithub(rows, ctx) {
   const headers = { Accept: 'application/vnd.github+json' };
   if (token) headers.Authorization = `Bearer ${token}`;
   const s = ctx.settings;
+  const limit = noticeLimit(s);
   const reserve = Number(s.github_rate_limit_reserve);
   if (!Number.isFinite(reserve) || reserve < 0) {
     throw new Error('github_rate_limit_reserve is missing or invalid in config/settings.md');
@@ -333,12 +399,12 @@ export async function collectGithub(rows, ctx) {
   try {
     budget = coreBudget(parseJson(await get(probeUrl), probeUrl));
   } catch (err) {
-    pushNotice(notices, `github: rate limit could not be checked (${err.message}); ${uncheckedPhraseFor(rows)}`, secretsFor(probeUrl));
-    return { candidates, notices: redactNotices(notices, rowsSecrets(rows, headers)) };
+    pushNotice(notices, `github: rate limit could not be checked (${err.message}); ${uncheckedPhraseFor(rows)}`, secretsFor(probeUrl), limit);
+    return { candidates, notices: redactNotices(notices, rowsSecrets(rows, headers), limit) };
   }
   if (budget.remaining === null) {
-    pushNotice(notices, `github: rate limit could not be checked (the probe reported no core budget); ${uncheckedPhraseFor(rows)}`);
-    return { candidates, notices: redactNotices(notices, rowsSecrets(rows, headers)) };
+    pushNotice(notices, `github: rate limit could not be checked (the probe reported no core budget); ${uncheckedPhraseFor(rows)}`, undefined, limit);
+    return { candidates, notices: redactNotices(notices, rowsSecrets(rows, headers), limit) };
   }
   // The budget is spent in requests, in a fixed order: one listing per organisation,
   // then one releases request per repository, then one tags request for each
@@ -376,9 +442,17 @@ export async function collectGithub(rows, ctx) {
     try {
       const body = parseJson(await get(url), url);
       if (!Array.isArray(body)) throw new Error('unexpected response shape');
-      for (const repo of body) if (repo.full_name) targets.push({ target: repo.full_name, domain: row.domain });
+      for (let n = 0; n < body.length; n += 1) {
+        const repo = body[n];
+        if (!repo.full_name) continue;
+        // The listing's own position is the repository's ordinal, and the organisation row is
+        // configuration: those two are what a notice about this repository may name.
+        targets.push({
+          target: repo.full_name, domain: row.domain, discovered: true, org: row.target, ordinal: n + 1,
+        });
+      }
     } catch (err) {
-      pushNotice(notices, `github ${row.target}: ${err.message}`, secretsFor(url));
+      pushNotice(notices, `${noticeSource('github', row.target, limit)}: ${err.message}`, secretsFor(url), limit);
       // The refused request is named by this notice and counted as a refusal in the budget
       // notice; every later organisation is counted by the spend() guard above.
       refused(err);
@@ -414,7 +488,7 @@ export async function collectGithub(rows, ctx) {
         });
       }
     } catch (err) {
-      pushNotice(notices, `github ${t.target}: ${err.message}`, secretsFor(url));
+      pushNotice(notices, `${githubSource('github', t, limit)}: ${err.message}`, targetSecrets(t, secretsFor(url)), limit);
       // The refusal is the settled allowance, so the block stops spending here: the refused
       // repository is named by this notice and by the refusal count, and every repository after
       // it - which the run never asked for - is what the budget notice counts as unchecked.
@@ -452,14 +526,14 @@ export async function collectGithub(rows, ctx) {
         tagLeads += 1;
       }
     } catch (err) {
-      pushNotice(notices, `github-tags ${t.target}: ${err.message}`, secretsFor(url));
+      pushNotice(notices, `${githubSource('github-tags', t, limit)}: ${err.message}`, targetSecrets(t, secretsFor(url)), limit);
       if (refused(err)) { shortfall.tags = tagFallbacks.length - i - 1; break; }
     }
   }
 
   if (tagLeads > 0) {
     pushNotice(notices, `github-tags: ${tagLeads} undated tag ${tagLeads === 1 ? 'lead' : 'leads'} carried `
-      + '(the tags API has no date, so they cannot be window-filtered)');
+      + '(the tags API has no date, so they cannot be window-filtered)', undefined, limit);
   }
   if (shortfall.repos || shortfall.orgs || shortfall.tags || refusals.count > 0) {
     // A probe that reports the whole allowance means nothing had been charged before the
@@ -472,14 +546,15 @@ export async function collectGithub(rows, ctx) {
     const fresh = budget.limit !== null && budget.remaining === budget.limit;
     const tracked = fresh || refusals.count > 0;
     const reported = tracked ? { ...budget, reserve, spent: charged.count, refused: refusals.count } : budget;
-    pushNotice(notices, budgetNotice(reported, shortfall, Boolean(token)));
+    pushNotice(notices, budgetNotice(reported, shortfall, Boolean(token)), undefined, limit);
   }
-  return { candidates, notices: redactNotices(notices, rowsSecrets(rows, headers)) };
+  return { candidates, notices: redactNotices(notices, rowsSecrets(rows, headers), limit) };
 }
 
 export async function collectArxiv(rows, ctx) {
   const candidates = [];
   const notices = [];
+  const limit = noticeLimit(ctx.settings);
   for (const row of rows) {
     const url = 'https://export.arxiv.org/api/query'
       + `?search_query=${encodeURIComponent(`cat:${row.target}`)}`
@@ -491,7 +566,7 @@ export async function collectArxiv(rows, ctx) {
       // A capped listing is not a complete one: the window cannot be enforced for this
       // source past the cap, so the run says so instead of looking complete.
       if (entries.length >= cap) {
-        pushNotice(notices, `arxiv ${row.target}: listing capped at ${cap} entries; older items inside the window may be missing`);
+        pushNotice(notices, `${noticeSource('arxiv', row.target, limit)}: listing capped at ${cap} entries; older items inside the window may be missing`, undefined, limit);
       }
       for (const entry of entries) {
         const link = atomLink(entry);
@@ -511,10 +586,10 @@ export async function collectArxiv(rows, ctx) {
         });
       }
     } catch (err) {
-      pushNotice(notices, `arxiv ${row.target}: ${err.message}`, requestSecrets(url, {}));
+      pushNotice(notices, `${noticeSource('arxiv', row.target, limit)}: ${err.message}`, requestSecrets(url, {}), limit);
     }
   }
-  return { candidates, notices: redactNotices(notices, rowsSecrets(rows, {})) };
+  return { candidates, notices: redactNotices(notices, rowsSecrets(rows, {}), limit) };
 }
 
 // A watchlist target is configuration, and curl honours whatever it is handed: file://
@@ -533,10 +608,11 @@ function fetchableTarget(target) {
 export async function collectFeeds(rows, ctx) {
   const candidates = [];
   const notices = [];
+  const limit = noticeLimit(ctx.settings);
   for (const row of rows) {
     const target = String(row.target ?? '').trim();
     if (!fetchableTarget(target)) {
-      pushNotice(notices, `rss ${redactUrl(target) || '(empty target)'}: unsupported scheme (only http and https are fetched)`);
+      pushNotice(notices, `${noticeSource('rss', redactUrl(target) || '(empty target)', limit)}: unsupported scheme (only http and https are fetched)`, undefined, limit);
       continue;
     }
     try {
@@ -563,10 +639,10 @@ export async function collectFeeds(rows, ctx) {
         });
       }
     } catch (err) {
-      pushNotice(notices, `rss ${redactUrl(target)}: ${err.message}`, requestSecrets(target, {}));
+      pushNotice(notices, `${noticeSource('rss', redactUrl(target), limit)}: ${err.message}`, requestSecrets(target, {}), limit);
     }
   }
-  return { candidates, notices: redactNotices(notices, rowsSecrets(rows, {})) };
+  return { candidates, notices: redactNotices(notices, rowsSecrets(rows, {}), limit) };
 }
 
 export function nvdStamp(iso) {
@@ -579,6 +655,10 @@ export function nvdStamp(iso) {
 // interpolated into a URL, so it is checked against this shape before a citation is built
 // rather than trusted, encoded or not.
 const CVE_ID = /^CVE-\d{4}-\d{4,}$/;
+
+// The largest time value a Date can carry, in milliseconds: infrastructure rather than policy,
+// like the transport's own capture ceiling, so it is stated here and not in configuration.
+const MAX_DATE_MS = 8.64e15;
 
 // Every reader answers one question: when was the version we are about to report
 // actually released? Never a "last modified" timestamp -- registry bookkeeping
@@ -593,10 +673,17 @@ export function coreBudget(json) {
   const remaining = Number(core.remaining);
   const limit = Number(core.limit);
   const reset = Number(core.reset);
+  // The reset is a Unix second count from the answer, and an answer is upstream text: one no
+  // Date can hold -- 1e300 seconds, say -- made the conversion throw RangeError, and the probe's
+  // own catch then turned a readable allowance into 'rate limit could not be checked'. An
+  // out-of-range reset is treated exactly like the non-finite ones: absent.
+  const resetMs = reset * 1000;
+  const resetInRange = Number.isFinite(reset) && reset > 0
+    && Number.isFinite(resetMs) && resetMs <= MAX_DATE_MS;
   return {
     remaining: Number.isFinite(remaining) ? remaining : null,
     limit: Number.isFinite(limit) ? limit : null,
-    resetAt: Number.isFinite(reset) && reset > 0 ? new Date(reset * 1000).toISOString() : null,
+    resetAt: resetInRange ? new Date(resetMs).toISOString() : null,
   };
 }
 
@@ -716,9 +803,10 @@ const REGISTRY = {
 export async function collectRegistries(rows, ctx) {
   const candidates = [];
   const notices = [];
+  const limit = noticeLimit(ctx.settings);
   for (const row of rows) {
     const spec = REGISTRY[row.kind];
-    if (!spec) { pushNotice(notices, `registry unknown kind ${row.kind}`); continue; }
+    if (!spec) { pushNotice(notices, `registry unknown kind ${row.kind}`, undefined, limit); continue; }
     const url = spec.url(row.target);
     try {
       const json = parseJson(await ctx.net.fetchText(url, ctx.timeout, {}, ctx.settings.user_agent, ctx.settings.error_snippet_max_chars), url);
@@ -729,7 +817,7 @@ export async function collectRegistries(rows, ctx) {
       // quotes none of it, so the notice names the source, the kind and the cause, and not the
       // version it could not date.
       if (!publishedAt) {
-        pushNotice(notices, `${row.kind} ${row.target}: no release time for the latest version; candidate skipped`);
+        pushNotice(notices, `${noticeSource(row.kind, row.target, limit)}: no release time for the latest version; candidate skipped`, undefined, limit);
         continue;
       }
       if (ctx.since && publishedAt < ctx.since) continue;
@@ -749,15 +837,16 @@ export async function collectRegistries(rows, ctx) {
         summary: plainText(`New ${row.kind} release ${version}`, ctx.settings.summary_max_chars),
       });
     } catch (err) {
-      pushNotice(notices, `${row.kind} ${row.target}: ${err.message}`, requestSecrets(url, {}));
+      pushNotice(notices, `${noticeSource(row.kind, row.target, limit)}: ${err.message}`, requestSecrets(url, {}), limit);
     }
   }
-  return { candidates, notices: redactNotices(notices, rowsSecrets(rows, {})) };
+  return { candidates, notices: redactNotices(notices, rowsSecrets(rows, {}), limit) };
 }
 
 export async function collectAdvisories(rows, ctx) {
   const candidates = [];
   const notices = [];
+  const limit = noticeLimit(ctx.settings);
   const token = process.env.GITHUB_TOKEN || process.env.GH_TOKEN;
   // The GHSA header is built once, so the union the notices are finally redacted against
   // (rowsSecrets, TR-99) cannot drift from the header the requests actually send.
@@ -813,7 +902,7 @@ export async function collectAdvisories(rows, ctx) {
             // The identifier is upstream text and a notice quotes none of it: the notice still
             // names the source and the cause a reader needs -- an advisory was skipped because
             // its identifier is not a CVE id -- without republishing the rejected value.
-            pushNotice(notices, `${row.kind}: skipped an advisory whose identifier is not a CVE id`, secrets);
+            pushNotice(notices, `${row.kind}: skipped an advisory whose identifier is not a CVE id`, secrets, limit);
             continue;
           }
           candidates.push({
@@ -831,10 +920,10 @@ export async function collectAdvisories(rows, ctx) {
     } catch (err) {
       // The secrets are those of the request this row made; a row that failed before it
       // reached one contributes none.
-      pushNotice(notices, `${row.kind}: ${err.message}`, secrets);
+      pushNotice(notices, `${row.kind}: ${err.message}`, secrets, limit);
     }
   }
-  return { candidates, notices: redactNotices(notices, rowsSecrets(rows, ghsaHeaders)) };
+  return { candidates, notices: redactNotices(notices, rowsSecrets(rows, ghsaHeaders), limit) };
 }
 
 export async function collectAll(config, opts) {
@@ -895,7 +984,7 @@ export async function collectAll(config, opts) {
   const union = [...issuedSecrets];
   const credentialUnion = [...issuedCredentialSecrets];
   const notices = [];
-  for (const notice of acc.notices) pushNotice(notices, notice, union);
+  for (const notice of acc.notices) pushNotice(notices, notice, union, noticeLimit(config.settings));
   // TR-106: the candidate fields, which the notices' redaction never covered, cross the same
   // redaction here. A source that answered 200 and echoed the request's own credential into the
   // text it feeds - an item title, an item summary - published that value in the pool, and the
