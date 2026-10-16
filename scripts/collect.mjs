@@ -535,6 +535,26 @@ function repositoryName(value) {
   if (parts.length !== 2) return false;
   return REPO_OWNER.test(parts[0]) && REPO_NAME.test(parts[1]);
 }
+// The entries one listing is allowed to contribute: at most the configured number, most recently
+// updated first, exactly as the setting's own note describes. per_page asks the answer for that
+// many, but the answer is what decides how many it sends, so the same bound is applied to the
+// answer here -- without it one listing sets the number of release requests the run makes and the
+// number of failure notices it publishes, which is the amplification the non-conforming aggregate
+// closed for its own class only (TR-158). An entry whose date cannot be read is not recency-ranked
+// and not dropped: it keeps the answer's order and sorts after every dated entry, so an accepted
+// repository is never lost to a missing timestamp.
+function takeMostRecent(entries, bound) {
+  return entries
+    .map((entry, i) => ({ entry, i, at: Number.isFinite(entry.updated) ? entry.updated : null }))
+    .sort((a, b) => {
+      if (a.at === null && b.at === null) return a.i - b.i;
+      if (a.at === null) return 1;
+      if (b.at === null) return -1;
+      return (b.at - a.at) || (a.i - b.i);
+    })
+    .slice(0, bound)
+    .map((ranked) => ranked.entry);
+}
 // The cause a notice about a discovered repository carries. The shaped error's own message is
 // not used for one: it quotes the request, and the request's URL spells the answer's name in
 // the URL serializer's spelling, which by-value removal cannot cover (a dot segment is
@@ -614,8 +634,16 @@ export async function collectGithub(rows, ctx) {
   for (const row of rows) {
     if (row.kind !== 'github-org') continue;
     if (!spend()) { shortfall.orgs += 1; continue; }
+    // The setting bounds both halves of the exchange: the per_page the listing is asked for and
+    // the number of entries the run will take from it. It is resolved where the row is read, so a
+    // configuration that carries no organisation row is never asked for it, and a value that is
+    // present but unusable is refused by name rather than entering the arithmetic.
+    const perOrg = Number(s.github_org_repos);
+    if (!Number.isInteger(perOrg) || perOrg <= 0) {
+      throw configError('github_org_repos is missing or invalid in config/settings.md');
+    }
     const url = `${GITHUB_API}/orgs/${row.target}/repos`
-      + `?per_page=${encodeURIComponent(s.github_org_repos)}&sort=updated`;
+      + `?per_page=${encodeURIComponent(perOrg)}&sort=updated`;
     try {
       const body = parseJson(await get(url), url);
       if (!Array.isArray(body)) throw new Error('unexpected response shape');
@@ -623,11 +651,13 @@ export async function collectGithub(rows, ctx) {
       // never put in a URL, never a request target, and never a value a notice is redacted
       // against. The entries of one listing are counted and reported once, after the listing has
       // been read, so the count of notices is the run's own and not the answer's (TR-152); the
-      // first refused position is kept so a listing with one bad entry still names where it sat,
-      // and it is named through listingSource, which keeps the position when the organisation row
-      // is long enough to fill the bound (TR-153).
+      // first refused position is named at every count, not only when there is one, so an operator
+      // told that two entries are bad can still find the first of them where it sat (TR-159), and
+      // it is named through listingSource, which keeps the position when the organisation row is
+      // long enough to fill the bound (TR-153).
       let refused = 0;
       let firstRefused = 0;
+      const accepted = [];
       for (let n = 0; n < body.length; n += 1) {
         const repo = body[n];
         if (!repo || !repositoryName(repo.full_name)) {
@@ -636,16 +666,17 @@ export async function collectGithub(rows, ctx) {
           continue;
         }
         // The listing's own position is the repository's ordinal, and the organisation row is
-        // configuration: those two are what a notice about this repository may name.
+        // configuration: those two are what a notice about this repository may name. The date is
+        // read only to rank the accepted entries; it never reaches a notice.
+        accepted.push({ name: repo.full_name, ordinal: n + 1, updated: Date.parse(repo.updated_at) });
+      }
+      for (const entry of takeMostRecent(accepted, perOrg)) {
         targets.push({
-          target: repo.full_name, domain: row.domain, discovered: true, org: row.target, ordinal: n + 1,
+          target: entry.name, domain: row.domain, discovered: true, org: row.target, ordinal: entry.ordinal,
         });
       }
       if (refused > 0) {
-        const source = refused === 1
-          ? listingSource('github', row.target, firstRefused, limit)
-          : noticeSource('github', row.target, limit);
-        pushNotice(notices, `${source}: ${skippedListingPhrase(refused)}`, secretsFor(url), limit);
+        pushNotice(notices, `${listingSource('github', row.target, firstRefused, limit)}: ${skippedListingPhrase(refused)}`, secretsFor(url), limit);
       }
     } catch (err) {
       pushNotice(notices, `${noticeSource('github', row.target, limit)}: ${err.message}`, secretsFor(url), limit);
@@ -1250,7 +1281,7 @@ export function noticeWarning(count) {
 // The mapped causes are published as '<phrase> (curl exit N)', so the suffix belongs to their
 // alternatives: matching only the bare phrase left every mapped cause unmatched, which dropped
 // the reason for six of the nine causes the shaper can build (LV-2).
-const TRANSPORT_TAIL = /(?:could not resolve the host|failed to connect|timed out|TLS handshake failed|empty reply|partial transfer) \(curl exit \d+\)$|curl exited with status \d+$|curl could not be started \([^)]+\)$|curl failed$/;
+const TRANSPORT_TAIL = /(?:could not resolve the host|failed to connect|timed out|TLS handshake failed|empty reply|partial transfer) \(curl exit \d+\)$|curl exited with status \d+$|curl could not be started \([^)]+\)$|curl was terminated(?: \([^)]+\))? at the \d+ MiB capture ceiling$|curl failed$/;
 export function operatorWarning(notices) {
   const line = noticeWarning(notices.length);
   for (const notice of notices) {

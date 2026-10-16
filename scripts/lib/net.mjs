@@ -445,15 +445,34 @@ const CURL_EXIT_CAUSES = new Map([
   [52, 'empty reply'],
 ]);
 
+// The largest output one child process may leave for the transport to capture, and the codes Node
+// raises when that bound is crossed. The ceiling is infrastructure rather than policy -- it exists
+// so a hostile or broken answer cannot exhaust memory, and a configuration value here would only
+// let a typo take the run down -- so it lives here and is stated where the transport is described.
+const CAPTURE_CEILING_BYTES = 64 * 1024 * 1024;
+const CAPTURE_CEILING_MIB = CAPTURE_CEILING_BYTES / (1024 * 1024);
+const CAPTURE_CEILING_CODES = new Set(['ENOBUFS', 'ERR_CHILD_PROCESS_STDIO_MAXBUFFER']);
+
 // curl's process exit status when it ran, or the spawn's error code when the binary could not be
 // started at all. Never the child-process message, which quotes the whole argv, and never curl's
 // stderr, which quotes the redirect host and the proxy name.
+//
+// The capture ceiling is not a missing binary: when the answer crosses the buffer Node terminates
+// the child and reports ENOBUFS, whose status is null for exactly that reason. Read as a spawn
+// code, that published 'curl could not be started (ENOBUFS)' -- a false diagnosis of a curl that
+// ran and answered, and one that named no ceiling anywhere. The ceiling gets its own cause, and it
+// reports what actually became of the tool: the signal that ended it, and the bound it crossed
+// (TR-160).
 function transportCause(err) {
   if (Number.isInteger(err?.status)) {
     const phrase = CURL_EXIT_CAUSES.get(err.status);
     return phrase === undefined
       ? `curl exited with status ${err.status}`
       : `${phrase} (curl exit ${err.status})`;
+  }
+  if (CAPTURE_CEILING_CODES.has(err?.code)) {
+    const ended = typeof err?.signal === 'string' && err.signal !== '' ? ` (${err.signal})` : '';
+    return `curl was terminated${ended} at the ${CAPTURE_CEILING_MIB} MiB capture ceiling`;
   }
   if (typeof err?.code === 'string' && err.code !== '') {
     return `curl could not be started (${err.code})`;
@@ -496,8 +515,9 @@ export function shapeTransportError(err, url, limit, headers, omitUrl = false) {
   const shaped = new Error(text);
   shaped.cause = cause;
   // No process exit status means curl never ran: the caller can tell a broken dependency from a
-  // source that answered.
-  shaped.noDiagnostic = !Number.isInteger(err?.status);
+  // source that answered. The capture ceiling is the exception it used to swallow -- curl ran, and
+  // only its answer overflowed -- so a terminated-by-ceiling child is not a missing dependency.
+  shaped.noDiagnostic = !Number.isInteger(err?.status) && !CAPTURE_CEILING_CODES.has(err?.code);
   shaped.url = url;
   shaped.httpStatus = null; // a transport failure has no HTTP status
   shaped.exitStatus = Number.isInteger(err?.status) ? err.status : null;
@@ -513,11 +533,9 @@ function curlBuffer(url, ms, headers = {}, ua = DEFAULT_UA, snippetLimit, omitUr
   let raw;
   try {
     // stdio is spelled out so curl's own error line is captured instead of being
-    // inherited: execFileSync otherwise prints the child's stderr on ours. The 64 MiB
-    // ceiling is infrastructure rather than policy -- it bounds one child process's
-    // captured output so a hostile or broken response cannot exhaust memory, and a
-    // configuration value here would only let a typo take the run down.
-    raw = execFileSync('curl', args, { stdio: ['ignore', 'pipe', 'pipe'], maxBuffer: 64 * 1024 * 1024 });
+    // inherited: execFileSync otherwise prints the child's stderr on ours. The ceiling is
+    // the transport's own bound, declared above with the cause it produces.
+    raw = execFileSync('curl', args, { stdio: ['ignore', 'pipe', 'pipe'], maxBuffer: CAPTURE_CEILING_BYTES });
   } catch (err) {
     throw shapeTransportError(err, url, snippetLimit, headers, omitUrl);
   }
