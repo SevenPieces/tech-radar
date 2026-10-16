@@ -363,9 +363,24 @@ function noticeLabelRoom(name) {
 // 'boundedNotice' checks that before it is used, and every other caller works on 'whole' itself.
 function composeParts(source, detail, cap, floor) {
   const frontLength = noticeSourceLength(source.length, detail.length, cap, floor);
-  // The cap is the last word: a detail longer than 'cap - 2' cannot fit beside the separator, so
-  // the line is cut at the cap here and 'boundedNotice' takes the seam branch that keeps both the
-  // reason at the detail's head and the cause at its tail.
+  const room = cap - frontLength - NOTICE_SEPARATOR_CHARS;
+  // A detail longer than the room the source's own cut leaves it is bounded around BOTH of its
+  // ends: the reason at its head is what the reader classifies the failure by, and the bytes at its
+  // tail are what the operator line reads back -- 'operatorWarning' matches the transport cause at
+  // the END of the notice -- and a mapped cause is published as '<phrase> (curl exit N)', so its
+  // suffix is part of the cause and not decoration (net.mjs:1147-1148, F30-5). Cutting the detail
+  // at the cap published the head and dropped the tail, which lost the suffix for every detail
+  // longer than the room the source's cut had left, and the sweep measured exactly that at the
+  // 128/129 floor. The seam stands for what was dropped between the two ends, the same way the
+  // bound below stands in for a text with no separator of its own.
+  if (detail.length > room && room > NOTICE_SEAM.length) {
+    const keep = room - NOTICE_SEAM.length;
+    const front = Math.ceil(keep / 2);
+    return source.slice(0, frontLength) + NOTICE_SEPARATOR
+      + detail.slice(0, front) + NOTICE_SEAM + detail.slice(detail.length - (keep - front));
+  }
+  // The cap is the last word: a detail that cannot be bounded around its own ends -- the room is
+  // not longer than the seam -- is cut at the cap here.
   return (source.slice(0, frontLength) + NOTICE_SEPARATOR + detail).slice(0, cap);
 }
 
