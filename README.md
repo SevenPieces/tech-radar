@@ -100,7 +100,7 @@ Four Markdown tables under `config/` hold all of it, and every quantity the skil
 in a script:
 
 - `config/domains.md` - the catalogue: key, English domain, `short` (the topic-navigation chip label), `label_zh`, cluster, tier (`core` or `watch`) and why each domain is carried.
-- `config/settings.md` - every quantity and policy: the window cap, the first-run reach, the per-domain ceilings, the watch-notable and total budgets, the fan-out width, the timezone, the discovery-host list, the navigation-chip cap (`short_max_chars`) and the output directory.
+- `config/settings.md` - every quantity and policy: the window cap, the first-run reach, the per-domain ceilings, the watch-notable and total budgets, the fan-out width, the timezone, the discovery-host list, the navigation-chip cap (`short_max_chars`), the notice length cap (`notice_max_chars`) and the output directory.
 - `config/sources.md` - the source registry: which outlets are read, their evidence tier, their language and what automated fetch has actually achieved.
 - `config/watchlist.md` - the collector's only input: the repositories, categories, packages, advisories and feeds that are scanned, each mapped to a domain.
 

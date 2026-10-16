@@ -206,8 +206,10 @@ test('shapeHttpError bounds the shaped error text and keeps the status', () => {
 });
 
 // The rule removes the upstream text, not the diagnosis: the shaped HTTP error still names the
-// status and the redacted request, and the transport error still names the request and curl's own
-// cause line. A notice that said only "failed" would pass the no-echo half and lose the run's only
+// status and the redacted request, and the transport error still names the request and a cause
+// shaped from curl's exit code. The cause is the fixed vocabulary, never the line curl wrote --
+// curl follows redirects and names the environment's proxy, so that line carries text the request
+// never sent. A notice that said only "failed" would pass the no-echo half and lose the run's only
 // account of a degraded source.
 test('a notice still names the failure: status, redacted URL and transport cause', () => {
   const secret = 'SENTINEL' + 'KEYVALUE';
@@ -223,9 +225,11 @@ test('a notice still names the failure: status, redacted URL and transport cause
     stderr: Buffer.from("curl: (7) Failed to connect to svc.example port 443 after 0 ms: Couldn't connect to server\n"),
   };
   const transport = shapeTransportError(failure, 'https://u:pw@svc.example/api?token=' + secret, 200);
-  assert.match(transport.message,
-    /^request failed for https:\/\/svc\.example\/api: curl: \(7\) Failed to connect to svc\.example port 443/,
-    "the transport notice names the request and curl's own cause: " + transport.message);
+  assert.equal(transport.message,
+    'request failed for https://svc.example/api: failed to connect (curl exit 7)',
+    'the transport notice names the request and the shaped cause: ' + transport.message);
+  assert.doesNotMatch(transport.message, /port 443|Couldn't connect/,
+    "curl's own line reached the notice: " + transport.message);
   assert.equal(transport.message.includes(secret), false, 'the query credential reached the notice: ' + transport.message);
   assert.equal(transport.exitStatus, 7, "curl's process exit status is labelled as such");
 });
@@ -233,8 +237,8 @@ test('a notice still names the failure: status, redacted URL and transport cause
 test('shapeTransportError reads the real execFileSync failure shape as a transport failure', () => {
   // Exactly the fields execFileSync sets when curl exits non-zero. status is the
   // *process* exit code, and with -w curl still writes a "000" status line to
-  // stdout: neither may be reported as an HTTP status, and the cause is the stderr
-  // line that the previous shaper discarded.
+  // stdout: neither may be reported as an HTTP status, and the cause is shaped from
+  // that exit code rather than quoted from the stderr line beside it.
   const failure = {
     status: 7,
     signal: null,
@@ -245,8 +249,10 @@ test('shapeTransportError reads the real execFileSync failure shape as a transpo
   const shaped = shapeTransportError(failure, 'http://127.0.0.1:1/feed.xml', 200);
   assert.equal(shaped.httpStatus, null, 'a transport failure must not claim an HTTP status');
   assert.doesNotMatch(shaped.message, /HTTP \d/);
-  assert.match(shaped.message, /^request failed for http:\/\/127\.0\.0\.1:1\/feed\.xml: curl: \(7\) Failed to connect/);
-  assert.match(shaped.message, /Couldn't connect to server/);
+  assert.equal(shaped.message,
+    'request failed for http://127.0.0.1:1/feed.xml: failed to connect (curl exit 7)');
+  assert.doesNotMatch(shaped.message, /Couldn't connect to server|curl: \(7\)/,
+    "curl's own line reached the notice: " + shaped.message);
   assert.equal(shaped.exitStatus, 7, "curl's process exit code is labelled as such");
   assert.equal(shaped.body, '', 'the partial body and status line are not surfaced as content');
 });
@@ -270,8 +276,10 @@ test('the real transport pins a failed loopback fetch to a transport failure, ne
     assert.equal(err.httpStatus, null, 'a failed transport is not an HTTP status');
     assert.doesNotMatch(err.message, /HTTP \d/, 'no HTTP status may be claimed');
     assert.match(err.message, /^request failed for http:\/\/127\.0\.0\.1:1\/feed\.xml: \S/,
-      "the message names the URL and carries curl's cause");
-    assert.match(err.message, /curl: \(\d+\)/, "curl's own failure code is reported");
+      "the message names the URL and carries a cause");
+    assert.doesNotMatch(err.message, /curl: \(\d+\)/, "curl's own line is never quoted");
+    assert.match(err.message, /(?:curl exit \d+|curl exited with status \d+|could not resolve the host|failed to connect|timed out|TLS handshake failed|empty reply|partial transfer)/,
+      "the cause is the shaper's vocabulary and names the exit code: " + err.message);
     assert.ok(Number.isInteger(err.exitStatus), "curl's process exit code is recorded");
     return;
   }
@@ -302,7 +310,7 @@ test('shapeTransportError never falls back to a message that embeds the request 
   assert.equal(shaped.exitStatus, 7, "curl's process exit code is still reported");
 });
 
-test('shapeTransportError still quotes curl when it did write a cause line', () => {
+test('shapeTransportError never quotes the cause line curl wrote', () => {
   const failure = {
     status: 7,
     stdout: Buffer.from('\n000'),
@@ -310,7 +318,9 @@ test('shapeTransportError still quotes curl when it did write a cause line', () 
     message: 'Command failed: curl -sSL -H "Authorization: Bearer ' + 'ghp_' + 'x'.repeat(24) + '" http://x/',
   };
   const shaped = shapeTransportError(failure, 'http://x/', 200);
-  assert.match(shaped.message, /^request failed for http:\/\/x\/: curl: \(7\) Failed to connect/);
+  assert.equal(shaped.message, 'request failed for http://x/: failed to connect (curl exit 7)');
+  assert.doesNotMatch(shaped.message, /curl: \(7\)|Failed to connect to 127\.0\.0\.1/,
+    "curl's own line reached the notice: " + shaped.message);
   assert.doesNotMatch(shaped.message, /Authorization|Bearer|ghp_/, 'the argv fallback stays out');
 });
 
@@ -333,7 +343,7 @@ test('shapeTransportError redacts userinfo and the query string it quotes', () =
   const shaped = shapeTransportError(failure, 'https://u:p4ssw0rd@h.example/x?token=SECRETVAL', 200);
   assert.equal(shaped.message.includes('p4ssw0rd'), false, 'the password must not reach the notice');
   assert.equal(shaped.message.includes('SECRETVAL'), false, 'the query value must not reach the notice');
-  assert.match(shaped.message, /^request failed for https:\/\/h\.example\/x\/?: curl: \(7\) refused$/);
+  assert.equal(shaped.message, 'request failed for https://h.example/x: failed to connect (curl exit 7)');
 });
 
 // Regression test: the suite required the host curl binary while README promises a
@@ -795,5 +805,67 @@ test('a legitimate markdown link survives candidate prose while a notice carries
   assert.equal(shaped.message, 'HTTP 500 for https://feeds.example/rss.xml',
     'the notice carries no upstream text at all: ' + shaped.message);
   assert.doesNotMatch(shaped.message, /\]\(/, 'the notice carries no live link seam: ' + shaped.message);
+});
+
+// TR-134: the cause is a fixed vocabulary read from curl's exit code, so the line curl wrote --
+// which follows a redirect and names the environment's proxy -- is never quoted, while the code
+// stays named and an unknown one keeps its own spelling.
+test('the transport cause is shaped from the exit code, never quoted from the line curl wrote', () => {
+  const cases = [
+    [6, 'could not resolve the host'],
+    [7, 'failed to connect'],
+    [18, 'partial transfer'],
+    [28, 'timed out'],
+    [35, 'TLS handshake failed'],
+    [52, 'empty reply'],
+  ];
+  for (const [code, phrase] of cases) {
+    const shaped = shapeTransportError(
+      { status: code, stderr: Buffer.from('curl: (' + code + ') NAMED-HOST-' + code + '.invalid: failed') },
+      'http://h.example/feed.xml', 200, {});
+    assert.equal(shaped.message,
+      'request failed for http://h.example/feed.xml: ' + phrase + ' (curl exit ' + code + ')',
+      'code ' + code + ' is not read through the vocabulary: ' + shaped.message);
+    assert.equal(shaped.message.includes('NAMED-HOST'), false,
+      'the line curl wrote reached the notice: ' + shaped.message);
+  }
+  const novel = shapeTransportError({ status: 99, stderr: Buffer.from('curl: (99) whatever it said') },
+    'http://h.example/feed.xml', 200, {});
+  assert.match(novel.message, /: curl exited with status 99$/,
+    'an uncommon code is still named in full: ' + novel.message);
+  assert.equal(novel.message.includes('whatever it said'), false,
+    'the line curl wrote reached the notice: ' + novel.message);
+});
+
+// TR-135: the URL is the last carrier of a name an answer supplied, and the URL serializer
+// respells a dot segment, so a discovered target's shaped error carries no request at all.
+test('a discovered target is shaped with no request in it', () => {
+  const url = 'https://api.github.com/repos/upstream-name/../../etc/upstream-name/releases';
+  const http = shapeHttpError(500, Buffer.from('boom'), url, 200, {}, true);
+  assert.equal(http.message, 'HTTP 500', 'the status is the whole notice: ' + http.message);
+  assert.equal(http.message.includes('upstream-name'), false, 'the request reached the notice');
+  const transport = shapeTransportError({ status: 7, stderr: Buffer.from('curl: (7) refused') },
+    url, 200, {}, true);
+  assert.equal(transport.message, 'request failed: failed to connect (curl exit 7)',
+    'the cause survives without the request: ' + transport.message);
+  assert.equal(transport.message.includes('upstream-name'), false, 'the request reached the notice');
+});
+
+// TR-136: the shaped transport text is bounded exactly by the value it claims, and the cause
+// gives way last -- a bound too small for the request prefix keeps the compact cause instead.
+test('the shaped transport text obeys its bound exactly', () => {
+  const long = 'x'.repeat(400);
+  // 56 is the compact form with the longest fixed cause whole; below it the bound is smaller
+  // than the diagnosis itself can be, so only the exactness assertion is asked of 40.
+  for (const limit of [40, 56, 61, 62, 200]) {
+    const shaped = shapeTransportError(
+      { status: 6, stderr: Buffer.from('curl: (6) Could not resolve host: ' + long) },
+      'https://h.example/' + long, limit, {});
+    assert.ok(shaped.message.length <= limit,
+      'the shaped text exceeds its ' + limit + '-character bound (' + shaped.message.length + '): ' + shaped.message);
+    if (limit >= 56) {
+      assert.match(shaped.message, /curl exit 6/, 'the exit code is lost to the bound: ' + shaped.message);
+    }
+  }
 });
 

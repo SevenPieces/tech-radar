@@ -35,8 +35,10 @@ export function redactUrl(url) {
   }
 }
 
-// curl's own diagnostic line is quoted in a notice, and a child-process message can carry
-// the whole argv -- which is where an Authorization header lives. Anything shaped like
+// curl's own diagnostic line is never quoted now -- the transport cause is shaped from its exit
+// code -- but a child-process message from any other thrown error can still carry the whole argv,
+// which is where an Authorization header lives, and every notice is redacted against these shapes
+// before it is published. Anything shaped like
 // that header or its Bearer value is removed before the text can reach a notice. The
 // authorization shape consumes the scheme as well as the first word: matching only up to the
 // first space deleted the word 'Basic' and left the credential behind in full. The scheme's
@@ -393,32 +395,66 @@ function requirePositive(value, what) {
 // bounded, tag-stripped snippet is still built, and stays on the error as its internal
 // body field, because the caller's refusal predicate is the one thing that has to read
 // the answer; it is a classification input and never notice text.
-export function shapeHttpError(status, body, url, limit, headers) {
+export function shapeHttpError(status, body, url, limit, headers, omitUrl = false) {
   const bound = requirePositive(limit, 'the error snippet limit in characters');
+  const secrets = requestSecrets(url, headers);
   const source = Buffer.isBuffer(body) ? body : Buffer.from(String(body ?? ''));
+  // By-value redaction runs before every bound this text meets: the decoded answer is redacted
+  // before it is cut, so a value the request sent cannot be published in half by the cut, and
+  // the bounded snippet is redacted again because plainText decodes an entity spelling the answer
+  // could have used to evade the first pass. The snippet is internal -- the rate-limit predicate
+  // reads it -- and never notice text.
   const snippet = redactSecrets(
-    neutraliseLinkSeams(plainText(decodeBuffer(source), bound)),
-    requestSecrets(url, headers),
+    neutraliseLinkSeams(plainText(redactSecrets(decodeBuffer(source), secrets), bound)),
+    secrets,
   );
   // The cap bounds the shaped text, and the status is what must never be lost with it: the
   // redacted URL takes the room the cap leaves, so a notice still reads 'HTTP <status> for'
   // even when a long URL has to be cut. The URL's scheme, host and path are what stays
-  // diagnosable.
+  // diagnosable. A repository discovered from an organisation listing is shaped with no request
+  // at all (omitUrl): its URL is the answer's own name respelled by the URL serializer -- a dot
+  // segment is normalised away -- so no by-value removal covers it, and the caller names the
+  // organisation row and the entry's ordinal instead.
   const prefix = `HTTP ${status} for `;
-  const shown = redactUrl(url);
+  const shown = omitUrl ? '' : redactSecrets(redactUrl(url), secrets);
   const room = Math.max(0, bound - prefix.length);
-  const shaped = new Error(prefix + (shown.length > room ? shown.slice(0, room) : shown));
+  const shaped = omitUrl
+    ? new Error(`HTTP ${status}`)
+    : new Error(prefix + (shown.length > room ? shown.slice(0, room) : shown));
   shaped.url = url;
+  shaped.cause = `HTTP ${status}`;
   shaped.httpStatus = Number(status);
   shaped.body = snippet;
   return shaped;
 }
 
-// A transport failure that produced no diagnostic line of its own: curl's process exit
-// status when it ran, or the spawn's error code when the binary could not be started at all.
-// Never the child-process message, which quotes the whole argv.
+// The transport cause is a fixed vocabulary read from curl's process exit code, never the
+// diagnostic line curl wrote. curl follows a Location header, so its line names the host the
+// answer chose for the redirect, and it also names the proxy the environment supplied: both are
+// text the request never carried, so no by-value removal can cover either, and the notice is
+// published. The exit code carries none of that -- it is a small integer from curl's own enum --
+// and it stays in the cause beside the phrase, so the notice is precise as well as diagnosable.
+// A code outside the common set is named in full, and no cause quotes a byte of the answer or the
+// environment either way.
+const CURL_EXIT_CAUSES = new Map([
+  [6, 'could not resolve the host'],
+  [7, 'failed to connect'],
+  [18, 'partial transfer'],
+  [28, 'timed out'],
+  [35, 'TLS handshake failed'],
+  [52, 'empty reply'],
+]);
+
+// curl's process exit status when it ran, or the spawn's error code when the binary could not be
+// started at all. Never the child-process message, which quotes the whole argv, and never curl's
+// stderr, which quotes the redirect host and the proxy name.
 function transportCause(err) {
-  if (Number.isInteger(err?.status)) return `curl exited with status ${err.status}`;
+  if (Number.isInteger(err?.status)) {
+    const phrase = CURL_EXIT_CAUSES.get(err.status);
+    return phrase === undefined
+      ? `curl exited with status ${err.status}`
+      : `${phrase} (curl exit ${err.status})`;
+  }
   if (typeof err?.code === 'string' && err.code !== '') {
     return `curl could not be started (${err.code})`;
   }
@@ -427,31 +463,38 @@ function transportCause(err) {
 
 // A child-process failure: curl exited non-zero, so no HTTP exchange completed.
 // err.status is curl's *process* exit code and err.stdout may hold a partial body
-// plus the write-out status line, so neither is read as an HTTP status; the cause
-// is curl's own first stderr line and the whole shaped text is bounded like every
-// other snippet. Pure and offline-testable.
-export function shapeTransportError(err, url, limit, headers) {
+// plus the write-out status line, so neither is read as an HTTP status. The cause is
+// the fixed vocabulary above, never curl's stderr line. Pure and offline-testable.
+export function shapeTransportError(err, url, limit, headers, omitUrl = false) {
   const bound = requirePositive(limit, 'the error snippet limit in characters');
-  const stderr = String(err?.stderr ?? '').trim();
-  const first = stderr.split('\n').map((line) => line.trim()).filter(Boolean)[0] ?? '';
-  const capped = first.length > bound ? first.slice(0, bound) : first;
-  // err.message is never a cause: Node builds it from the whole argv, and the argv carries
-  // the Authorization header. An empty stderr is reported from what the failure itself
-  // carries instead, which tells a missing dependency from an unreachable feed: curl's own
-  // process exit status when it ran, and the spawn's error code when it never started.
-  const cause = redactSecrets(capped || transportCause(err), requestSecrets(url, headers));
-  // The whole shaped text is bounded, and the cause is the part that stays whole: a notice
-  // quotes this message after a source of its own, and a target can be far longer than the
-  // bound, so the request the cause belongs to is what gives way first. The redacted request
-  // keeps the head of its path, and the diagnosis -- curl's own line -- is never lost to the
-  // bound.
+  // err.message is never a cause: Node builds it from the whole argv, and the argv carries the
+  // Authorization header, which the fixed cause above cannot carry at all.
+  const secrets = requestSecrets(url, headers);
+  const cause = redactSecrets(transportCause(err), secrets);
+  // The shaped text obeys the bound exactly. The cause is the part that stays whole: the request
+  // gives way first, so its room is what is left after the prefix, the separator and the whole
+  // cause. A bound too small for that pair falls back to the compact 'request failed: <cause>'
+  // before it cuts anything, so what gives way is the request and never the diagnosis; only a
+  // bound too small even for the compact form is sliced, and that slice is the exactness
+  // guarantee. The earlier shape added the separator outside the arithmetic and returned
+  // 'limit + 21' whenever the cause reached the cap. A repository discovered from an
+  // organisation listing is shaped with no request at all (omitUrl): its URL is the answer's
+  // own name respelled by the URL serializer, which by-value removal cannot cover.
   const prefix = 'request failed for ';
-  const room = Math.max(0, bound - prefix.length - cause.length - 2);
-  const shown = redactUrl(url);
-  const shaped = new Error(`${prefix}${shown.length > room ? shown.slice(0, room) : shown}: ${cause}`);
-  // No cause line of its own means curl never produced a diagnostic: the caller can tell a
-  // broken dependency from a source that answered.
-  shaped.noDiagnostic = capped === '';
+  const shortPrefix = 'request failed';
+  const separator = ': ';
+  const shown = omitUrl ? '' : redactSecrets(redactUrl(url), secrets);
+  const room = Math.max(0, bound - prefix.length - separator.length - cause.length);
+  const full = omitUrl
+    ? `${shortPrefix}${separator}${cause}`
+    : `${prefix}${shown.length > room ? shown.slice(0, room) : shown}${separator}${cause}`;
+  const compact = `${shortPrefix}${separator}${cause}`;
+  const text = full.length <= bound ? full : compact.slice(0, bound);
+  const shaped = new Error(text);
+  shaped.cause = cause;
+  // No process exit status means curl never ran: the caller can tell a broken dependency from a
+  // source that answered.
+  shaped.noDiagnostic = !Number.isInteger(err?.status);
   shaped.url = url;
   shaped.httpStatus = null; // a transport failure has no HTTP status
   shaped.exitStatus = Number.isInteger(err?.status) ? err.status : null;
@@ -459,7 +502,7 @@ export function shapeTransportError(err, url, limit, headers) {
   return shaped;
 }
 
-function curlBuffer(url, ms, headers = {}, ua = DEFAULT_UA, snippetLimit) {
+function curlBuffer(url, ms, headers = {}, ua = DEFAULT_UA, snippetLimit, omitUrl = false) {
   const args = ['-sSL', '--compressed', '--max-time', String(Math.ceil(requirePositive(ms, 'the request timeout in milliseconds') / 1000)), '-A', ua, '-w', WRITE_OUT];
   for (const [k, v] of Object.entries(headers)) args.push('-H', `${k}: ${v}`);
   // '--' ends curl's option list, so a target can never be read as a flag.
@@ -473,17 +516,19 @@ function curlBuffer(url, ms, headers = {}, ua = DEFAULT_UA, snippetLimit) {
     // configuration value here would only let a typo take the run down.
     raw = execFileSync('curl', args, { stdio: ['ignore', 'pipe', 'pipe'], maxBuffer: 64 * 1024 * 1024 });
   } catch (err) {
-    throw shapeTransportError(err, url, snippetLimit, headers);
+    throw shapeTransportError(err, url, snippetLimit, headers, omitUrl);
   }
   const { body, status } = splitCurlOutput(raw);
   // curl completed the exchange (exit 0) and the server answered 4xx/5xx: the only
   // case where a status is ours to report.
-  if (status >= 400) throw shapeHttpError(status, body, url, snippetLimit, headers);
+  if (status >= 400) throw shapeHttpError(status, body, url, snippetLimit, headers, omitUrl);
   return body;
 }
 
-export async function fetchText(url, ms, headers = {}, ua = DEFAULT_UA, snippetLimit) {
-  return decodeBuffer(curlBuffer(url, ms, headers, ua, snippetLimit));
+// omitUrl is for a request whose target came out of an answer rather than out of configuration:
+// the shaped text then names no request at all, because the URL is that answer's text respelled.
+export async function fetchText(url, ms, headers = {}, ua = DEFAULT_UA, snippetLimit, omitUrl = false) {
+  return decodeBuffer(curlBuffer(url, ms, headers, ua, snippetLimit, omitUrl));
 }
 
 export function decodeBuffer(buf) {

@@ -151,12 +151,14 @@ an unreadable release version is described, never reproduced. The URL a notice n
 path and loses its userinfo and its whole query string, so a secret embedded in a path survives that rule and
 reaches the notice and the candidate's published `source`; the path is what keeps the notice diagnosable, so read
 a notice as a diagnostic of a degraded source, not as proof that no secret is in it. The scrubbing of the
-request's own values stays as defence in depth for the collector's own wording and curl's diagnostic line: at the
+request's own values stays as defence in depth for the collector's own wording and the request's own values: at the
 single point every notice is pushed, the request's userinfo password is removed whatever its length while a
 username of under eight characters is not, the value of a parameter whose name is credential-shaped (a name
 carrying a stem such as `token`, `key`, `secret` or `auth`, however it is spelled) from three characters up, a
 credential header goes whole, and the credential shapes the collector recognises go too — nothing else the request
 put in its URL is removed.
+
+**The transport follows the environment.** `curl` is given no proxy option, so the run honours whatever `HTTP_PROXY`, `HTTPS_PROXY` and `NO_PROXY` the environment sets, and a proxy stands between the collector and every source, able to observe or replace any answer. A transport failure names the request's own redacted target and a cause read from `curl`'s exit code or its spawn code — a fixed phrase and the exit status, as in `could not resolve the host (curl exit 6)`, or `curl exited with status <n>` for any other code — never a diagnostic line the tool printed. `curl`'s line can name the host a redirect chose or the proxy the environment supplied, text the request never sent and the scrubbing above cannot remove, so the fixed cause is what keeps that name out of the notice, the pool, the coverage note and the operator line.
 
 **The GitHub budget is the one notice with a documented remedy.** The collector discovers the live limit at run
 time by probing `/rate_limit`, which GitHub documents as not consuming the core budget, so the probe is **free**

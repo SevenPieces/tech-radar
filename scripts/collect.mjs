@@ -42,6 +42,16 @@ const GITHUB_API = 'https://api.github.com';
 // the push. A caller that knows the request passes its secret list (requestSecrets); a notice
 // that quotes nothing the request sent needs none.
 const NOTICE_CONTROLS = /[\u0000-\u001f\u007f-\u009f]/g;
+// The notice cap has a usable range, not merely a type. Below the floor an assembled notice
+// cannot carry its source, its status and its cause: noticeSource gives the source at most half
+// the cap, so the other half has to hold the separator, the request prefix and the longest fixed
+// cause the transport shaper builds ('could not resolve the host (curl exit 6)'). Above the
+// ceiling the value bounds nothing an assembled notice could contain -- every part of one is
+// bounded already -- so it states the policy of no cap, and the whole reason the cap exists is
+// that one hostile answer must not become an unbounded published note. Both ends are refused as
+// a configuration error that names the setting (exit 2) rather than obeyed silently.
+const MIN_NOTICE_CHARS = 128;
+const MAX_NOTICE_CHARS = 100000;
 
 // The notice cap is a quantity like every other one, so it is configuration and never a literal
 // here. A caller may pass the settings object it read; a caller that carries none -- a fixture,
@@ -54,17 +64,25 @@ function shippedNoticeCap() {
   if (shippedNoticeLimit === undefined) {
     let value = null;
     try { value = Number(readSettings(SHIPPED_SETTINGS).notice_max_chars); } catch { value = null; }
-    shippedNoticeLimit = Number.isInteger(value) && value > 0 ? value : null;
+    shippedNoticeLimit = usableNoticeCap(value) ? value : null;
   }
   return shippedNoticeLimit;
+}
+// A usable cap is an integer inside the range above; anything else is refused, not clamped. The
+// range is stated once here so the reader of the settings file, the direct caller and the shipped
+// fallback cannot disagree about it.
+function usableNoticeCap(value) {
+  return Number.isInteger(value) && value >= MIN_NOTICE_CHARS && value <= MAX_NOTICE_CHARS;
+}
+function outOfRangeCap(raw) {
+  return `notice_max_chars is out of range in config/settings.md: ${JSON.stringify(raw)}`
+    + ` (an integer between ${MIN_NOTICE_CHARS} and ${MAX_NOTICE_CHARS} is required)`;
 }
 function noticeLimit(settings) {
   if (settings && Object.prototype.hasOwnProperty.call(settings, 'notice_max_chars')
     && settings.notice_max_chars !== undefined) {
     const n = Number(settings.notice_max_chars);
-    if (!Number.isInteger(n) || n <= 0) {
-      throw new Error(`notice_max_chars is invalid in config/settings.md: ${JSON.stringify(settings.notice_max_chars)}`);
-    }
+    if (!usableNoticeCap(n)) throw new Error(outOfRangeCap(settings.notice_max_chars));
     return n;
   }
   const shipped = shippedNoticeCap();
@@ -72,10 +90,12 @@ function noticeLimit(settings) {
   throw new Error('notice_max_chars is missing or invalid in config/settings.md');
 }
 // A cap that arrives as anything else means a call site forgot to resolve one, and an undefined
-// cap silently returns the text unbounded -- the defect this cap closes -- so it is refused.
+// cap silently returns the text unbounded -- the defect this cap closes -- so it is refused. The
+// range is checked here too, at the last gate before the slice, so no path can bound a notice
+// with a number that cannot carry one.
 function requireNoticeLimit(value) {
-  if (!Number.isInteger(value) || value <= 0) {
-    throw new Error(`the notice limit in characters must be a positive integer, got ${JSON.stringify(value)}`);
+  if (!usableNoticeCap(value)) {
+    throw new Error(`the notice limit in characters must be an integer between ${MIN_NOTICE_CHARS} and ${MAX_NOTICE_CHARS}, got ${JSON.stringify(value)}`);
   }
   return value;
 }
@@ -146,11 +166,13 @@ function redactNotices(notices, secrets, limit) {
 // which part of a credential that slice holds is the parser's choice, so no by-value redaction
 // can identify it. The notice names the endpoint and says the answer was not JSON, which is
 // what a reader of a degraded source needs, and the body never reaches the notice at all.
-function parseJson(text, url) {
+function parseJson(text, url, omitUrl = false) {
   try {
     return JSON.parse(text);
   } catch {
-    throw new Error(`the response was not JSON (${redactUrl(url)})`);
+    // A discovered target's URL spells the answer's own name, so that path answers with no
+    // request in the message at all and the notice names the organisation row and the ordinal.
+    throw new Error(omitUrl ? 'the response was not JSON' : `the response was not JSON (${redactUrl(url)})`);
   }
 }
 
@@ -268,6 +290,13 @@ function validateSettings(settings, rows, options) {
       throw new Error(`${key} is missing or invalid in config/settings.md`);
     }
   }
+  // The notice cap is a positive integer like the rest, but it has a usable range as well: a cap
+  // too small for the source, the status and the cause, and a cap too large to bound anything,
+  // are each refused here -- before the first request -- so the operator reads a configuration
+  // error that names the setting instead of a published notice that carries no diagnosis.
+  if (rows.length > 0 && !usableNoticeCap(Number(settings?.notice_max_chars))) {
+    throw new Error(outOfRangeCap(settings?.notice_max_chars));
+  }
   const github = rows.some((r) => r.kind === 'github-repo' || r.kind === 'github-org');
   const reserve = Number(settings?.github_rate_limit_reserve);
   if (github && (!Number.isInteger(reserve) || reserve < 0)) {
@@ -375,6 +404,17 @@ function githubSource(label, t, limit) {
 function targetSecrets(t, secrets) {
   return t.discovered ? [...secrets, String(t.target)] : secrets;
 }
+// The cause a notice about a discovered repository carries. The shaped error's own message is
+// not used for one: it quotes the request, and the request's URL spells the answer's name in
+// the URL serializer's spelling, which by-value removal cannot cover (a dot segment is
+// normalised away). The status, or the fixed transport cause, is what the shaper classified,
+// and the endpoint is the collector's own noun for the request it made, never the answer's
+// text -- so the notice records the source, the status and the cause with no request in it.
+function discoveredCause(endpoint, err) {
+  if (Number.isInteger(err?.httpStatus)) return `HTTP ${err.httpStatus} for the ${endpoint} request`;
+  if (typeof err?.cause === 'string' && err.cause !== '') return `request failed: ${err.cause}`;
+  return String(err?.message ?? 'request failed');
+}
 
 export async function collectGithub(rows, ctx) {
   const candidates = [];
@@ -388,7 +428,13 @@ export async function collectGithub(rows, ctx) {
   if (!Number.isFinite(reserve) || reserve < 0) {
     throw new Error('github_rate_limit_reserve is missing or invalid in config/settings.md');
   }
-  const get = (url) => ctx.net.fetchText(url, ctx.timeout, headers, s.user_agent, s.error_snippet_max_chars);
+  // A request whose target came out of the organisation listing is fetched with omitUrl, so any
+  // shaped error it raises names no request: the URL would spell the answer's own repository name,
+  // and the URL serializer normalises a dot segment away, so by-value removal cannot cover that
+  // spelling. Every request whose target came from configuration is fetched unchanged.
+  const get = (url, omitUrl = false) => ctx.net.fetchText(
+    url, ctx.timeout, headers, s.user_agent, s.error_snippet_max_chars, omitUrl,
+  );
   // The request's own secrets, for the notice boundary: every call in the block can quote the
   // server's answer in a notice, and the header this path sends is never in the URL.
   const secretsFor = (url) => requestSecrets(url, headers);
@@ -469,7 +515,7 @@ export async function collectGithub(rows, ctx) {
     const url = `${GITHUB_API}/repos/${t.target}/releases`
       + `?per_page=${encodeURIComponent(s.github_releases_per_repo)}`;
     try {
-      const body = parseJson(await get(url), url);
+      const body = parseJson(await get(url, t.discovered), url, t.discovered);
       if (!Array.isArray(body)) throw new Error('unexpected response shape');
       for (const rel of body) {
         if (rel.draft || !rel.tag_name || !rel.html_url) continue;
@@ -488,7 +534,10 @@ export async function collectGithub(rows, ctx) {
         });
       }
     } catch (err) {
-      pushNotice(notices, `${githubSource('github', t, limit)}: ${err.message}`, targetSecrets(t, secretsFor(url)), limit);
+      // A discovered repository's notice is built from the classification, never from the
+      // shaped message: the message quotes the request, and its URL spells the answer's name.
+      const detail = t.discovered ? discoveredCause('releases', err) : err.message;
+      pushNotice(notices, `${githubSource('github', t, limit)}: ${detail}`, targetSecrets(t, secretsFor(url)), limit);
       // The refusal is the settled allowance, so the block stops spending here: the refused
       // repository is named by this notice and by the refusal count, and every repository after
       // it - which the run never asked for - is what the budget notice counts as unchecked.
@@ -508,7 +557,7 @@ export async function collectGithub(rows, ctx) {
     const url = `${GITHUB_API}/repos/${t.target}/tags`
       + `?per_page=${encodeURIComponent(s.github_tags_per_repo)}`;
     try {
-      const body = parseJson(await get(url), url);
+      const body = parseJson(await get(url, t.discovered), url, t.discovered);
       if (!Array.isArray(body)) throw new Error('unexpected response shape');
       for (const tag of body) {
         if (!tag.name || !tag.commit || !tag.commit.sha) continue;
@@ -526,7 +575,8 @@ export async function collectGithub(rows, ctx) {
         tagLeads += 1;
       }
     } catch (err) {
-      pushNotice(notices, `${githubSource('github-tags', t, limit)}: ${err.message}`, targetSecrets(t, secretsFor(url)), limit);
+      const detail = t.discovered ? discoveredCause('tags', err) : err.message;
+      pushNotice(notices, `${githubSource('github-tags', t, limit)}: ${detail}`, targetSecrets(t, secretsFor(url)), limit);
       if (refused(err)) { shortfall.tags = tagFallbacks.length - i - 1; break; }
     }
   }
@@ -1020,11 +1070,12 @@ export function noticeWarning(count) {
     + `the digest's Coverage note must report them; Collector notices: ${count}`;
 }
 
-// The one line an operator sees for a degraded run. A transport failure that produced no
-// diagnostic of its own -- curl never started, or curl ran and said nothing -- ends in its
-// cause, so the line repeats that reason: a broken dependency should not require reading the
-// pool to be seen.
-const TRANSPORT_TAIL = /(curl exited with status \d+|curl could not be started \([^)]+\))$/;
+// The one line an operator sees for a degraded run. A transport failure ends in the fixed
+// cause the shaper read from curl's exit code -- or, when curl never started, in the spawn
+// code -- so the line repeats that reason: a broken dependency should not require reading the
+// pool to be seen. The vocabulary is the shaper's, never curl's own line, so this line cannot
+// carry the redirect host or the proxy name into an operator's terminal either.
+const TRANSPORT_TAIL = /(could not resolve the host|failed to connect|timed out|TLS handshake failed|empty reply|partial transfer|curl exited with status \d+|curl could not be started \([^)]+\)|curl failed)$/;
 function operatorWarning(notices) {
   const line = noticeWarning(notices.length);
   for (const notice of notices) {

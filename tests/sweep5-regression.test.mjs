@@ -110,8 +110,12 @@ test('TR-127 a repository name the organisation listing supplied reaches no noti
   assert.ok(new RegExp('\\b' + ORDINAL_ROW + '\\b').test(notice),
     'the notice does not name the entry the listing put at position ' + ORDINAL_ROW + ': ' + notice);
   assert.ok(/HTTP 500/.test(notice), 'the notice does not carry the status: ' + notice);
-  assert.ok(/for https:\/\/api\.github\.com\/repos\//.test(notice),
-    'the notice does not carry the cause: ' + notice);
+  // The request URL is the remaining carrier of the discovered name (the URL serializer spells a
+  // dot segment differently than the by-value removal matches), so a notice about a discovered
+  // repository carries no request at all: the endpoint noun is the cause it records instead.
+  assert.equal(/https:\/\/api\.github\.com/.test(notice), false,
+    'the notice carries the request URL, which spells the discovered name: ' + notice);
+  assert.ok(/releases/.test(notice), 'the notice does not carry the cause: ' + notice);
 
   // The Coverage note is Markdown and the reader renders it, so the case renders it too. The
   // reading is exercised on a planted marker first: a reading that surfaced no marker could
