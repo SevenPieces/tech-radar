@@ -282,9 +282,15 @@ function consumeCredentialShapedTokens(text) {
 //     because the whitespace run stops at the line terminator;
 //   - the refusals below published a credential standing in the value they declined.
 // So the end of the value is a LINE, not a guess. The continuation the reader still follows is the
-// surface's own fold (see authorizationValueLineEndsAt): a next line that begins with whitespace and
-// then the attribute list's separator or another attribute's atom, and that does not open with
-// another header keyword. Everything on the value's line is the value.
+// surface's own fold (see authorizationValueLineEndsAt): an indented next line -- the indentation
+// alone, whatever the line then spells -- that does not open with another header keyword. Everything
+// on the value's lines is the value. Batch 69 (closing sweep F34-1) removed the last guess standing
+// here: the fold read the continuation only when it opened with an attribute, a quote or the list
+// separator, so a credential the surface wrapped onto an indented line of its own was published on
+// both entry points, and a ','/';' continuation after a prose head was never read at all (the atom
+// run had already stopped at the prose, so AUTH_SEPARATED_ATOM was never reached). The fold's own
+// limit is unchanged and is still the only one: a line that opens with another credential-header
+// keyword is the next field and is never swallowed as this value's tail.
 //
 // What a value that is NOT a credential header gives up: the credential-shaped runs inside it are
 // still consumed (consumeCredentialShapedTokens below), so a credential behind a refused seam does
@@ -350,30 +356,39 @@ function authorizationKeywordStartsAt(source, at) {
 }
 // How a header VALUE's run ends. A header value is one line (see AUTH_WHITESPACE_RUN), so the run
 // ends at the line terminator, EXCEPT for the one continuation a real surface writes: the wrapped
-// value. A wrapped continuation line is recognised by the surface's own fold -- the line carries
-// leading whitespace, and what follows that whitespace is the attribute list's separator (',' or
-// ';', the spelling RFC 7230's fold and the corpus both use) or the first atom of another attribute
-// ('username=...', '"u"'). A line that opens with another header keyword is a field of its own and
-// never a continuation, and a line of ordinary prose is never one either.
+// value. A wrapped continuation line is recognised by the surface's own fold, and the fold's mark is
+// THE INDENTATION (RFC 7230's obs-fold) and nothing else: an indented line that carries an atom, or
+// that opens with the attribute list's separator (',' or ';'), continues the value whatever it then
+// spells. Nothing about the continuation's own shape decides this any more -- Batch 69 (closing
+// sweep F34-1) removed the last such test, which read the line only when its first atom carried '=',
+// began with a quote or the line opened with ','/';'. That test published a credential the surface
+// wrapped onto an indented line of its own ('authorization: Digest username="u"' then an indented
+// bare token), published every attribute of a list wrapped once more, and never read a ','/';'
+// continuation at all when the value's head was prose. Two lines are still never continuations: a
+// line with no leading whitespace (the line rule's own limit -- a header value is one line, and the
+// next unindented line is another field) and a line that opens with another credential-header
+// keyword (a field of its own, which AUTH_SEPARATED_ATOM and the guards depend on). An indented line
+// with nothing but whitespace on it is not a continuation either: it carries no atom and no
+// separator, so the fold stops there rather than stepping over it.
 function authorizationValueLineEndsAt(source, end) {
-  const terminator = /\r\n|\n|\r/.exec(source.slice(end));
-  if (terminator === null) return source.length;
-  let lineEnd = end + terminator.index;
+  // The fold is walked in one loop rather than one recursion per continuation line: the recursion
+  // (Batch 67) cost a stack frame and a source slice per folded line, so a deep fold threw
+  // RangeError out of the exported redaction where the previous revision answered in milliseconds
+  // (closing sweep F34-7). The answer is the same one line at a time.
+  let cursor = end;
   for (;;) {
-    const nextLine = lineEnd + terminator[0].length;
-    const fold = /^[\t \u00a0]+/, foldMatch = fold.exec(source.slice(nextLine));
-    if (foldMatch === null) break;
-    const afterFold = nextLine + foldMatch[0].length;
-    if (authorizationKeywordStartsAt(source, afterFold)) break;
-    const first = AUTH_ATOM_AT.exec(source.slice(afterFold));
-    if (first === null) break;
-    const continues = /^[,;]/.test(source.slice(afterFold))
-      || first[0].includes('=') || /^["']/.test(first[0]);
-    if (!continues) break;
-    lineEnd = authorizationValueLineEndsAt(source, afterFold);
-    break;
+    const terminator = /\r\n|\n|\r/.exec(source.slice(cursor));
+    if (terminator === null) return source.length;
+    const lineEnd = cursor + terminator.index;
+    const afterTerminator = lineEnd + terminator[0].length;
+    const fold = /^[\t \u00a0]+/, foldMatch = fold.exec(source.slice(afterTerminator));
+    if (foldMatch === null) return lineEnd;
+    const afterFold = afterTerminator + foldMatch[0].length;
+    if (authorizationKeywordStartsAt(source, afterFold)) return lineEnd;
+    const rest = source.slice(afterFold);
+    if (AUTH_ATOM_AT.exec(rest) === null && !/^[,;]/.test(rest)) return lineEnd;
+    cursor = afterFold;
   }
-  return lineEnd;
 }
 // THE VALUE OF A CREDENTIAL HEADER IS READ WHOLE (Batch 67; the closing sweep's F33-1, F33-2,
 // F33-3, F33-5). Everything after the header's separator to the end of its line -- the wrapped

@@ -17,8 +17,8 @@ const { redactCredentialShapes, redactSecrets } = await import(NET_MODULE);
 import { assembleNotice } from '../scripts/collect.mjs';
 import { SKILL_ROOT, shippedFiles } from './lib/shipped-files.mjs';
 import {
-  CREDENTIAL_SHAPES, KEYWORDS, PROSE_COST, PROSE_KEPT, PROSE_TAILS, SCHEME_WORDS,
-  TAIL_CREDENTIAL_HELD, TAIL_CREDENTIAL_SHAPES,
+  CREDENTIAL_SHAPES, FOLD_CONTINUATION_SHAPES, FOLD_HELD, FOLD_LIMIT_ROWS, KEYWORDS, PROSE_COST,
+  PROSE_KEPT, PROSE_TAILS, SCHEME_WORDS, TAIL_CREDENTIAL_HELD, TAIL_CREDENTIAL_SHAPES,
 } from './lib/authorization-corpus.mjs';
 
 // The two entry points whose agreement is the property Batch 61 introduced: the credential-free
@@ -91,6 +91,58 @@ test('Batch 67: a credential at the tail of a value goes whole, on both entry po
         + JSON.stringify(redact(text)));
     }
   }
+});
+
+
+// Batch 69 (closing sweep F34-1, the same class F33-2 was filed for and Batch 67 claimed closed).
+// The fold that makes the value "everything to the end of its line, the wrapped continuation beside
+// it included" read the continuation only when its first atom carried an attribute '=', began with
+// a quote, or the line opened with ','/';'. A credential wrapped onto an indented line of its own
+// was published on BOTH entry points, and after a prose head not even a ','/';' continuation was
+// read. The fold's mark is the indentation and nothing else now. Each row asserts the whole output,
+// so a rule that folds a line it must not (the next header, an unindented line, a blank indented
+// line) is caught as exactly as one that fails to fold a line it must.
+test('Batch 69: an indented continuation is the value, and the two non-folds are not', () => {
+  let rows = 0;
+  const leaked = [];
+  for (const row of FOLD_CONTINUATION_SHAPES) {
+    rows += 1;
+    for (const [name, redact] of PATHS) {
+      const out = redact(row.text);
+      assert.equal(out, row.out,
+        name + ' changed what the fold costs ("' + row.id + '"): got ' + JSON.stringify(out)
+        + ', recorded ' + JSON.stringify(row.out) + ' (' + row.why + ')');
+      assert.equal(redact(out), out, 'the fold rewrite is not a fixed point: ' + JSON.stringify(out));
+    }
+    assert.equal(redactSecrets(row.text, []), redactCredentialShapes(row.text),
+      'the two entry points disagree about ' + JSON.stringify(row.text));
+    for (const credential of row.gone) {
+      for (const [name, redact] of PATHS) {
+        if (redact(row.text).includes(credential)) leaked.push(name + ' | ' + row.id + ' | ' + credential);
+      }
+    }
+  }
+  assert.deepEqual(leaked, [], 'a credential on an indented continuation was published');
+  for (const row of FOLD_LIMIT_ROWS) {
+    rows += 1;
+    for (const [name, redact] of PATHS) {
+      const out = redact(row.text);
+      assert.equal(out, row.out,
+        name + ' folded a line the value must not take ("' + row.id + '"): got ' + JSON.stringify(out)
+        + ', recorded ' + JSON.stringify(row.out) + ' (' + row.why + ')');
+      assert.equal(redact(out), out, 'the limit rewrite is not a fixed point: ' + JSON.stringify(out));
+    }
+  }
+  for (const row of FOLD_HELD) {
+    rows += 1;
+    for (const [name, redact] of PATHS) {
+      assert.equal(redact(row.text), row.out,
+        name + ' moved the recorded bound ("' + row.id + '"): got ' + JSON.stringify(redact(row.text))
+        + ', recorded ' + JSON.stringify(row.out) + ' (' + row.why + ')');
+    }
+  }
+  assert.equal(rows, FOLD_CONTINUATION_SHAPES.length + FOLD_LIMIT_ROWS.length + FOLD_HELD.length,
+    'the fold corpus changed size: ' + rows);
 });
 
 test('the closing sweep F32-3: the prose corpus is byte-identical, and the cost rows are recorded', () => {

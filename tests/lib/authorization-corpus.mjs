@@ -23,6 +23,7 @@ export const AWS_KEY = 'AK' + 'IAEXAMPLE';
 export const TOKEN_GAP = 'ABCDEFGH' + '12345678';
 export const ALPHA_CRED = 'abcdefgh' + 'ijklmnop';
 export const NEWLINE = String.fromCharCode(10);
+export const CRLF = String.fromCharCode(13, 10);
 export const KEYWORDS = [
   'authorization: ',
   'Authorization: ',
@@ -152,6 +153,96 @@ export const TAIL_CREDENTIAL_SHAPES = [
 export const TAIL_CREDENTIAL_HELD = [
   { id: 'all-alpha token after two prose atoms', text: 'authorization: see Also ' + ALPHA_CRED,
     why: 'no digit anywhere, so it is not credential-shaped by the module rule' },
+];
+// Batch 69 (closing sweep F34-1). The whole-value rule says the value is everything to the end of
+// its line "the wrapped continuation beside it included", but the fold read the continuation only
+// when its first atom carried '=', began with a quote, or the line itself opened with ','/';'. A
+// credential the surface wrapped onto an indented line of its own was therefore published byte for
+// byte on both entry points, and a ','/';' continuation after a PROSE head was never read at all
+// (the atom run had already stopped at the prose, so AUTH_SEPARATED_ATOM was never reached). The
+// fold's mark is the INDENTATION now -- RFC 7230's obs-fold -- and nothing about the continuation's
+// own shape decides it. Every row below is a row the old acceptance test published.
+export const FOLD_CONTINUATION_SHAPES = [
+  { id: 'bare credential on an indented continuation',
+    text: 'authorization: Digest username="u"' + NEWLINE + '  ' + TOKEN_GAP,
+    out: '[redacted]', gone: [TOKEN_GAP],
+    why: 'the continuation carries no attribute mark at all; the indentation is the fold' },
+  { id: 'attribute list wrapped twice, credential on the third line',
+    text: 'authorization: a="1"' + NEWLINE + ' b="2"' + NEWLINE + ' ' + TOKEN_GAP,
+    out: 'authorization: a="1"' + NEWLINE + ' b="2"' + NEWLINE + ' [redacted]', gone: [TOKEN_GAP],
+    why: 'the fold follows an indented line that carries no equality mark as readily as one that does' },
+  { id: 'tab-indented continuation',
+    text: 'authorization: Digest username="u"' + NEWLINE + '\t' + TOKEN,
+    out: '[redacted]', gone: [TOKEN], why: 'a tab is indentation, the mark RFC 7230 names' },
+  { id: 'CRLF then an indented continuation',
+    text: 'authorization: Digest username="u"' + CRLF + '  ' + TOKEN,
+    out: '[redacted]', gone: [TOKEN], why: 'the terminator decides nothing about whether the next line folds' },
+  { id: 'non-breaking-space indentation',
+    text: 'authorization: Digest username="u"' + NEWLINE + '\u00a0' + TOKEN,
+    out: '[redacted]', gone: [TOKEN], why: 'the fold whitespace class carries U+00A0 beside the tab and the space' },
+  { id: 'prose head, credential on an indented continuation',
+    text: 'authorization: see the notes' + NEWLINE + '  ' + TOKEN,
+    out: 'authorization: see the notes' + NEWLINE + '  [redacted]', gone: [TOKEN],
+    why: 'a prose head is not an accepted value, but the continuation is still part of it' },
+  { id: 'prose head, comma-led continuation',
+    text: 'authorization: see the notes' + NEWLINE + '  ,response="' + HEX + '"',
+    out: 'authorization: see the notes' + NEWLINE + '  ,response="[redacted]"', gone: [HEX],
+    why: 'the list separator opens the continuation; the atom run had stopped at the prose' },
+  { id: 'prose head, semicolon-led continuation',
+    text: 'authorization: see the notes' + NEWLINE + '  ;' + TOKEN,
+    out: 'authorization: see the notes' + NEWLINE + '  ;[redacted]', gone: [TOKEN],
+    why: 'the SigV4 separator opens the continuation; nothing read it before Batch 69' },
+  { id: 'prose head, attribute continuation',
+    text: 'authorization: see Also' + NEWLINE + '  response="' + HEX + '"',
+    out: 'authorization: see Also' + NEWLINE + '  response="[redacted]"', gone: [HEX],
+    why: 'the row Batch 67 did close, kept here so the fold stays measured in both heads' },
+];
+// The two lines that are still never continuations. The first is the line rule's own limit -- a
+// header value is one line, and the next UNINDENTED line is another field -- and the second is the
+// guard the whole-value rule depends on: a line that opens with another credential-header keyword
+// is a header of its own and is never swallowed as the previous value's tail. Each row pins the
+// whole output, so a rule that folds either line is CAUGHT rather than merely suspected.
+export const FOLD_LIMIT_ROWS = [
+  { id: 'an indented next header line is not folded',
+    text: 'authorization: Digest username="u"' + NEWLINE + '  Authorization: Basic ' + B64,
+    out: '[redacted]' + NEWLINE + '  [redacted]',
+    why: 'the continuation opens with a header keyword, so it is read as the field it is' },
+  { id: 'an unindented next header line is not folded',
+    text: 'authorization: Digest username="u"' + NEWLINE + 'authorization: ' + TOKEN,
+    out: '[redacted]' + NEWLINE + '[redacted]',
+    why: 'indentation is the fold mark; the next field is read by the pass on its own' },
+  { id: 'an unindented line of prose is not folded',
+    text: 'authorization: Digest username="u"' + NEWLINE + 'ordinary prose on the next line',
+    out: '[redacted]' + NEWLINE + 'ordinary prose on the next line',
+    why: 'the value is a line; a line of ordinary prose beside it is a different field' },
+  { id: 'an indented blank line is not a continuation',
+    text: 'authorization: Digest username="u"' + NEWLINE + '  ' + NEWLINE + 'ordinary prose',
+    out: '[redacted]' + NEWLINE + '  ' + NEWLINE + 'ordinary prose',
+    why: 'an indented line with no atom and no separator is skipped, not stepped over' },
+  { id: 'the value ends at its own line terminator',
+    text: 'authorization: Digest username="u"' + NEWLINE,
+    out: '[redacted]' + NEWLINE,
+    why: 'the fold adds lines only when there is an indented continuation to add' },
+];
+// The bound this rule leaves, measured and pinned rather than left implicit: a continuation with NO
+// indentation is not a fold, so a credential standing alone on the next unindented line is
+// published. The reach is the module surface -- every candidate field a shipped collector builds
+// crosses plainText, which flattens whitespace before the rules see the text, and an unindented next
+// line is a different field in every structured surface the rules are handed. Pinned so a later
+// widening of the fold is a deliberate act, and so the recorded bound cannot be read as an accident.
+export const FOLD_HELD = [
+  { id: 'a credential on an unindented next line',
+    text: 'authorization: Digest username="u"' + NEWLINE + TOKEN_GAP,
+    out: '[redacted]' + NEWLINE + TOKEN_GAP,
+    why: 'no indentation, so the next line is not the value; the module shape test still calls this a credential' },
+  { id: 'a prose head with an unindented credential continuation',
+    text: 'authorization: see the notes' + NEWLINE + TOKEN,
+    out: 'authorization: see the notes' + NEWLINE + TOKEN,
+    why: 'same bound from the declined side; no text is consumed because no line folded' },
+  { id: 'a prose head with an unindented comma continuation',
+    text: 'authorization: see the notes' + NEWLINE + ',' + TOKEN,
+    out: 'authorization: see the notes' + NEWLINE + ',' + TOKEN,
+    why: 'the separator does not fold a line the indentation rule leaves alone' },
 ];
 export const PROSE_TAILS = [
   'rotation is scheduled for next week',
