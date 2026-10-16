@@ -437,8 +437,12 @@ export function requestSecretSets(url, headers) {
   // notice-only removal set, candidate is the candidate-pass set (a credential position long
   // enough not to be ordinary prose), and a candidate value is always a notice value too.
   const add = (value, { notice = false, candidate = false } = {}) => {
-    const v = String(value ?? '');
-    if (v === '') return;
+    // The internal characters are normalised out of every value before it is recorded, and a value
+    // that is empty or only whitespace once normalised is not collected at all: recording it would
+    // put a one-character ' ' into the removal set, which reaps every standalone space in every
+    // notice (F28-1).
+    const v = normalizeInternalChars(String(value ?? ''));
+    if (v.trim() === '') return;
     if (candidate) {
       all.add(v);
       credentials.add(v);
@@ -451,7 +455,11 @@ export function requestSecretSets(url, headers) {
   // form of the decoded one. A server that echoes $request_uri republishes the raw spelling,
   // and removing only the decoded form left that spelling readable in the notice.
   const addSpellings = (value, eligible) => {
-    const v = String(value ?? '');
+    // Normalised first, and dropped whole when the normalisation leaves nothing but whitespace: a
+    // value that IS an internal character would otherwise enter the removal set as ' ' through one
+    // of its spellings (the raw one is ' ' and '%20' is not empty once percent-encoded).
+    const v = normalizeInternalChars(String(value ?? ''));
+    if (v.trim() === '') return;
     let decoded = null;
     try { decoded = decodeURIComponent(v); } catch { /* not percent-encoded */ }
     for (const spelling of [v, decoded, v.replace(/\+/g, ' ')]) {
@@ -631,8 +639,24 @@ function urlSpelling(value) {
 const REDACTION_SENTINEL = '\uFFFF';
 const REDACTION_SENTINEL_RE = /\uFFFF/g;
 const REDACTED_MARKER = '[redacted]';
+// The two code points this module uses as internal marks: the removal sentinel above and the
+// scaffold placeholder (maskStripped's SCAFFOLD_MASK, U+E000). Neither may be carried into the
+// pass by any text or any value, and neither may reach published text, so BOTH are normalised to a
+// space wherever a text or a value enters. Normalising one and leaving the other is what made a
+// value equal to the other reach the removal set as the one-character value ' ' (F28-1): the value
+// then matched every standalone space in every notice, and at a cap the growth the removal wrote
+// was cut back at the cap and took the transport cause with it.
+const INTERNAL_MARK_RE = /[\uE000\uFFFF]/g;
 function withoutSentinel(value) {
-  return String(value ?? '').replace(REDACTION_SENTINEL_RE, ' ');
+  return String(value ?? '').replace(INTERNAL_MARK_RE, ' ');
+}
+// The normalisation on its own, for a caller that publishes a text the by-value removal may not
+// otherwise need to touch: the collector's credential-free candidate path used to skip the
+// redaction entirely, so a server answer carrying either character reached the pool byte for byte
+// (verification F28-4). A private-use character is invisible in a pool field, and no field of a
+// published pool may carry one.
+export function normalizeInternalChars(text) {
+  return withoutSentinel(text);
 }
 
 // The marker's own shape, read as a span: a marker an earlier pass wrote is the one region this
@@ -690,7 +714,12 @@ export function redactSecrets(text, secrets) {
     // the alternative (leaving the value whole) let a one-character mask-equal credential match
     // every mask in the text and delete the status and the cause from every other row's notice.
     const value = maskStripped(withoutSentinel(raw));
-    if (value === '') continue;
+    // A value that is empty, or that is only whitespace once the internal characters are
+    // normalised out of it, is not collected at all. The one-character ' ' is the case that
+    // matters: boundedValue reads its boundary at the value's last word character, and a value
+    // whose last character is not a word character carries no lookahead, so ' ' matched every
+    // standalone space in the text and rewrote it with a ten-character marker (F28-1).
+    if (value.trim() === '') continue;
     values.add(value);
     const respelled = urlSpelling(value);
     if (respelled !== null) values.add(withoutSentinel(respelled));

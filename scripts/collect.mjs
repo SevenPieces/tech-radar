@@ -16,6 +16,7 @@ import {
   fetchText, hostOf, isDiscoveryOnly, splitItems, field, atomLink, plainText, redactUrl,
   neutraliseMarkers, neutraliseLinkSeams, noticePreservingRewrites, neutraliseUrl, redactSecrets,
   requestSecrets, requestSecretSets, neutraliseTagSpans, neutraliseEntityTags, repriceShapedError,
+  normalizeInternalChars,
 } from './lib/net.mjs';
 
 // The collector must work from any working directory, so the default configuration
@@ -1696,6 +1697,13 @@ export async function collectAll(config, opts) {
   // published a candidate summary of 'We sort the results in [redacted] order'; a value that is
   // ordinary configuration is not a credential and never rewrites published prose.
   //
+  // F28-4 (the credential-free path): the internal characters are normalised out of every candidate
+  // field on BOTH paths. The pass below used to be skipped entirely when the run issued no
+  // credential, and the skip took the normalisation with it: a server answer carrying the scaffold
+  // mask or the removal sentinel reached the pool byte for byte. The private-use characters are
+  // invisible in a pool field and no field of a published pool may carry one, so the guard is now
+  // on what the field crosses rather than on whether there is a credential to remove.
+  //
   // Batch 43 re-opened that class for a moment by reading the new whole-token names ('st', 'state',
   // 'status', 'sid', 'sso', 'mac', 'hash', 'uuid', 'authorization') for this purpose too: an
   // ordinary configured value under one of them ('?state=archived', '?status=releases') put an
@@ -1705,12 +1713,14 @@ export async function collectAll(config, opts) {
   // the name is genuinely credential-bearing, or when the value is itself credential-shaped, so a
   // token-named position that really carries a credential is still removed here while an ordinary
   // value under an ordinary token name - and under an ordinary compound of one, '?state-of-the-art='
-  // - never rewrites a published word. The per-source pass above stays as it is, and the redaction
-  // is skipped entirely when the run issued no credential at all (nothing can have been echoed).
-  const redactedCandidates = credentialUnion.length === 0 ? candidates : candidates.map((candidate) => {
+  // - never rewrites a published word. The per-source pass above stays as it is.
+  const redactedCandidates = candidates.map((candidate) => {
     const out = { ...candidate };
     for (const [field, value] of Object.entries(out)) {
-      if (typeof value === 'string') out[field] = redactSecrets(value, credentialUnion);
+      if (typeof value !== 'string') continue;
+      out[field] = credentialUnion.length === 0
+        ? normalizeInternalChars(value)
+        : redactSecrets(value, credentialUnion);
     }
     return out;
   });
