@@ -694,7 +694,12 @@ export function shapeHttpError(status, body, url, limit, headers, omitUrl = fals
   const shaped = omitUrl
     ? new Error(`HTTP ${status}`)
     : new Error(prefix + (shown.length > room ? shown.slice(0, room) : shown));
-  shaped.url = url;
+  // The raw request stays readable BY NAME -- the re-price and the omitUrl decision read it back --
+  // but it is not an enumerable own property: JSON.stringify, Object.keys, a spread or an error
+  // logger would otherwise publish the request's own credential values, the same exposure the
+  // priced set was moved into a WeakMap to close (F26-3), and the message is the redacted form the
+  // reader is meant to see.
+  Object.defineProperty(shaped, 'url', { value: url, enumerable: false, writable: true, configurable: true });
   shaped.cause = `HTTP ${status}`;
   shaped.httpStatus = Number(status);
   shaped.body = snippet;
@@ -898,6 +903,9 @@ export function repriceShapedError(err, extraSecrets, snippetLimit) {
   if (bound !== null && candidate.message.length > bound) return err;
   const out = new Error(String(err.message));
   for (const key of Object.keys(err)) out[key] = err[key];
+  // The request is copied back NON-enumerably, exactly as the shapers carry it: the re-price read it
+  // by name and a later re-price of this result has to see it too, while a serializer still must not.
+  Object.defineProperty(out, 'url', { value: url, enumerable: false, writable: true, configurable: true });
   out.message = candidate.message;
   out.cause = candidate.cause;
   return out;
@@ -958,7 +966,7 @@ export function shapeTransportError(err, url, limit, headers, omitUrl = false, e
   shaped.noDiagnostic = !Number.isInteger(err?.status)
     && !CAPTURE_CEILING_CODES.has(err?.code)
     && !(typeof err?.signal === 'string' && err.signal !== '');
-  shaped.url = url;
+  Object.defineProperty(shaped, 'url', { value: url, enumerable: false, writable: true, configurable: true });
   shaped.httpStatus = null; // a transport failure has no HTTP status
   shaped.exitStatus = Number.isInteger(err?.status) ? err.status : null;
   shaped.body = '';
