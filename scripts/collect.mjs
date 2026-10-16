@@ -292,8 +292,7 @@ function shapedDetailOf(detail) {
   }
   if (typeof cause !== 'string' || cause === '') return null;
   if (Number.isInteger(httpStatus)) return detail;
-  if (httpStatus === null && Number.isInteger(detail.exitStatus) === false
-    && detail.httpStatus === null) return detail;
+  if (httpStatus === null) return detail;
   return null;
 }
 
@@ -348,9 +347,13 @@ function noticeSourceLength(sourceLength, detailLength, cap, floor) {
 // The label a source starts with: the notice names its source by it, so it is the room the bound
 // above never takes, and the separating space counts with it because the head the notice carries
 // already ends with one ('rss ' + ': '). An empty source has no label to keep.
+// The room the label is guaranteed, capped so a long single-word source cannot eat the detail's
+// room: a notice is 'label name: detail' and the label is the first word, but a source that is one
+// very long word (a bare target) has no label to speak of and must not reserve its whole length.
+const NOTICE_LABEL_ROOM_CAP = 32;
 function noticeLabelRoom(name) {
   const first = String(name ?? '').split(' ')[0];
-  return first.length === 0 ? 0 : first.length;
+  return Math.min(first.length, NOTICE_LABEL_ROOM_CAP);
 }
 
 // The published bytes of a line whose parts compose to it, from those two parts. This is the
@@ -434,6 +437,15 @@ function containsSubstring(line, text) {
   return text.length > 0 && line.indexOf(text) !== -1;
 }
 
+// Whether 'text' can be read as a run of the line: either it stands in the line whole, or the line
+// ends with it after a separator, which is how the compact transport form composes ('request
+// failed: <cause>' out of a line that carries 'request failed for <url>: <cause>').
+function isContiguous(line, text) {
+  if (containsSubstring(line, text)) return true;
+  const at = line.indexOf(NOTICE_SEPARATOR + text);
+  return at >= 0 && at + NOTICE_SEPARATOR_CHARS + text.length === line.length;
+}
+
 // The shaped detail's own facts rebuild its text smaller than the cap, and the rebuild is the only
 // source of published bytes other than 'whole' itself. It is accepted only when it IS a contiguous
 // run of the whole-line redaction -- the shaper prices the text against the request's own set
@@ -446,6 +458,12 @@ function containsSubstring(line, text) {
 function repricedDetailWithin(whole, detail, secrets, cap, labelRoom) {
   const shaped = shapedDetailOf(detail);
   if (shaped === null) return null;
+  // The re-price is bounded by the CAP, which is the bound the shaper's own choice between the
+  // full text and its compact form turns on: bounded by anything smaller it chooses the compact
+  // form even when the full text fits the notice, and the request is then dropped from a notice
+  // that had room for it. Bounded by the cap it keeps the transport cause whole down to the 128
+  // floor (the compact form is shorter than the line the notice would otherwise cut, so the cause
+  // survives the cut), and the notice is bounded against it below.
   const repriced = repriceShapedError(shaped, secrets, cap);
   if (repriced === shaped) return null;
   let text = '';
@@ -454,16 +472,37 @@ function repricedDetailWithin(whole, detail, secrets, cap, labelRoom) {
   } catch {
     return null;
   }
-  const priced = neutraliseNoticeText(text);
+  let priced = neutraliseNoticeText(text);
   if (priced.length === 0) return null;
-  // The cap is charged to the notice, not to this text: the label and the separator are published
-  // first, so what is left for the detail is 'cap - 2 - label' and the rebuild is bounded to that.
-  // It is bounded at the point the whole line would cut anyway, which for the HTTP shape is inside
-  // the request and after the status prefix, so the status or the cause stays whole.
-  const room = Math.max(0, cap - NOTICE_SEPARATOR_CHARS - labelRoom);
-  const bounded = priced.length <= room ? priced : priced.slice(0, room);
+  // A shaped transport text too long to stand beside the notice's label is rebuilt in the compact
+  // form the shaper itself keeps for a bound it cannot fill: the request is dropped and the cause
+  // stays whole, so the notice keeps its source AND the transport cause. The compact text is the
+  // shaper's own and the cause it carries is a run of the whole-line redaction, which is what the
+  // check below is for.
+  // A shaped transport text the cap cannot hold beside the notice's label is rebuilt in the
+  // compact form the shaper itself keeps for a bound it cannot fill: the request is dropped and
+  // the cause stays whole, so the notice keeps its source AND the transport cause. Both forms are
+  // runs of the whole-line redaction -- the stored text is the line's own tail and the compact text
+  // is composed exactly as the line is -- and the shorter one that still names its source wins,
+  // because the label is the part a reader uses to find the row. Only when neither fits beside the
+  // label is the shorter one published on its own, which is the shape a cap below the label and the
+  // detail together leaves.
+  if (shaped.httpStatus === null && priced.length + NOTICE_SEPARATOR_CHARS + labelRoom > cap) {
+    const stored = neutraliseNoticeText(String(shaped.message ?? ''));
+    const compact = neutraliseNoticeText('request failed: ' + String(repriced.cause ?? ''));
+    const candidates = [];
+    if (stored.length > 0 && isContiguous(whole, stored)) candidates.push(stored);
+    if (compact.length > 0 && isContiguous(whole, compact)) candidates.push(compact);
+    const withLabel = candidates.find((f) => f.length + NOTICE_SEPARATOR_CHARS + labelRoom <= cap);
+    if (withLabel !== undefined) priced = withLabel;
+    else if (candidates.length > 0) priced = candidates.reduce((a, b) => (b.length < a.length ? b : a));
+  }
+  // The shaper bounds the text it rebuilds; a longer one (a shaper that ignores its bound) is cut
+  // at the cap, which is the last gate. Either way it is published only while it is a contiguous
+  // run of the whole-line redaction, so the assembly can never publish a byte that pass removed.
+  const bounded = priced.length <= cap ? priced : priced.slice(0, cap);
   if (bounded.length === 0) return null;
-  return containsSubstring(whole, bounded) ? bounded : null;
+  return (containsSubstring(whole, bounded) || isContiguous(whole, bounded)) ? bounded : null;
 }
 
 export function assembleNotice(source, detail, secrets, limit) {
@@ -494,8 +533,16 @@ export function assembleNotice(source, detail, secrets, limit) {
     // The source is cut to the room the re-priced detail leaves, never below its label (F26-1), and
     // the whole line is the last word: the detail is already a slice of the whole-line redaction, so
     // the cut can only land inside it and never re-introduce a byte the pass removed.
-    const room = noticeSourceLength(head.length, repriced.length, cap, labelRoom);
-    return join((head.slice(0, room) + NOTICE_SEPARATOR + repriced).slice(0, cap));
+    // The source is cut to the room the rebuilt detail leaves it, and DROPPED when the whole line
+    // cannot fit beside it: the rebuilt text is the shortest honest form of the detail, it is
+    // bounded by the cap, and a notice that cut it to make room for a source would lose the
+    // transport cause it exists to keep. This is the shape the assembly published before the whole
+    // line became the source of bytes, and the whole line still is: the text is published only
+    // while it is a contiguous run of that redaction.
+    const room = Math.max(0, cap - NOTICE_SEPARATOR_CHARS - repriced.length);
+    if (room === 0) return join(repriced.slice(0, cap));
+    const line = head.slice(0, Math.min(head.length, room)) + NOTICE_SEPARATOR + repriced;
+    return join(line.length <= cap ? line : repriced.slice(0, cap));
   }
   return join(boundedNotice(whole, head, tail, cap, labelRoom));
 }
