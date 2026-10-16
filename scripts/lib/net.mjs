@@ -152,13 +152,19 @@ function decodedLength(value) {
 // A Basic credential is the base64 of 'user:password', so it is recognised as one: the token
 // decodes to printable text carrying the colon. Matching by that property leaves a body that
 // merely says 'Basic authentication' readable while a server that echoes the request's
-// credential gives it up.
+// credential gives it up. The replacement is the sentinel every other removal writes, never a
+// marker: a real marker written here would be read back by this same pass whenever a collected
+// value is a substring of the marker ('Basic <b64>' -> 'Basic [[redacted]]'), and the marker
+// would also change the word boundary the rule's own '\b' anchor reads, so a Basic credential
+// this pass had missed would be removed by the pass that followed it -- a removal applied after
+// the cap was charged, and a lengthening (the 10-character marker against an 8-character token)
+// exactly where the fixed-point contract forbids one.
 function redactBasicCredentials(text) {
   return String(text).replace(/\bBasic\s+([A-Za-z0-9+/]{8,}={0,2})/gi, (whole, token) => {
     let decoded = '';
     try { decoded = Buffer.from(token, 'base64').toString('utf8'); } catch { return whole; }
     if (!decoded.includes(':') || !/^[\x20-\x7e]+$/.test(decoded)) return whole;
-    return whole.slice(0, whole.length - token.length) + '[redacted]';
+    return whole.slice(0, whole.length - token.length) + REDACTION_SENTINEL;
   });
 }
 
@@ -365,17 +371,33 @@ function withoutSentinel(value) {
 // ('[[redacted]]', '[[[[redacted]]]]'), and a notice published that way is rewritten again by
 // every pass that follows it. Only a published marker is protected; no other text is skipped.
 const MARKER_SPAN_RE = /\[redacted\]/g;
-function forEachUnmarkedSpan(text, fn) {
-  if (!text.includes(REDACTED_MARKER)) return fn(text);
-  MARKER_SPAN_RE.lastIndex = 0;
-  let out = '';
-  let last = 0;
-  let m;
-  while ((m = MARKER_SPAN_RE.exec(text)) !== null) {
-    out += fn(text.slice(last, m.index)) + m[0];
-    last = m.index + m[0].length;
+// A marker the input already carries stands for the placeholder for the whole pass, so no rule
+// reads inside it: the placeholder is one character, the span skip it replaces was a variable
+// length, and the difference showed up wherever a rule read a word boundary beside the marker.
+// That is what the Basic rule's own '\b' does: with the ten-character marker left in place, a
+// pass that had just replaced the word before 'Basic' read a boundary the pass before it never
+// had and removed a credential after the cap had already been charged. One character, no letter
+// and no bracket, reads as the non-word the removal wrote.
+const MARKER_PLACEHOLDER = REDACTION_SENTINEL;
+const MARKER_PLACEHOLDER_RE = REDACTION_SENTINEL_RE;
+function protectMarkers(text) {
+  return String(text).replace(MARKER_SPAN_RE, MARKER_PLACEHOLDER);
+}
+
+// A value that CONTAINS the marker is removed whole, before the marker is read as a span and
+// before any other rule runs. The span skip above protects a marker the input already carried,
+// and a value carrying one is split by that skip -- neither side holds it -- so the value a
+// request sent was published byte-for-byte (an RSS answer echoing '?token=ab[redacted]cd'). It is
+// removed wherever it stands rather than at a word boundary, because the value carries a
+// ten-character marker no word is built from by accident, and the removal can only shorten the
+// text. The longest first, so a value that contains another goes whole.
+function removeMarkerBearingValues(text, sorted) {
+  let out = text;
+  for (const value of sorted) {
+    if (!value.includes(REDACTED_MARKER)) continue;
+    out = out.split(value).join(REDACTION_SENTINEL);
   }
-  return out + fn(text.slice(last));
+  return out;
 }
 
 // One pass over the input produces the published text. Every removal the pass makes is one
@@ -383,8 +405,11 @@ function forEachUnmarkedSpan(text, fn) {
 // can read back a marker this pass wrote; and a marker an earlier pass wrote is a span this pass
 // does not read at all, so the text the pass publishes is a fixed point of the pass. The output
 // is never longer than the text that went in plus, for each removal, the difference between the
-// marker and the value that stood there -- and a value below the floor is removed only where it
-// stands as its own token, so a value that is merely part of a longer word stays (TR-110).
+// marker and the value that stood there -- and the value that carries the marker is longer than
+// the marker, so its removal is a shortening on the same terms as any other (TR-110 keeps the
+// word-boundary floor for the values that do not carry it). The pass is complete in one go: the
+// Basic rule writes the sentinel like every other removal, so no removal this pass makes can be
+// read back by this pass or by the one that follows it.
 export function redactSecrets(text, secrets) {
   const values = new Set();
   for (const raw of secrets ?? []) {
@@ -395,8 +420,34 @@ export function redactSecrets(text, secrets) {
     if (respelled !== null) values.add(withoutSentinel(respelled));
   }
   const sorted = [...values].sort((a, b) => b.length - a.length);
-  const mark = (span) => {
-    let out = redactBasicCredentials(span);
+  // Longest first, so a value that contains another is removed whole; and before the marker is
+  // read as a span, so a value carrying the marker is removed rather than split by it.
+  // The shape list runs first, while the text is still the bytes that arrived: it removes a whole
+  // credential class by shape, and a by-value removal that split such a shape in half ('x' inside
+  // 'dXNl...' before the 'Basic ' it follows) would leave the rest of the credential legible.
+  // Every marker the input already carries becomes the placeholder BEFORE any removal runs: a
+  // removal that rewrote part of a marker would leave the rest of it standing, and the next value
+  // in the set ('edacted]', 'redacted', '[redacte') then matches the fragment the same pass
+  // exposed -- a marker rewritten by the marker-substring values, which is the growth the
+  // fixed-point contract exists to stop. A value that carries the marker is removed first, while
+  // the markers it contains are still the bytes the input had.
+  let out = protectMarkers(removeMarkerBearingValues(withoutSentinel(text), sorted));
+  // One removal can expose another: the credential shapes read the word boundary before them, and
+  // a removal beside one changes that boundary ('XabcdefghBasic dXNlcjpw' has no boundary before
+  // 'Basic' -- the 'g' is a word character -- so a pass that stopped here left 'Basic dXNlcjpw'
+  // for the NEXT pass to remove, after the cap had been charged). The removals are therefore
+  // re-applied until one changes nothing, so the text this function returns is the text the same
+  // function returns when it is applied again. Each re-application only replaces characters with
+  // the sentinel, so the text never grows and the loop ends: the sentinel matches no rule.
+  const applyRemovals = (input) => {
+    let out = input;
+    // The shape list on both sides of the by-value loop: before it, a shape is still the bytes the
+    // text carried (a by-value removal inside 'Basic <b64>' splits the credential and leaves the
+    // rest legible); after it, a removal beside a shape a word character used to guard it (the
+    // 'x' of 'x<word>Basic <b64>' is not a value, so the shape stands). Between the two, the
+    // values are removed longest first, and the marker-bearing values before the markers they
+    // carry become the placeholder.
+    for (const shape of SECRET_SHAPES) out = out.replace(shape, REDACTION_SENTINEL);
     for (const value of sorted) {
       if (value.length >= MIN_SECRET_CHARS) {
         out = out.split(value).join(REDACTION_SENTINEL);
@@ -406,10 +457,14 @@ export function redactSecrets(text, secrets) {
       }
     }
     for (const shape of SECRET_SHAPES) out = out.replace(shape, REDACTION_SENTINEL);
-    return out;
+    return redactBasicCredentials(out);
   };
-  return forEachUnmarkedSpan(withoutSentinel(text), mark)
-    .replace(REDACTION_SENTINEL_RE, REDACTED_MARKER);
+  for (let pass = 0; pass < 64; pass += 1) {
+    const next = applyRemovals(out);
+    if (next === out) break;
+    out = next;
+  }
+  return out.replace(REDACTION_SENTINEL_RE, REDACTED_MARKER);
 }
 
 // Pure and offline-testable: it splits the status line off the captured bytes and
@@ -494,6 +549,13 @@ export function shapeHttpError(status, body, url, limit, headers, omitUrl = fals
   shaped.cause = `HTTP ${status}`;
   shaped.httpStatus = Number(status);
   shaped.body = snippet;
+  // The two facts a later re-price has to have and cannot infer: the omitUrl decision the text
+  // was shaped under (a text shaped with no request may not gain one -- the URL is the answer's
+  // own name respelled), and the set the text was priced against. A re-price against a wider set
+  // must keep removing everything this text already removed, or a value the shaper took out of
+  // the request comes back into the notice when the caller's set is not a superset.
+  shaped.omitUrl = Boolean(omitUrl);
+  shaped.pricedSecrets = [...secrets];
   return shaped;
 }
 
@@ -576,24 +638,41 @@ export function repriceShapedError(err, extraSecrets, snippetLimit) {
   const bound = Number.isFinite(Number(snippetLimit)) && Number(snippetLimit) > 0
     ? Number(snippetLimit) : null;
   const url = String(err.url ?? '');
-  const omitUrl = url === '';
+  // omitUrl is the shaper's own decision, read from the flag the shapers set and never inferred
+  // from an empty URL: every shaped error carries its request in the url field, so inference read
+  // a text deliberately shaped with no request ('HTTP 503', 'request failed: <cause>') as one
+  // that had a request, and the re-price put the answer-derived URL back into a notice that exists
+  // to name no request at all. The URL is only ever shown when the shaper said to show it.
+  const omitUrl = err.omitUrl === true || url === '';
+  // The set the re-price prices against is the set the text was already priced against, plus
+  // everything the caller learned since. The request's own values cannot be read back here (the
+  // error carries no headers), so the shaped error carries them: without them a value the shaper
+  // had removed from the request reappears in the rebuilt text whenever the caller's extra set is
+  // not a superset of the request's own.
+  const priced = new Set(extraSecrets ?? []);
+  for (const raw of err.pricedSecrets ?? []) {
+    const value = String(raw ?? '');
+    if (value !== '') priced.add(value);
+  }
+  const secrets = [...priced];
   let candidate = null;
   if (Number.isInteger(err.httpStatus)) {
     const prefix = 'HTTP ' + err.httpStatus + ' for ';
     const room = bound === null ? Infinity : Math.max(0, bound - prefix.length);
-    const shown = omitUrl ? '' : noticePreservingRewrites(redactSecrets(redactUrl(url), extraSecrets));
+    const shown = omitUrl ? '' : noticePreservingRewrites(redactSecrets(redactUrl(url), secrets));
     const text = omitUrl
       ? 'HTTP ' + err.httpStatus
       : prefix + (shown.length > room ? shown.slice(0, room) : shown);
     candidate = new Error(text);
     candidate.cause = 'HTTP ' + err.httpStatus;
     candidate.httpStatus = Number(err.httpStatus);
+    candidate.omitUrl = omitUrl;
   } else if (err.httpStatus === null && typeof err.cause === 'string') {
-    const cause = noticePreservingRewrites(redactSecrets(err.cause, extraSecrets));
+    const cause = noticePreservingRewrites(redactSecrets(err.cause, secrets));
     const prefix = 'request failed for ';
     const shortPrefix = 'request failed';
     const separator = ': ';
-    const shown = omitUrl ? '' : noticePreservingRewrites(redactSecrets(redactUrl(url), extraSecrets));
+    const shown = omitUrl ? '' : noticePreservingRewrites(redactSecrets(redactUrl(url), secrets));
     const room = bound === null ? Infinity : Math.max(0, bound - prefix.length - separator.length - cause.length);
     const full = omitUrl
       ? shortPrefix + separator + cause
@@ -602,6 +681,7 @@ export function repriceShapedError(err, extraSecrets, snippetLimit) {
     candidate = new Error(bound !== null && full.length > bound && compact.length <= bound ? compact : full);
     candidate.cause = cause;
     candidate.httpStatus = null;
+    candidate.omitUrl = omitUrl;
   } else {
     return err;
   }
@@ -672,6 +752,11 @@ export function shapeTransportError(err, url, limit, headers, omitUrl = false, e
   shaped.httpStatus = null; // a transport failure has no HTTP status
   shaped.exitStatus = Number.isInteger(err?.status) ? err.status : null;
   shaped.body = '';
+  // The omitUrl decision and the priced set, as shapeHttpError records them: the re-price reads
+  // them instead of inferring them, so a text shaped with no request keeps no request and a value
+  // the shaper removed stays removed.
+  shaped.omitUrl = Boolean(omitUrl);
+  shaped.pricedSecrets = [...secrets];
   return shaped;
 }
 
