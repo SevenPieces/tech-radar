@@ -162,9 +162,35 @@ function looksLikeValue(value) {
 // value floors below keep an ordinary short value under such a name out of the candidate set, and
 // a one- or two-character one out of the notice set as well.
 const CREDENTIAL_STEMS = [
-  'pass', 'pwd', 'pw', 'pswd', 'secret', 'token', 'auth', 'key', 'sig', 'signature', 'session',
-  'credential', 'cookie', 'bearer', 'jwt', 'otp', 'pin', 'hmac', 'ticket', 'assertion', 'saml',
-  'samlresponse', 'nonce', 'digest',
+  'pass', 'pwd', 'pw', 'pswd', 'secret', 'token', 'auth', 'key', 'sig', 'signature',
+  'session', 'credential', 'cookie', 'bearer', 'jwt', 'otp', 'pin', 'hmac', 'ticket', 'assertion',
+  'saml', 'samlresponse', 'nonce', 'digest',
+  // The family the early rows named and the stem rule still missed: a request sends its own
+  // credential under the operator's spelling, so 'password', 'passwd', 'passphrase', 'passcode',
+  // 'sessionid', 'secrets', 'credentials', 'cookies' and 'clientid' are credential positions like
+  // the spellings above. Their tail is not one of the stems ('password' ends in 'word', 'sessionid'
+  // in 'id') and a plural is not the singular the stem carries ('secrets', 'credentials',
+  // 'cookies'), so each is spelled out.
+  'password', 'passwd', 'passphrase', 'passcode', 'sessionid', 'secrets', 'credentials',
+  'cookies', 'clientid',
+];
+
+// The names that are too ordinary to take as a whole. 'state', 'status', 'st', 'sid', 'sso',
+// 'mac', 'hash' and 'uuid' are real words or fragments of them (status, manifest, obsidian,
+// glasshouse, tarmac, hashmap), so matching them as a SUFFIX of the separator-stripped name would
+// put an ordinary parameter into the credential rule -- exactly the direction the token-or-suffix
+// rule exists to avoid, and the direction TR-116 measured (author, statuscode and design). They are
+// matched as a whole token of the name instead, which is where the credential actually stands:
+// '?state=', 'oauth_state', 'session_state', '?sid=', '?sso=', '?mac=', '?hash=', '?uuid=' and
+// '?authorization=' all collect, while 'manifest', 'protest', 'realestate', 'obsidian',
+// 'glasshouse', 'tarmac' and 'hashmap' do not.
+//
+// 'status' is here for a different reason and not as a synonym of 'state': a code-carrying
+// parameter is a credential position in this rule, and '?status=500' is the same shape as
+// '?code=500'. It is a token-only stem for the same reason 'code' is not a suffix -- 'statuscode'
+// carries 'status' at its front and ends in 'code', and both are ordinary names TR-116 keeps out.
+const CREDENTIAL_TOKENS = [
+  'st', 'state', 'status', 'sid', 'sso', 'mac', 'hash', 'uuid', 'authorization',
 ];
 
 // A code-carrying parameter is matched by its whole name only: 'code' alone (?code=...) and a name
@@ -192,7 +218,8 @@ function isCredentialName(name) {
   const normalized = normalizedParamName(name);
   if (normalized === '') return false;
   for (const token of nameTokens(name)) {
-    if (token === CREDENTIAL_CODE_TOKEN || CREDENTIAL_STEMS.includes(token)) return true;
+    if (token === CREDENTIAL_CODE_TOKEN) return true;
+    if (CREDENTIAL_STEMS.includes(token) || CREDENTIAL_TOKENS.includes(token)) return true;
   }
   return CREDENTIAL_STEMS.some((stem) => normalized.endsWith(stem));
 }
