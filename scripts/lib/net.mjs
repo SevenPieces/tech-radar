@@ -271,24 +271,39 @@ function redactBasicCredentials(text) {
   // really the next credential's first letter was accepted.
   //
   // 'Basic' is matched as a word of its own: the lookbehind refuses the five letters at the tail of
-  // an unpadded base64 run ('gBasic' is one token), so the second occurrence of an unpadded
-  // back-to-back pair -- preceded by the 'g' of the first blob's decoded token -- is not an
-  // occurrence at all and is copied through untouched. One blob alone, or blobs separated by a
-  // space, are removed normally.
+  // an unpadded base64 run ('gBasic' is one token), so a keyword glued to a word this scan has not
+  // removed is copied through untouched and ordinary prose is left alone.
+  //
+  // The scan is a single left-to-right sweep over the ORIGINAL text, and it accepts a keyword that
+  // stands at the resume point of the token it just removed even though the original character
+  // before it is a word character. In a back-to-back unpadded chain ('Basic <blob>Basic <blob>...')
+  // every keyword after the first is glued to the last character of the blob before it, so a
+  // lookbehind over the original text can see only the first occurrence: the pass removed one shape,
+  // the sentinel exposed the next keyword for the FOLLOWING pass, and a chain of about 200 needed
+  // more removal passes than the loop's bound -- the text was not a fixed point and a later pass
+  // kept removing (and lengthening) a notice whose cap had already been charged. The resume point is
+  // the one place a keyword may be accepted without the boundary, because the character before it is
+  // the tail of a credential this sweep already took out.
   const source = String(text);
   let out = '';
   let at = 0;
-  const pattern = /(?<![A-Za-z0-9_])Basic/gi;
+  let resumeAt = -1;
+  const pattern = /Basic/gi;
   for (const match of source.matchAll(pattern)) {
-    const after = source.slice(match.index + 'Basic'.length);
+    const idx = match.index;
+    if (idx < at) continue;
+    const prev = idx === 0 ? '' : source[idx - 1];
+    if (/[A-Za-z0-9_]/.test(prev) && idx !== resumeAt) continue;
+    const after = source.slice(idx + 'Basic'.length);
     const space = /^\s+/.exec(after);
     if (space === null) continue;
-    const tokenStart = match.index + 'Basic'.length + space[0].length;
-    if (tokenStart <= at) continue;
+    const tokenStart = idx + 'Basic'.length + space[0].length;
+    if (tokenStart < at) continue;
     const token = decodedBasicToken(after.slice(space[0].length));
     if (token === null) continue;
     out += source.slice(at, tokenStart) + REDACTION_SENTINEL;
     at = tokenStart + token.length;
+    resumeAt = at;
   }
   return out + source.slice(at);
 }
