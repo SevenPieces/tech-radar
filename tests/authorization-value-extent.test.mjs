@@ -17,8 +17,8 @@ const { redactCredentialShapes, redactSecrets } = await import(NET_MODULE);
 import { assembleNotice } from '../scripts/collect.mjs';
 import { SKILL_ROOT, shippedFiles } from './lib/shipped-files.mjs';
 import {
-  CREDENTIAL_SHAPES, FOLD_CONTINUATION_SHAPES, FOLD_HELD, FOLD_LIMIT_ROWS, KEYWORDS, PROSE_COST,
-  PROSE_KEPT, PROSE_TAILS, SCHEME_WORDS, TAIL_CREDENTIAL_HELD, TAIL_CREDENTIAL_SHAPES,
+  CREDENTIAL_SHAPES, FOLD_CONTINUATION_SHAPES, FOLD_HELD, FOLD_LIMIT_ROWS, KEYWORDS, NEWLINE,
+  PROSE_COST, PROSE_KEPT, PROSE_TAILS, SCHEME_WORDS, TAIL_CREDENTIAL_HELD, TAIL_CREDENTIAL_SHAPES,
   VALUE_GRAMMAR_ROWS,
 } from './lib/authorization-corpus.mjs';
 
@@ -176,6 +176,25 @@ test('Batch 71: the value grammar the mutations moved is pinned by its whole out
   for (const [name, redact] of PATHS) {
     assert.equal(redact(refused), 'authorization: request failed [redacted]',
       name + ' moved the refused transport value head');
+  }
+});
+
+
+// Batch 73 (closing sweep F34-7, robustness). The Batch 67 fold recursed once per continuation line
+// and sliced the source at every frame, and the keyword guard beside it asked a GLOBAL matcher
+// whether a keyword started at a position - a question that scans to the end of the text before the
+// index test rejects the answer - once per folded line. A 349 KB fold of 20,000 lines therefore cost
+// twelve seconds and threw RangeError out of the exported redaction, where the previous revision
+// answered in milliseconds. The walk is in place and the guard is sticky now, and this row pins the
+// outcome the recursion could not produce: the whole folded value goes, on both entry points.
+test('Batch 73: a deeply folded value is consumed whole and does not exhaust the stack', () => {
+  const LINES = 20000;
+  const text = 'authorization: Digest username="u"'
+    + Array.from({ length: LINES }, (_, i) => NEWLINE + ' attribute' + i + '=x').join('');
+  assert.ok(text.length > 300000, 'the folded fixture is too small to reach the fold cost: ' + text.length);
+  for (const [name, redact] of PATHS) {
+    assert.equal(redact(text), '[redacted]',
+      name + ' did not consume a deeply folded value whole');
   }
 });
 

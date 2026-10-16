@@ -368,12 +368,18 @@ function authorizationAtomContinuesValue(atom) {
 // line the value reader is looking at is the value's own continuation or the next field of a
 // structured text: a line that opens with another credential header names a header of its own and
 // is never swallowed as the previous value's tail.
+// The same three matchers, sticky: the question is only whether a keyword starts AT this position,
+// and a global matcher asked that question scans to the end of the text looking for a later match
+// before the index test rejects it. The fold asks it once per continuation line, so a global matcher
+// made a long folded value quadratic (closing sweep F34-7: 20,000 folded lines cost twelve seconds
+// and the same text through the previous revision was still counting when it ran out of stack). The
+// verdict is the one the index test made - the same match, starting at the same position.
+const AUTHORIZATION_KEYWORDS_AT = AUTHORIZATION_KEYWORDS.map((re) => new RegExp(re.source, 'iy'));
 function authorizationKeywordStartsAt(source, at) {
   if (at >= source.length) return false;
-  for (const re of AUTHORIZATION_KEYWORDS) {
+  for (const re of AUTHORIZATION_KEYWORDS_AT) {
     re.lastIndex = at;
-    const m = re.exec(source);
-    if (m !== null && m.index === at) return true;
+    if (re.exec(source) !== null) return true;
   }
   return false;
 }
@@ -393,23 +399,42 @@ function authorizationKeywordStartsAt(source, at) {
 // keyword (a field of its own, which AUTH_SEPARATED_ATOM and the guards depend on). An indented line
 // with nothing but whitespace on it is not a continuation either: it carries no atom and no
 // separator, so the fold stops there rather than stepping over it.
+// The three readings the fold's loop makes in place: the next line terminator, the indentation a
+// continuation carries, and the atom (or the list separator) the continuation starts with. Each is
+// sticky or lastIndex-based, so the walk never copies the remainder of the text.
+const LINE_TERMINATOR = /\r\n|\n|\r/g;
+const FOLD_INDENT = /[\t \u00a0]+/y;
+const FOLD_SEPARATOR = /[,;]/;
+// The same for the value's own atom run (readAuthorizationValue below): its three reads used to
+// slice the remainder of the text at every atom, which made a long value quadratic and a folded one
+// cost seconds (closing sweep F34-7). Each read is sticky and anchored by lastIndex instead, and the
+// leading '^' is dropped for that reason: with the 'y' flag it would match only at index 0.
+const AUTH_ATOM_AT_STICKY = new RegExp(AUTH_ATOM, 'y');
+const NEXT_AUTH_TOKEN_AT = new RegExp('\\s+(' + AUTH_ATOM + ')', 'y');
+const AUTH_SEPARATED_ATOM_AT = new RegExp('[\\t \\u00a0\\r\\n]*[,;][\\t \\u00a0\\r\\n]*(' + AUTH_ATOM + ')', 'y');
+const AUTH_WHITESPACE_RUN_AT = /[\t \u00a0]+/y;
 function authorizationValueLineEndsAt(source, end) {
-  // The fold is walked in one loop rather than one recursion per continuation line: the recursion
-  // (Batch 67) cost a stack frame and a source slice per folded line, so a deep fold threw
-  // RangeError out of the exported redaction where the previous revision answered in milliseconds
-  // (closing sweep F34-7). The answer is the same one line at a time.
-  let cursor = end;
-  for (;;) {
-    const terminator = /\r\n|\n|\r/.exec(source.slice(cursor));
+  // The fold is walked in one loop rather than one recursion per continuation line, and the loop
+  // reads the source IN PLACE (a lastIndex-based scan) rather than slicing the remainder at every
+  // step: the Batch 67 recursion cost a stack frame and a source slice per folded line, so a 349 KB
+  // fold of 20,000 lines threw RangeError where the previous revision answered in milliseconds
+  // (closing sweep F34-7). The answer is the same one line at a time. The MEASURED cost of a long
+  // fold was neither here nor in the atom run: it was the keyword guard below, asked once per
+  // continuation line with a global matcher (see authorizationKeywordStartsAt).
+  for (let cursor = end; ;) {
+    LINE_TERMINATOR.lastIndex = cursor;
+    const terminator = LINE_TERMINATOR.exec(source);
     if (terminator === null) return source.length;
-    const lineEnd = cursor + terminator.index;
+    const lineEnd = terminator.index;
     const afterTerminator = lineEnd + terminator[0].length;
-    const fold = /^[\t \u00a0]+/, foldMatch = fold.exec(source.slice(afterTerminator));
-    if (foldMatch === null) return lineEnd;
-    const afterFold = afterTerminator + foldMatch[0].length;
+    FOLD_INDENT.lastIndex = afterTerminator;
+    const indent = FOLD_INDENT.exec(source);
+    if (indent === null) return lineEnd;
+    const afterFold = indent.index + indent[0].length;
     if (authorizationKeywordStartsAt(source, afterFold)) return lineEnd;
-    const rest = source.slice(afterFold);
-    if (AUTH_ATOM_AT.exec(rest) === null && !/^[,;]/.test(rest)) return lineEnd;
+    AUTH_ATOM_AT_STICKY.lastIndex = afterFold;
+    const carriesAtom = AUTH_ATOM_AT_STICKY.exec(source) !== null;
+    if (!carriesAtom && !FOLD_SEPARATOR.test(source[afterFold] ?? '')) return lineEnd;
     cursor = afterFold;
   }
 }
@@ -423,35 +448,45 @@ function authorizationValueLineEndsAt(source, end) {
 // credential header is a credential header, so the guess is gone from the consuming path and the
 // only thing left to guess about is a line the module declines to call a header at all.
 function readAuthorizationValue(source, at) {
-  const first = AUTH_ATOM_AT.exec(source.slice(at));
+  // Every read below is anchored at a position with lastIndex rather than on a slice of the
+  // remainder: the atom run walks a value one atom at a time, so slicing made a long value quadratic
+  // ('attribute0=x' repeated 20,000 times cost twelve seconds, closing sweep F34-7). The matches are
+  // the same ones the anchored patterns made.
+  AUTH_ATOM_AT_STICKY.lastIndex = at;
+  const first = AUTH_ATOM_AT_STICKY.exec(source);
   if (first === null) return null;
   let end = at + first[0].length;
   const hasScheme = AUTH_SCHEMES.has(authSchemeWord(first[0]));
   let accepted = hasScheme || authorizationAtomIsShaped(first[0]);
   if (hasScheme) {
-    const token = NEXT_AUTH_TOKEN.exec(source.slice(end));
+    NEXT_AUTH_TOKEN_AT.lastIndex = end;
+    const token = NEXT_AUTH_TOKEN_AT.exec(source);
     if (token !== null) {
       end += token[0].length;
       if (authorizationAtomIsShaped(token[1])) accepted = true;
     }
   }
   for (;;) {
-    const separated = AUTH_SEPARATED_ATOM.exec(source.slice(end));
+    AUTH_SEPARATED_ATOM_AT.lastIndex = end;
+    const separated = AUTH_SEPARATED_ATOM_AT.exec(source);
     if (separated !== null) {
       end += separated[0].length;
       if (authorizationAtomIsShaped(separated[1])) accepted = true;
       continue;
     }
-    const attached = AUTH_ATOM_AT.exec(source.slice(end));
+    AUTH_ATOM_AT_STICKY.lastIndex = end;
+    const attached = AUTH_ATOM_AT_STICKY.exec(source);
     if (attached !== null) {
       end += attached[0].length;
       if (authorizationAtomIsShaped(attached[0])) accepted = true;
       continue;
     }
-    const gap = AUTH_WHITESPACE_RUN.exec(source.slice(end));
+    AUTH_WHITESPACE_RUN_AT.lastIndex = end;
+    const gap = AUTH_WHITESPACE_RUN_AT.exec(source);
     if (gap === null) break;
     const nextAt = end + gap[0].length;
-    const next = AUTH_ATOM_AT.exec(source.slice(nextAt));
+    AUTH_ATOM_AT_STICKY.lastIndex = nextAt;
+    const next = AUTH_ATOM_AT_STICKY.exec(source);
     if (next === null || !authorizationAtomContinuesValue(next[0])) break;
     end = nextAt + next[0].length;
     if (authorizationAtomIsShaped(next[0])) accepted = true;
