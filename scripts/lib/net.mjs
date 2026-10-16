@@ -304,19 +304,39 @@ function isCredentialBearingName(name) {
     || CREDENTIAL_FUSED.some((stem) => normalized.endsWith(stem));
 }
 
-// A value that is itself credential-shaped: it carries a digit, a capital, or a character that is
-// not an alphanumeric or a space. This is the SECOND half of the candidate rule for a token-only
-// name, and it is what keeps both directions closed at once. An ordinary configured value under an
-// ordinary token name ('archived', 'releases', 'identifier', 'landscape') is a plain lower-case
-// word and rewrites no published prose; a value that IS a credential - a session id, a hex digest,
-// a base64 blob, a mixed-case token - is not a word any prose is built from, and it is collected
-// from three characters up in the notice set and from the free-text floor up in the candidate set
-// exactly as before. A name that is credential-bearing by its own spelling (the stems, and the
-// fused session spellings) needs no such test: 'password' is a credential position whatever its
-// value spells, and the High F27-1 closure rests on that.
+// A value that is itself credential-shaped, in one of two ways. The first is a mark no ordinary
+// configured word carries: a digit, a capital, or a character that is not an alphanumeric or a
+// space. The second is LENGTH, and it exists because the first way misses a pure lower-case
+// alphabetic credential: 'abcdefghijklmnop', 'openssltoken' and 'lowercaseonlysecret' carry a digit
+// or a capital in no character, so under the mark alone they stayed out of the candidate set while
+// the SAME value under '?token=' went in - which is the F27-1 class surviving in a narrower shape
+// (verification F28-1 residual, Batch 51). An ordinary English word is short and a credential is
+// not: the threshold is read from the evidence rather than chosen, and the measurement is stated
+// here. Every ordinary pure lower-case value the suite, the sweeps and the TR-110/TR-116 controls
+// put under a token-only name is at most ten characters - 'archived' and 'releases' are 8,
+// 'landscape' 9, 'identifier' and 'descending' 10, 'required' 8 - while the three credentials the
+// residual names are 12, 16 and 19. Twelve is therefore the first length at which no ordinary
+// configured value has been observed, and it leaves the eleven-character English words that ARE
+// plausible parameter values ('performance', 'environment', 'description', 'temperature',
+// 'unavailable') on the ordinary side. The length alone is not enough: the value must also be a
+// single lower-case word (no space, no separator), because a value that carries a space is a
+// PHRASE, and '?state=the archived releases were moved' is the whole-notice rewrite the candidate
+// gate exists to refuse.
+//
+// A name that is credential-bearing by its own spelling (the stems, and the fused session
+// spellings) needs no such test: 'password' is a credential position whatever its value spells,
+// and the High F27-1 closure rests on that. This is the SECOND half of the candidate rule for a
+// token-only name, and it keeps both directions closed at once: an ordinary configured value under
+// an ordinary token name rewrites no published prose, while a value that IS a credential is not a
+// word any prose is built from, and it is collected from three characters up in the notice set and
+// from the free-text floor up in the candidate set exactly as before.
 const CREDENTIAL_SHAPED_VALUE = /[0-9]|[A-Z]|[^A-Za-z0-9\s]/;
+const MIN_LOWER_CASE_CREDENTIAL_CHARS = 12;
+const LOWER_CASE_WORD_VALUE = /^[a-z]+$/;
 function credentialShapedValue(value) {
-  return CREDENTIAL_SHAPED_VALUE.test(String(value ?? ''));
+  const v = String(value ?? '');
+  if (CREDENTIAL_SHAPED_VALUE.test(v)) return true;
+  return v.length >= MIN_LOWER_CASE_CREDENTIAL_CHARS && LOWER_CASE_WORD_VALUE.test(v);
 }
 
 // The name as the server reads it: a percent-encoded spelling of a credential name is the same
@@ -510,7 +530,10 @@ export function requestSecretSets(url, headers) {
   // '?state=archived' from rewriting a feed's own 'the archived releases' (sweep F28-1); the value
   // is still collected for the notice set from three characters up, and a token-named position whose
   // value really is a credential is collected for both. The shape test reads the value the server
-  // holds, which is the decoded one at every call site below.
+  // holds, which is the decoded one at every call site below, and it reads the shape TWICE: the
+  // mark a word does not carry, or a pure lower-case word long enough to be a token rather than an
+  // English word (credentialShapedValue, and the threshold it states). Without the second reading
+  // the same value was a candidate under '?token=' and published under '?state=' (Batch 51).
   const queryEligibility = (name, value, length) => ({
     notice: length >= MIN_CREDENTIAL_VALUE_CHARS,
     candidate: length >= MIN_SECRET_CHARS

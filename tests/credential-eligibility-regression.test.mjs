@@ -13,8 +13,14 @@
 //
 // The two questions are asked apart now: a name is credential-BEARING when a genuinely
 // credential-bearing spelling (a stem, or a fused session/CSRF spelling) spells it, and a value
-// under a token-only name is a candidate value only when the value is itself credential-shaped
-// (it carries a digit, a capital, or a non-alphanumeric, non-space character). The notice set is
+// under a token-only name is a candidate value only when the value is itself credential-shaped.
+// Batch 51 widened the second half of that predicate, and this paragraph is corrected with it: a
+// value is credential-shaped when it carries a digit, a capital or a non-alphanumeric, non-space
+// character OR when it is a pure lower-case word of at least twelve characters. The mark alone
+// published a pure lower-case credential ('?state=abcdefghijklmnop', '?status=openssltoken',
+// '?authorization=lowercaseonlysecret') in the candidate pool while the same value under
+// '?token=' was redacted end to end; the length reading and its measured threshold are stated in
+// scripts/lib/net.mjs and pinned at both boundaries at the end of this file. The notice set is
 // unchanged: every credential position still collects from three characters up.
 //
 // The F27-1 (High) closure rests on the other half: a name that is credential-bearing by its own
@@ -162,4 +168,68 @@ test('F28-6 a credential-shaped value under a fused name is kept out of the pool
     'the server echoed ' + value + ' back');
   assert.ok(!title.includes(value),
     'the value sent under ?PHPSESSID= reached the pool: ' + JSON.stringify(title));
+});
+
+
+// ---------------------------------------------------------------------------------------
+// Batch 51: the boundary the shape test's second reading stands on. The mark alone (a digit, a
+// capital, a non-alphanumeric) missed a PURE LOWER-CASE credential: '?state=abcdefghijklmnop',
+// '?status=openssltoken' and '?authorization=lowercaseonlysecret' were published in the candidate
+// pool while the same value under '?token=' was redacted end to end. The predicate now also reads
+// LENGTH, and the threshold is measured rather than chosen: every ordinary pure lower-case value
+// under a token-only name in the suite, the sweeps and the TR-110/TR-116 controls is at most ten
+// characters ('archived' 8, 'releases' 8, 'required' 8, 'landscape' 9, 'identifier' 10,
+// 'descending' 10), while the credentials the residual names are 12, 16 and 19. Twelve is
+// therefore the first length at which no ordinary value was observed, and the value must also be a
+// single lower-case word: a 12+ character PHRASE carries spaces and is not a credential.
+const TOKEN_NAMES = ['st', 'state', 'status', 'sid', 'sso', 'mac', 'hash', 'uuid', 'authorization'];
+
+test('F28-1 residual: the ordinary side of the length boundary stays out of the candidate set', () => {
+  // The measured ordinary values, plus the eleven-character English words a parameter may
+  // legitimately carry. None of them may rewrite published prose.
+  const ordinary = [
+    'archived', 'releases', 'required', 'landscape', 'identifier', 'descending',
+    'performance', 'environment', 'description', 'temperature', 'unavailable',
+    // A phrase is a value a source publishes, never a credential, whatever its length.
+    'the archived releases were moved',
+  ];
+  for (const name of TOKEN_NAMES) {
+    for (const value of ordinary) {
+      const sets = requestSecretSets('https://feeds.example/x?' + name + '=' + encodeURIComponent(value), {});
+      assert.equal(sets.credentials.includes(value), false,
+        '?' + name + '= put the ordinary value ' + JSON.stringify(value) + ' into the candidate set: '
+        + JSON.stringify(sets));
+    }
+  }
+});
+
+test('F28-1 residual: a pure lower-case credential crosses the boundary for every token name', () => {
+  for (const name of TOKEN_NAMES) {
+    for (const value of ['abcdefghijkl', 'abcdefghijklmnop', 'openssltoken', 'lowercaseonlysecret']) {
+      assert.ok(value.length >= 12, 'the fixture is not on the credential side: ' + value);
+      const sets = requestSecretSets('https://feeds.example/x?' + name + '=' + value, {});
+      assert.ok(sets.all.includes(value),
+        '?' + name + '=' + value + ' left the notice set: ' + JSON.stringify(sets));
+      assert.ok(sets.credentials.includes(value),
+        '?' + name + '=' + value + ' left the candidate set: ' + JSON.stringify(sets));
+    }
+  }
+});
+
+test('F28-1 residual: a pure lower-case credential under a token name reaches no pool field', async () => {
+  for (const [name, value] of [['state', 'abcdefghijklmnop'], ['status', 'openssltoken'],
+    ['authorization', 'lowercaseonlysecret']]) {
+    const title = await poolTitle('https://feeds.example/feed.xml?' + name + '=' + value,
+      'the server echoed ' + value + ' back');
+    assert.ok(!title.includes(value),
+      'the lower-case credential of ?' + name + '= reached the pool: ' + JSON.stringify(title));
+  }
+  // The ordinary side of the same boundary is published prose and must survive byte for byte.
+  for (const [name, value] of [['state', 'archived'], ['status', 'releases'],
+    ['uuid', 'identifier'], ['state', 'performance']]) {
+    const text = 'the ' + value + ' list was published';
+    const title = await poolTitle('https://feeds.example/feed.xml?' + name + '=' + value, text);
+    assert.equal(title, text,
+      '?' + name + '=' + value + ' rewrote published prose: ' + JSON.stringify(title));
+  }
 });
