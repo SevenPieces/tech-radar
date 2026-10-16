@@ -39,8 +39,10 @@ const GITHUB_API = 'https://api.github.com';
 // The transport shapers redact the messages they build, but the shapers are not the only
 // source of a notice: a JSON parse failure is raised by Node with the head of the body in its
 // message, and any fetch implementation can throw whatever it likes, so the guarantee lives at
-// the push. A caller that knows the request passes its secret list (requestSecrets); a notice
-// that quotes nothing the request sent needs none.
+// the push. The set a notice is redacted against is the run's union over the rows it selected,
+// known from configuration before the first request, because the redaction is also part of what
+// the cap is priced with: a notice priced against a smaller set than it is published under can
+// only be lengthened by the difference, and a lengthened notice loses its tail (TR-168).
 const NOTICE_CONTROLS = /[\u0000-\u001f\u007f-\u009f]/g;
 // The notice cap has a usable range, not merely a type. Below the floor an assembled notice
 // cannot carry its source, the separator and even the shortest diagnosis; above the ceiling the
@@ -123,15 +125,17 @@ function windowCapError(raw) {
 //
 // What the check buys is bounded by where the two settings are applied, and the two documents
 // that state this relation have to say the same thing (TR-167). The shaped text is priced inside
-// the shaper, which crosses the notice rewriting before it does so, so what an accepted pair
-// admits is the length the notice will carry -- the shaper's own floors excepted: a bound too
-// small for its compact form leaves the transport cause whole and longer than the bound, and a
-// bound under the HTTP prefix leaves the status and its dangling 'for ' (TR-154). The source is
-// bounded by the rewriting's own output and is a fixed point of it, so it cannot hand the room
-// back on the push's pass. The check therefore reserves the room the shaped text is measured
-// against; it does not bound a notice on its own, because a notice is assembled from more parts
-// than these two and a part no caller bounded still crosses the push.
-const NOTICE_SEPARATOR_CHARS = 2;
+// the shaper, which crosses the notice rewriting before it does so; the source is priced at the
+// push, after it has crossed the same rewriting; and both of them are priced after the run's own
+// redaction, which is applied to each part before either is bounded (TR-168). What an accepted
+// pair therefore admits is the length the notice will carry: a source inside its half, and a
+// shaped text inside the snippet bound, each as redacted and rewritten. The shaper's own floors
+// are the exception -- a bound too small for its compact form leaves the transport cause whole and
+// longer than the bound, and a bound under the HTTP prefix leaves the status and its dangling
+// 'for ' (TR-154) -- and the check still does not bound a notice on its own, because a notice is
+// assembled from more parts than these two and a part no caller bounded still crosses the push.
+const NOTICE_SEPARATOR = ': ';
+const NOTICE_SEPARATOR_CHARS = NOTICE_SEPARATOR.length;
 function noticeSourceRoom(cap) {
   return Math.ceil((cap - NOTICE_SEPARATOR_CHARS) / 2);
 }
@@ -244,6 +248,43 @@ function sanitizeNotice(text, limit) {
 function pushNotice(notices, text, secrets, limit) {
   notices.push(sanitizeNotice(redactSecrets(text, secrets), limit));
 }
+// A notice is the source it names, the ': ' separator and the detail it carries, and the cap
+// is what the three of them have to fit in. The parts are redacted and rewritten apart and only
+// then bounded, because the run's own redaction is a change of length like any other and has to
+// be part of what the cap is priced against (TR-168). The shaper prices the detail at
+// error_snippet_max_chars against the request's own secrets; the set the notice is finally
+// published under is the run's union, which is wider, so a detail the union lengthens after the
+// fact used to grow an already-bounded source, the slice removed the overflow from the tail, and
+// the tail is where the status and the transport cause sit. Here the source is the part that
+// gives way -- down to the room the redacted detail leaves it, and never past its own half, which
+// is the division the cap check reserves -- and the detail is never cut.
+//
+// The two passes stay the whole line's passes. A rule of either one that read across the
+// separator (the tag-span rule's unterminated opener reaching a detail that carries a '>', the
+// authorization shape's 'authorization: value') would make the parts compose into something other
+// than the whole line's own result, so the composition is checked and the whole line is
+// published, bounded by the cap, whenever the check fails: the bytes a notice carries are always
+// the bytes one pass over it produces.
+function assembleNotice(source, detail, secrets, limit) {
+  const cap = requireNoticeLimit(limit);
+  const head0 = String(source ?? '');
+  const tail0 = String(detail ?? '');
+  const whole = neutraliseNoticeText(redactSecrets(head0 + NOTICE_SEPARATOR + tail0, secrets));
+  const head = neutraliseNoticeText(redactSecrets(head0, secrets));
+  const tail = neutraliseNoticeText(redactSecrets(tail0, secrets));
+  if (whole !== head + NOTICE_SEPARATOR + tail) return whole.slice(0, cap);
+  // The detail alone cannot fit: nothing is left to give but the detail, and that is the
+  // shaper's documented floor (a bound under its own compact form), not a cut a redaction made.
+  if (tail.length + NOTICE_SEPARATOR_CHARS > cap) return whole.slice(0, cap);
+  const room = Math.min(noticeSourceRoom(cap), cap - NOTICE_SEPARATOR_CHARS - tail.length);
+  return (head.length > room ? head.slice(0, room) : head) + NOTICE_SEPARATOR + tail;
+}
+// The push a notice built as '<source>: <detail>' uses, so the two parts stay apart until the cap
+// is applied. A caller that carries one already-assembled string -- a re-redaction pass, a message
+// with no source of its own -- keeps pushNotice above.
+function pushNoticeParts(notices, source, detail, secrets, limit) {
+  notices.push(assembleNotice(source, detail, secrets, limit));
+}
 
 // TR-99: a notice is redacted at the push against the request that produced it, and a shared
 // host can echo a value that a different watchlist row sent. The union below is the secrets of
@@ -259,10 +300,12 @@ function rowsSecrets(rows, headers) {
   return [...out];
 }
 
-// The notices as they are published: each one redacted against the union above as well as
-// against its own request's secrets, which the push already removed. Applying it again is
-// idempotent - a value that is gone stays gone - and the notice keeps the host and the reason
-// it exists, so it stays diagnosable.
+// The notices as they are published: each one redacted against the union above, which the push
+// already applied when it priced the notice, so this is the confirmation that the collection has
+// no value the run's own output still carries. Applying it again is idempotent - a value that is
+// gone stays gone - and the notice keeps the host and the reason it exists, so it stays
+// diagnosable. It stays because a caller can reach this module's collectors without collectAll,
+// and the source's own rows are then the union the push priced against.
 function redactNotices(notices, secrets, limit) {
   const out = [];
   for (const notice of notices) pushNotice(out, notice, secrets, limit);
@@ -524,7 +567,7 @@ async function runSource(name, rows, fn, ctx, acc) {
   } catch (err) {
     // No request is in scope here: a failure that escapes a whole source is not a request's
     // answer, and the per-request notices the source pushed already carried their own secrets.
-    pushNotice(acc.notices, `${name}: ${err.message}`, undefined, noticeLimit(ctx.settings));
+    pushNoticeParts(acc.notices, name, err.message, ctx.secrets ?? [], noticeLimit(ctx.settings));
   }
 }
 
@@ -598,6 +641,16 @@ function repositoryName(value) {
   if (parts.length !== 2) return false;
   return REPO_OWNER.test(parts[0]) && REPO_NAME.test(parts[1]);
 }
+// The headers the two GitHub-keyed sources send, built in one place: the credential the run
+// carries is part of what every notice is redacted against, and the set a notice is priced with
+// has to be the set the requests actually send (TR-99), so the header cannot be spelled twice.
+function githubHeaders() {
+  const headers = { Accept: 'application/vnd.github+json' };
+  const token = process.env.GITHUB_TOKEN || process.env.GH_TOKEN;
+  if (token) headers.Authorization = `Bearer ${token}`;
+  return headers;
+}
+
 // The entries one listing is allowed to contribute: at most the configured number, most recently
 // updated first, exactly as the setting's own note describes. per_page asks the answer for that
 // many, but the answer is what decides how many it sends, so the same bound is applied to the
@@ -634,10 +687,12 @@ export async function collectGithub(rows, ctx) {
   const candidates = [];
   const notices = [];
   const token = process.env.GITHUB_TOKEN || process.env.GH_TOKEN;
-  const headers = { Accept: 'application/vnd.github+json' };
-  if (token) headers.Authorization = `Bearer ${token}`;
+  const headers = githubHeaders();
   const s = ctx.settings;
   const limit = noticeLimit(s);
+  // The set every notice this source pushes is priced against: the run's configuration-wide
+  // union when the caller supplied one, and this source's own rows otherwise (a direct call).
+  const union = ctx.secrets ?? rowsSecrets(rows, headers);
   const reserve = Number(s.github_rate_limit_reserve);
   if (!Number.isFinite(reserve) || reserve < 0) {
     throw configError('github_rate_limit_reserve is missing or invalid in config/settings.md');
@@ -649,9 +704,6 @@ export async function collectGithub(rows, ctx) {
   const get = (url, omitUrl = false) => ctx.net.fetchText(
     url, ctx.timeout, headers, s.user_agent, s.error_snippet_max_chars, omitUrl,
   );
-  // The request's own secrets, for the notice boundary: every call in the block can quote the
-  // server's answer in a notice, and the header this path sends is never in the URL.
-  const secretsFor = (url) => requestSecrets(url, headers);
   // Probe the budget once, before the block: one free call instead of discovering an
   // exhausted limit once per row, 55 times over.
   let budget;
@@ -659,11 +711,11 @@ export async function collectGithub(rows, ctx) {
   try {
     budget = coreBudget(parseJson(await get(probeUrl), probeUrl));
   } catch (err) {
-    pushNotice(notices, `github: rate limit could not be checked (${err.message}); ${uncheckedPhraseFor(rows)}`, secretsFor(probeUrl), limit);
+    pushNoticeParts(notices, 'github', `rate limit could not be checked (${err.message}); ${uncheckedPhraseFor(rows)}`, union, limit);
     return { candidates, notices: redactNotices(notices, rowsSecrets(rows, headers), limit) };
   }
   if (budget.remaining === null) {
-    pushNotice(notices, `github: rate limit could not be checked (the probe reported no core budget); ${uncheckedPhraseFor(rows)}`, undefined, limit);
+    pushNoticeParts(notices, 'github', `rate limit could not be checked (the probe reported no core budget); ${uncheckedPhraseFor(rows)}`, union, limit);
     return { candidates, notices: redactNotices(notices, rowsSecrets(rows, headers), limit) };
   }
   // The budget is spent in requests, in a fixed order: one listing per organisation,
@@ -749,13 +801,13 @@ export async function collectGithub(rows, ctx) {
       // it is emitted only when the answer filled the page, which is the only case in which an
       // entry can have gone unread. A shorter answer cannot have lost one, so nothing is said.
       if (body.length >= perOrg) {
-        pushNotice(notices, `${noticeSource('github', row.target, limit)}: ${listingPagePhrase(perOrg)}`, secretsFor(url), limit);
+        pushNoticeParts(notices, noticeSource('github', row.target, limit), listingPagePhrase(perOrg), union, limit);
       }
       if (refused > 0) {
-        pushNotice(notices, `${listingSource('github', row.target, firstRefused, limit)}: ${skippedListingPhrase(refused)}`, secretsFor(url), limit);
+        pushNoticeParts(notices, listingSource('github', row.target, firstRefused, limit), skippedListingPhrase(refused), union, limit);
       }
     } catch (err) {
-      pushNotice(notices, `${noticeSource('github', row.target, limit)}: ${err.message}`, secretsFor(url), limit);
+      pushNoticeParts(notices, noticeSource('github', row.target, limit), err.message, union, limit);
       // The refused request is named by this notice and counted as a refusal in the budget
       // notice; every later organisation is counted by the spend() guard above.
       refused(err);
@@ -794,7 +846,7 @@ export async function collectGithub(rows, ctx) {
       // A discovered repository's notice is built from the classification, never from the
       // shaped message: the message quotes the request, and its URL spells the answer's name.
       const detail = t.discovered ? discoveredCause('releases', err) : err.message;
-      pushNotice(notices, `${githubSource('github', t, limit)}: ${detail}`, secretsFor(url), limit);
+      pushNoticeParts(notices, githubSource('github', t, limit), detail, union, limit);
       // The refusal is the settled allowance, so the block stops spending here: the refused
       // repository is named by this notice and by the refusal count, and every repository after
       // it - which the run never asked for - is what the budget notice counts as unchecked.
@@ -833,14 +885,14 @@ export async function collectGithub(rows, ctx) {
       }
     } catch (err) {
       const detail = t.discovered ? discoveredCause('tags', err) : err.message;
-      pushNotice(notices, `${githubSource('github-tags', t, limit)}: ${detail}`, secretsFor(url), limit);
+      pushNoticeParts(notices, githubSource('github-tags', t, limit), detail, union, limit);
       if (refused(err)) { shortfall.tags = tagFallbacks.length - i - 1; break; }
     }
   }
 
   if (tagLeads > 0) {
-    pushNotice(notices, `github-tags: ${tagLeads} undated tag ${tagLeads === 1 ? 'lead' : 'leads'} carried `
-      + '(the tags API has no date, so they cannot be window-filtered)', undefined, limit);
+    pushNoticeParts(notices, 'github-tags', `${tagLeads} undated tag ${tagLeads === 1 ? 'lead' : 'leads'} carried `
+      + '(the tags API has no date, so they cannot be window-filtered)', union, limit);
   }
   if (shortfall.repos || shortfall.orgs || shortfall.tags || refusals.count > 0) {
     // A probe that reports the whole allowance means nothing had been charged before the
@@ -862,6 +914,7 @@ export async function collectArxiv(rows, ctx) {
   const candidates = [];
   const notices = [];
   const limit = noticeLimit(ctx.settings);
+  const union = ctx.secrets ?? rowsSecrets(rows, {});
   for (const row of rows) {
     const url = 'https://export.arxiv.org/api/query'
       + `?search_query=${encodeURIComponent(`cat:${row.target}`)}`
@@ -873,7 +926,7 @@ export async function collectArxiv(rows, ctx) {
       // A capped listing is not a complete one: the window cannot be enforced for this
       // source past the cap, so the run says so instead of looking complete.
       if (entries.length >= cap) {
-        pushNotice(notices, `${noticeSource('arxiv', row.target, limit)}: listing capped at ${cap} entries; older items inside the window may be missing`, undefined, limit);
+        pushNoticeParts(notices, noticeSource('arxiv', row.target, limit), `listing capped at ${cap} entries; older items inside the window may be missing`, union, limit);
       }
       for (const entry of entries) {
         const link = atomLink(entry);
@@ -893,7 +946,7 @@ export async function collectArxiv(rows, ctx) {
         });
       }
     } catch (err) {
-      pushNotice(notices, `${noticeSource('arxiv', row.target, limit)}: ${err.message}`, requestSecrets(url, {}), limit);
+      pushNoticeParts(notices, noticeSource('arxiv', row.target, limit), err.message, union, limit);
     }
   }
   return { candidates, notices: redactNotices(notices, rowsSecrets(rows, {}), limit) };
@@ -916,10 +969,11 @@ export async function collectFeeds(rows, ctx) {
   const candidates = [];
   const notices = [];
   const limit = noticeLimit(ctx.settings);
+  const union = ctx.secrets ?? rowsSecrets(rows, {});
   for (const row of rows) {
     const target = String(row.target ?? '').trim();
     if (!fetchableTarget(target)) {
-      pushNotice(notices, `${noticeSource('rss', redactUrl(target) || '(empty target)', limit)}: unsupported scheme (only http and https are fetched)`, undefined, limit);
+      pushNoticeParts(notices, noticeSource('rss', redactUrl(target) || '(empty target)', limit), 'unsupported scheme (only http and https are fetched)', union, limit);
       continue;
     }
     try {
@@ -946,7 +1000,7 @@ export async function collectFeeds(rows, ctx) {
         });
       }
     } catch (err) {
-      pushNotice(notices, `${noticeSource('rss', redactUrl(target), limit)}: ${err.message}`, requestSecrets(target, {}), limit);
+      pushNoticeParts(notices, noticeSource('rss', redactUrl(target), limit), err.message, union, limit);
     }
   }
   return { candidates, notices: redactNotices(notices, rowsSecrets(rows, {}), limit) };
@@ -1107,6 +1161,7 @@ export async function collectRegistries(rows, ctx) {
   const candidates = [];
   const notices = [];
   const limit = noticeLimit(ctx.settings);
+  const union = ctx.secrets ?? rowsSecrets(rows, {});
   for (const row of rows) {
     const spec = REGISTRY[row.kind];
     if (!spec) { pushNotice(notices, `registry unknown kind ${row.kind}`, undefined, limit); continue; }
@@ -1120,7 +1175,7 @@ export async function collectRegistries(rows, ctx) {
       // quotes none of it, so the notice names the source, the kind and the cause, and not the
       // version it could not date.
       if (!publishedAt) {
-        pushNotice(notices, `${noticeSource(row.kind, row.target, limit)}: no release time for the latest version; candidate skipped`, undefined, limit);
+        pushNoticeParts(notices, noticeSource(row.kind, row.target, limit), 'no release time for the latest version; candidate skipped', union, limit);
         continue;
       }
       if (ctx.since && publishedAt < ctx.since) continue;
@@ -1140,7 +1195,7 @@ export async function collectRegistries(rows, ctx) {
         summary: plainText(`New ${row.kind} release ${version}`, ctx.settings.summary_max_chars),
       });
     } catch (err) {
-      pushNotice(notices, `${noticeSource(row.kind, row.target, limit)}: ${err.message}`, requestSecrets(url, {}), limit);
+      pushNoticeParts(notices, noticeSource(row.kind, row.target, limit), err.message, union, limit);
     }
   }
   return { candidates, notices: redactNotices(notices, rowsSecrets(rows, {}), limit) };
@@ -1151,22 +1206,17 @@ export async function collectAdvisories(rows, ctx) {
   const notices = [];
   const limit = noticeLimit(ctx.settings);
   const token = process.env.GITHUB_TOKEN || process.env.GH_TOKEN;
-  // The GHSA header is built once, so the union the notices are finally redacted against
-  // (rowsSecrets, TR-99) cannot drift from the header the requests actually send.
-  const ghsaHeaders = { Accept: 'application/vnd.github+json' };
-  if (token) ghsaHeaders.Authorization = `Bearer ${token}`;
+  // The GHSA header is built once, so the union the notices are priced against cannot drift from
+  // the header the requests actually send (TR-99).
+  const ghsaHeaders = githubHeaders();
+  const union = ctx.secrets ?? rowsSecrets(rows, ghsaHeaders);
   for (const row of rows) {
-    // The request in flight, for the notice boundary: the GHSA path sends a credential and the
-    // NVD path a window, and a failure that quotes the server's answer needs its own request's
-    // secrets rather than the other branch's.
-    let secrets = [];
     try {
       if (row.kind === 'ghsa') {
         const headers = ghsaHeaders;
         const url = `${GITHUB_API}/advisories`
           + `?per_page=${encodeURIComponent(ctx.settings.ghsa_page_size)}`
           + `&published=${(ctx.since ?? '').slice(0, 10)}..${(ctx.until ?? '').slice(0, 10)}`;
-        secrets = requestSecrets(url, headers);
         const body = parseJson(await ctx.net.fetchText(url, ctx.timeout, headers, ctx.settings.user_agent, ctx.settings.error_snippet_max_chars), url);
         for (const a of Array.isArray(body) ? body : []) {
           const publishedAt = toIso(a.published_at);
@@ -1184,7 +1234,6 @@ export async function collectAdvisories(rows, ctx) {
           + `?pubStartDate=${encodeURIComponent(nvdStamp(ctx.since))}`
           + `&pubEndDate=${encodeURIComponent(nvdStamp(ctx.until))}`
           + `&cvssV3Severity=${encodeURIComponent(ctx.settings.nvd_severity)}`;
-        secrets = requestSecrets(url, {});
         const body = parseJson(await ctx.net.fetchText(url, ctx.timeout, {}, ctx.settings.user_agent, ctx.settings.error_snippet_max_chars), url);
         for (const v of body.vulnerabilities ?? []) {
           const cve = v.cve ?? {};
@@ -1205,7 +1254,7 @@ export async function collectAdvisories(rows, ctx) {
             // The identifier is upstream text and a notice quotes none of it: the notice still
             // names the source and the cause a reader needs -- an advisory was skipped because
             // its identifier is not a CVE id -- without republishing the rejected value.
-            pushNotice(notices, `${row.kind}: skipped an advisory whose identifier is not a CVE id`, secrets, limit);
+            pushNoticeParts(notices, row.kind, 'skipped an advisory whose identifier is not a CVE id', union, limit);
             continue;
           }
           candidates.push({
@@ -1223,7 +1272,7 @@ export async function collectAdvisories(rows, ctx) {
     } catch (err) {
       // The secrets are those of the request this row made; a row that failed before it
       // reached one contributes none.
-      pushNotice(notices, `${row.kind}: ${err.message}`, secrets, limit);
+      pushNoticeParts(notices, row.kind, err.message, union, limit);
     }
   }
   return { candidates, notices: redactNotices(notices, rowsSecrets(rows, ghsaHeaders), limit) };
@@ -1246,6 +1295,17 @@ export async function collectAll(config, opts) {
   // credential and must not be able to rewrite a published word in the pool.
   const issuedSecrets = new Set();
   const issuedCredentialSecrets = new Set();
+  // The union every notice is PRICED against, which is not the same question as the union it is
+  // finally redacted against: a notice has to be priced with the values it will actually carry,
+  // and the run's own union is only complete once every source has run. It is therefore built
+  // from configuration before the first request -- every selected row's own request values,
+  // through the same requestSecrets the requests use, with the headers that source sends -- which
+  // is a superset of what the run goes on to issue (a row the budget refuses issues nothing, and
+  // its value is only redacted earlier than the union pass would have redacted it). issuedSecrets
+  // stays as the record of what was actually sent, and both passes below stay as the no-ops they
+  // have become: a notice priced against a superset cannot be rewritten by a subset of it
+  // (TR-168).
+  const runSecrets = new Set();
   const baseNet = opts.net ?? { fetchText, hostOf, isDiscoveryOnly };
   const ctx = {
     // Normalised here as well as at parse time, so a direct caller passing an
@@ -1270,10 +1330,20 @@ export async function collectAll(config, opts) {
       },
     },
     domains: opts.domains ?? null,
+    secrets: runSecrets,
   };
   const rows = (kind) => config.watchlist.filter(
     (r) => r.kind === kind && (!ctx.domains || ctx.domains.includes(r.domain)),
   );
+  // Seeded before the first source runs, over exactly the rows this run selected, so a notice is
+  // never priced against a smaller set than the one it is published under.
+  const credentialedHeaders = githubHeaders();
+  for (const row of config.watchlist) {
+    if (ctx.domains && !ctx.domains.includes(row.domain)) continue;
+    const headers = row.kind === 'ghsa' || row.kind === 'github-repo' || row.kind === 'github-org'
+      ? credentialedHeaders : {};
+    for (const secret of requestSecrets(row.target, headers)) runSecrets.add(secret);
+  }
   // The cap is resolved and checked here as well as in validateSettings: collectAll is a public
   // seam that can be driven without it, and a cap that cannot carry the shaped error text the
   // snippet bound produces has to be refused wherever it arrives, not only through the CLI
@@ -1304,9 +1374,10 @@ export async function collectAll(config, opts) {
       && (!ctx.until || !c.publishedAt || c.publishedAt <= ctx.until),
   );
   // The union pass TR-99 asks for: every notice the run produced, from every source and every
-  // row, is redacted once more against every value of every request the run issued. The
-  // per-request redaction stays as it is (and is what makes the notice readable at the point it
-  // is built); this pass closes the cross-row echo the per-request pass cannot see.
+  // row, is redacted once more against every value of every request the run issued. Every notice
+  // was already priced against the configuration-wide superset of this set (runSecrets above), so
+  // the pass is a confirmation rather than a rewrite: a notice it could still change is a notice
+  // a redaction could have lengthened after its cap was applied, which is the seam TR-168 closes.
   const union = [...issuedSecrets];
   const credentialUnion = [...issuedCredentialSecrets];
   const notices = [];
