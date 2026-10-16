@@ -17,9 +17,10 @@
 // applies the run-artifact half of the same rule itself: the pool, the plan, the items and the
 // research files the run writes under output_dir, the merged state and its siblings, the locks
 // and temp files that guard them - a lock or a temp file is dropped only when the artifact it
-// guards is one of those names or stands beside it, so a repository that ships a file merely
-// NAMED like one keeps it from both answers (closing sweep F32-5) - and the OS cruft the
-// repository ignores. The set is stated
+// guards is one of those names, is the JSON document the run's state is whatever --state calls it,
+// or stands beside it as one of those, so a repository that ships a file merely NAMED like one
+// keeps it from both answers (closing sweep F32-5, F34-3) - and the OS cruft the repository
+// ignores. The set is stated
 // here rather than read from .gitignore because the fallback exists precisely for the tree where
 // git cannot be asked -- the file states the rule for the repository, and this is the rule's
 // machine-artifact half, kept in step with .gitignore by the repository's own suite, which runs
@@ -54,8 +55,15 @@ function designOf(rel) {
 // rather than published material whether or not git is available to say so.
 const RUN_ARTIFACT_NAMES = new Set([
   '.plan.json', '.pool.json', '.items.json', '.research.json', 'tech-radar-state.json',
-  '.DS_Store', 'Thumbs.db',
+  '.tech-radar-state', '.DS_Store', 'Thumbs.db',
 ]);
+// The state file's own NAME carries no fixed spelling -- it is whatever --state names -- but its
+// DOCUMENT does: the run's state is JSON, and the lock or temp beside it names that file
+// ('mystate.json.lock' guards 'mystate.json'). Without this the fallback recognised only the fixed
+// names above, so a run whose state was named by --state left its lock in the no-git answer while
+// git's answer dropped it (closing sweep F34-3) -- and the guard read a machine artifact the reader
+// never receives, which is the failure this file's header exists to prevent.
+const JSON_DOCUMENT = /\.json$/i;
 const RUN_ARTIFACT_SUFFIXES = ['.lock', '.tmp'];
 const DIGEST_NAME = /^tech-radar-.*\.(md|html)$/;
 // Whether the artifact a lock or a temp name GUARDS is itself a run artifact, which is the rule
@@ -77,15 +85,20 @@ function guardsRunArtifact(rel, root) {
   const guarded = base.slice(0, base.length - suffix.length);
   if (guarded === '') return true;
   if (RUN_ARTIFACT_NAMES.has(guarded) || DIGEST_NAME.test(guarded)) return true;
-  // The artifact standing beside the lock. It has to be a RUN artifact itself, by the rule applied
-  // to its own name: a state file may be named by --state, so its own name carries no fixed
-  // spelling, but the artifact it guards is machine state, and a lock beside an ordinary shipped
-  // file is not the lock of anything. The rule read the NAME ALONE until Batch 67, so a repository
-  // that shipped both 'notes' and 'notes.tmp' lost 'notes.tmp' from the no-git answer while git's
-  // answer - which never ignores what it carries - kept it, and the hygiene guard never judged a
-  // file the reader receives (closing sweep F33-3, the class F32-5 was filed for).
+  // The artifact standing beside the lock. It has to be machine state itself, read the two ways a
+  // name can say so: a run artifact by the rule applied to its own name (a state file may be named
+  // by --state, so its own name carries no fixed spelling, but the artifact it guards is machine
+  // state, and a lock beside an ordinary shipped file is not the lock of anything), or the JSON
+  // document the run's state is whatever the file is called. The rule read the NAME ALONE until
+  // Batch 67, so a repository that shipped both 'notes' and 'notes.tmp' lost 'notes.tmp' from the
+  // no-git answer while git's answer - which never ignores what it carries - kept it, and the
+  // hygiene guard never judged a file the reader receives (closing sweep F33-3, the class F32-5 was
+  // filed for). Batch 70 (closing sweep F34-3) closed the other half of that reading: requiring a
+  // run-artifact NAME alone left every --state-named lock in the fallback's answer while git's
+  // answer dropped it, so the guard scanned a run artifact the reader never receives.
   const beside = rel.slice(0, rel.length - suffix.length);
   if (!existsSync(join(root, beside))) return false;
+  if (JSON_DOCUMENT.test(beside.split('/').pop())) return true;
   return isRunArtifact(beside, root);
 }
 function isRunArtifact(rel, root) {

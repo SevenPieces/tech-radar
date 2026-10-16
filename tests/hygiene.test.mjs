@@ -24,6 +24,42 @@ function gitSaysIgnored(rel, root = SKILL_ROOT) {
   return res.status === 0;
 }
 
+
+// The answer the walk gives in the tree the fallback exists for: the same tree with no git on PATH.
+// Every case below that compares the two answers asks the child this one way, so a difference in the
+// comparison is a difference in the walk and never in how it was invoked.
+function noGitWalk(dir) {
+  const moduleUrl = pathToFileURL(join(SKILL_ROOT, 'tests', 'lib', 'shipped-files.mjs')).href;
+  const child = spawnSync(process.execPath, ['-e',
+    'import(process.argv[1]).then((m) => process.stdout.write(JSON.stringify(m.shippedFiles(process.argv[2]))))',
+    moduleUrl, dir],
+    { encoding: 'utf8', env: { ...process.env, PATH: '/nonexistent' } });
+  if (child.status !== 0) return 'ERR:' + String(child.stderr).split(String.fromCharCode(10))[0];
+  return JSON.parse(String(child.stdout));
+}
+
+// A throwaway repository built under the OS temp directory: this repository's own .gitignore, copied
+// in verbatim, and the files a case names. The named paths are force-added, which is how a case
+// builds the layout git answers for with a TRACKED file its ignore rules would otherwise exclude.
+// Returns null when git cannot be started, so a case skips with a named reason rather than failing.
+function walkerFixture(files, tracked = []) {
+  const dir = mkdtempSync(join(tmpdir(), 'tech-radar-walker-'));
+  for (const [rel, body] of Object.entries(files)) {
+    mkdirSync(join(dir, rel, '..'), { recursive: true });
+    writeFileSync(join(dir, rel), body);
+  }
+  const made = spawnSync('git', ['-C', dir, 'init', '-q'], { encoding: 'utf8' });
+  if (made.error || made.status !== 0) {
+    rmSync(dir, { recursive: true, force: true });
+    return null;
+  }
+  spawnSync('git', ['-C', dir, 'add', '-A'], { encoding: 'utf8' });
+  if (tracked.length > 0) spawnSync('git', ['-C', dir, 'add', '-f', ...tracked], { encoding: 'utf8' });
+  spawnSync('git', ['-C', dir, '-c', 'user.email=a@b', '-c', 'user.name=a', 'commit', '-qm', 'fixture'],
+    { encoding: 'utf8' });
+  return dir;
+}
+
 // Every pattern is written with \s+ where a phrase would otherwise be a literal space,
 // so this file never matches its own scan.
 const PROCESS = [
@@ -353,6 +389,118 @@ test('a tracked file merely named like a run artifact is kept by both answers, a
 // read the name alone - dropped it from the no-git answer while git's answer kept it. Batch 67
 // requires the artifact standing beside the lock to be a run artifact by its own name, so both
 // answers keep 'notes.tmp' and the hygiene guard judges a file the reader receives.
+
+// Closing sweep F34-3 (Low, a regression Batch 68 introduced). Batch 68 required the artifact beside
+// a lock to be a run artifact BY NAME, and the fixed names carry no spelling for a state file named
+// by --state: 'mystate.json.lock' was therefore kept by the no-git answer while git's answer dropped
+// it (the '.gitignore' rule ignores any '*.lock'), so the two answers disagreed where they had agreed
+// before Batch 68, and the guard read a run artifact the reader never receives. The state file's own
+// NAME carries no fixed spelling but its DOCUMENT does - the run's state is JSON - and the fallback
+// recognises a lock whose guarded artifact beside it is one. This case plants a credential shape in
+// the run's temp file too, which is the consequence the sweep measured: the guard must not read it.
+test('a lock named after a --state file is dropped by both answers, and the guard never reads it', (t) => {
+  const dir = walkerFixture({
+    '.gitignore': readFileSync(join(SKILL_ROOT, '.gitignore')),
+    'config/settings.md': 'a shipped file\n',
+    'mystate.json': '{"runs":[]}\n',
+    'mystate.json.lock': '{"host":"the builder"}\n',
+    'mystate.json.tmp': 'ghp_' + 'fakefakefakefake' + '\n',
+  });
+  if (dir === null) {
+    t.skip('git is not available, so the repository answer was not exercised');
+    return;
+  }
+  try {
+    const withGit = shippedFiles(dir);
+    assert.deepEqual(withGit, ['.gitignore', 'config/settings.md', 'mystate.json'],
+      'the state-named lock or temp entered an answer: ' + JSON.stringify(withGit));
+    assert.deepEqual(noGitWalk(dir), withGit,
+      'the two answers disagree about a lock named after a --state file');
+    assert.deepEqual(scan(dir, SECRET, 'carries'), [],
+      'a guard read a run artifact the reader never receives');
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+// The other half of the same reading, and the direction Batch 68 was filed for: the run artifacts
+// both answers must drop still agree, and a credential planted in one of them reaches no guard. The
+// fixture is the layout the run writes for itself - '.pool.json' and its lock and temp spellings.
+test('the run artifacts both answers drop still agree, and a credential in one is never read', (t) => {
+  const dir = walkerFixture({
+    '.gitignore': readFileSync(join(SKILL_ROOT, '.gitignore')),
+    'config/settings.md': 'a shipped file\n',
+    '.pool.json': '[]\n',
+    '.pool.json.lock': '{"host":"the builder"}\n',
+    '.pool.json.tmp': 'ghp_' + 'fakefakefakefake' + '\n',
+  });
+  if (dir === null) {
+    t.skip('git is not available, so the repository answer was not exercised');
+    return;
+  }
+  try {
+    const withGit = shippedFiles(dir);
+    assert.deepEqual(withGit, ['.gitignore', 'config/settings.md'],
+      'a run artifact entered an answer: ' + JSON.stringify(withGit));
+    assert.deepEqual(noGitWalk(dir), withGit, 'the two answers disagree about a run artifact');
+    assert.deepEqual(scan(dir, SECRET, 'carries'), [], 'a guard read a run artifact');
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+// The state lock's own legacy spelling is named by .gitignore itself ('.tech-radar-state.lock'), and
+// the fallback read it as an ordinary file because the name it guards is in no fixed set. Both
+// answers drop it now: the fallback recognises the state's dotted spelling as machine state.
+test('the state lock spelling .gitignore names for itself is dropped by both answers', (t) => {
+  const dir = walkerFixture({
+    '.gitignore': readFileSync(join(SKILL_ROOT, '.gitignore')),
+    'config/settings.md': 'a shipped file\n',
+    '.tech-radar-state.lock': '{"host":"the builder"}\n',
+  });
+  if (dir === null) {
+    t.skip('git is not available, so the repository answer was not exercised');
+    return;
+  }
+  try {
+    const withGit = shippedFiles(dir);
+    assert.deepEqual(withGit, ['.gitignore', 'config/settings.md'],
+      'the state lock entered an answer: ' + JSON.stringify(withGit));
+    assert.deepEqual(noGitWalk(dir), withGit, 'the two answers disagree about the state lock');
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+// THE RECORDED BOUND this rule leaves, measured and pinned rather than left implicit. A lock the
+// repository TRACKS is kept by git's answer whatever the ignore rules say - git does not ignore what
+// it carries - and the fallback in an installed skill has no tracking information to read: it has
+// only names. So a repository that force-adds the lock of its own state file gets that lock from
+// git's answer and loses it from the fallback's, which is the F33-3 direction (a file the reader
+// receives goes unjudged) and is the one layout the two answers cannot agree about without git. The
+// measurement is pinned here so a later change to it is a deliberate act rather than a drift.
+test('the recorded bound: a TRACKED lock of a tracked state file is kept by git and dropped without git', (t) => {
+  const dir = walkerFixture({
+    '.gitignore': readFileSync(join(SKILL_ROOT, '.gitignore')),
+    'config/settings.md': 'a shipped file\n',
+    'mystate.json': '{"runs":[]}\n',
+    'mystate.json.lock': '{"host":"the builder"}\n',
+  }, ['mystate.json', 'mystate.json.lock']);
+  if (dir === null) {
+    t.skip('git is not available, so the repository answer was not exercised');
+    return;
+  }
+  try {
+    const withGit = shippedFiles(dir);
+    assert.equal(withGit.includes('mystate.json.lock'), true,
+      'the fixture lock is not tracked, so the case under test was not built');
+    assert.equal(noGitWalk(dir).includes('mystate.json.lock'), false,
+      'the fallback kept a lock it has no tracking information about');
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 test('a tracked temp file beside a tracked file of its own name is kept and judged', (t) => {
   const dir = mkdtempSync(join(tmpdir(), 'tech-radar-pair-'));
   try {
