@@ -101,7 +101,15 @@ const SECRET_SHAPES = [
 // Without them the rule removed the first word of a notice's own diagnosis for every watchlist
 // target whose path ends in 'authorization', and the published notice was not even a fixed point of
 // its own pass. Every other token the seam can hand the rule is consumed exactly as before.
-const AUTHORIZATION_SHAPE = /(?<!\/)\b(?:proxy-)?authorization\s*:\s*(?!\/\/|https?:)[^\s,;"']+(?![\s,;"']\s)/gi;
+// The URL refusal reads the URL's own userinfo now: a header value that IS a URL carries its
+// credential in the userinfo, and refusing the whole shape because it begins a URL published
+// 'authorization: https://user:s3cr3tp4ss@host/path' byte for byte (sweep F28-4). The refusal still
+// fires for a URL with no userinfo, which is the assembly's own seam and carries no credential, and
+// a run of not-whitespace after a refused URL is not consumed either. The 'request failed' refusal
+// is the other half of the notice seam: the shaper's transport detail begins with those two words,
+// and without it a source label ending in the bare word 'authorization' lost the word 'request' from
+// its own diagnosis (verification F28-3, transport half).
+const AUTHORIZATION_SHAPE = /(?<!\/)\b(?:proxy-)?authorization\s*:\s*(?!\/\/(?![^\s@]*@)|https?:\/\/(?![^\s@]*@)|request failed)[^\s,;"']+(?![\s,;"']\s)/gi;
 
 // The one shape in the list above that has to read what FOLLOWS its match: the authorization rule
 // consumes the token after the scheme it matched, and only when that token is the credential. The
@@ -110,17 +118,39 @@ const AUTHORIZATION_SHAPE = /(?<!\/)\b(?:proxy-)?authorization\s*:\s*(?!\/\/|htt
 // single-token match the list makes and the two-token removal the credential calls for stay in one
 // place.
 const NEXT_AUTH_TOKEN = new RegExp('^\\s+(' + AUTH_TOKEN_CHARS + ')');
+// The rest of a header VALUE once the credential-bearing token has been read: a quoted string that
+// stands against the token ('oauth_consumer_key="..."') and any comma-separated continuation of the
+// same attribute list. A whitespace-separated run of bare prose is NOT part of it, which is what
+// keeps 'Authorization: Basic abcdefgh and then prose' readable. The rule consumed one token and
+// stopped, so an OAuth or Digest attribute list published its quoted credential
+// ('OAuth oauth_consumer_key="abc", oauth_token="SECRETTOKEN123"' -> '[redacted]"abc",
+// oauth_token="SECRETTOKEN123"'; sweep F28-4).
+const AUTH_VALUE_TAIL = /^(?:\s*"[^"]*"|\s*'[^']*'|\s*,\s*(?:[^\s,;"']+|"[^"]*"|'[^']*'))*/;
 function redactAuthorizationShapes(text) {
   const source = String(text);
   let out = '';
   let at = 0;
   for (const match of source.matchAll(AUTHORIZATION_SHAPE)) {
+    // A match whose token is (or contains) the scaffold placeholder is the notice's OWN diagnosis,
+    // masked by protectScaffold, and never a header value: the placeholder is written by this module
+    // and normalised out of every input and every value, so the only text that can carry one is a
+    // span protectScaffold wrote. Consuming it deleted the HTTP status from every notice whose
+    // source label ends in the bare word 'authorization' (verification F28-3). The match is left
+    // exactly where it stands, and the span is restored at the end of the pass as any other is.
+    if (match[0].includes(SCAFFOLD_PLACEHOLDER)) continue;
     const first = match[0].slice(match[0].lastIndexOf(':') + 1).trim();
     const next = NEXT_AUTH_TOKEN.exec(source.slice(match.index + match[0].length));
     const consumeSecond = next !== null
+      && !next[1].includes(SCAFFOLD_PLACEHOLDER)
       && (AUTH_SCHEMES.has(first.toLowerCase()) || credentialShapedToken(next[1]));
     out += source.slice(at, match.index) + REDACTION_SENTINEL;
     at = consumeSecond ? match.index + match[0].length + next[0].length : match.index + match[0].length;
+    if (consumeSecond) {
+      // The attribute list is consumed only while it is the shaper's own text or a value: a
+      // placeholder inside it belongs to the scaffold and stops the consumption there.
+      const tail = AUTH_VALUE_TAIL.exec(source.slice(at));
+      if (tail !== null && tail[0] !== '' && !tail[0].includes(SCAFFOLD_PLACEHOLDER)) at += tail[0].length;
+    }
   }
   return out + source.slice(at);
 }
