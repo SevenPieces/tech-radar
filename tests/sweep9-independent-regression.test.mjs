@@ -101,15 +101,20 @@ test('TR-158 a listing with far more conforming entries than the setting yields 
     + '; at most the configured number of targets may be taken from one listing: '
     + JSON.stringify(asked.slice(0, 5)));
 
-  assert.equal(large.pool.notices.length, small.pool.notices.length,
+  // The count is the run's own and does not scale with the answer: the slower listing adds the
+  // one report TR-164 asks for, which is a page the run asked for and did not page past, and
+  // nothing else. A listing that answered with fewer entries than the page cannot have lost one,
+  // so it publishes no such report at all -- hence the one-notice allowance rather than equality.
+  assert.ok(large.pool.notices.length <= small.pool.notices.length + 1,
     'a longer answer grew the published notice count (' + small.pool.notices.length + ' -> '
     + large.pool.notices.length + '); one listing answer must not decide the volume of the run\'s output. '
     + 'large: ' + JSON.stringify(large.pool.notices.slice(0, 5)));
-  // A listing that dropped accepted entries also publishes exactly one truncation notice, on top
-  // of the failure notices its retained targets produce. That extra notice is a deliberate,
-  // reported coverage loss, so the bound is the configured number of targets plus it -- and the
-  // report is asserted first, so the extra notice is never traded for silence.
-  const truncation = large.pool.notices.filter((n) => /listing capped at/.test(n));
+  // A listing whose answer filled the page also publishes exactly one truncation notice, on top of
+  // the failure notices its retained targets produce. That extra notice is a deliberate, reported
+  // coverage loss -- the entries past the page that was read -- so the bound is the configured
+  // number of targets plus it, and the report is asserted first, so the extra notice is never
+  // traded for silence.
+  const truncation = large.pool.notices.filter((n) => /entries past the first page were not requested/.test(n));
   assert.equal(truncation.length, 1,
     'the oversized listing did not report its truncation exactly once: '
     + JSON.stringify(large.pool.notices));

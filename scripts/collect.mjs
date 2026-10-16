@@ -14,8 +14,8 @@ import { fileURLToPath, pathToFileURL } from 'node:url';
 import { readConfig, readSettings } from './lib/mdtable.mjs';
 import {
   fetchText, hostOf, isDiscoveryOnly, splitItems, field, atomLink, plainText, redactUrl,
-  neutraliseMarkers, neutraliseLinkSeams, neutraliseUrl, redactSecrets, requestSecrets,
-  requestSecretSets, neutraliseTagSpans, neutraliseEntityTags,
+  neutraliseMarkers, neutraliseLinkSeams, noticePreservingRewrites, neutraliseUrl, redactSecrets,
+  requestSecrets, requestSecretSets, neutraliseTagSpans, neutraliseEntityTags,
 } from './lib/net.mjs';
 
 // The collector must work from any working directory, so the default configuration
@@ -120,6 +120,17 @@ function windowCapError(raw) {
 // arithmetic reserved for the source is the one the shaped text needs to name its request -- and
 // never less than the absolute floor, so the refusal below cannot name a cap its own range check
 // refuses. Both settings are named, because either one of them can be the one that is wrong.
+//
+// What the check buys is bounded by where the two settings are applied, and the two documents
+// that state this relation have to say the same thing (TR-167). The shaped text is priced inside
+// the shaper, which crosses the notice rewriting before it does so, so what an accepted pair
+// admits is the length the notice will carry -- the shaper's own floors excepted: a bound too
+// small for its compact form leaves the transport cause whole and longer than the bound, and a
+// bound under the HTTP prefix leaves the status and its dangling 'for ' (TR-154). The source is
+// bounded by the rewriting's own output and is a fixed point of it, so it cannot hand the room
+// back on the push's pass. The check therefore reserves the room the shaped text is measured
+// against; it does not bound a notice on its own, because a notice is assembled from more parts
+// than these two and a part no caller bounded still crosses the push.
 const NOTICE_SEPARATOR_CHARS = 2;
 function noticeSourceRoom(cap) {
   return Math.ceil((cap - NOTICE_SEPARATOR_CHARS) / 2);
@@ -172,13 +183,23 @@ function requireNoticeLimit(value) {
   return value;
 }
 
-// The rewriting every notice crosses at the single push, in one place because two boundaries need
-// it: the push applies it to the assembled notice, and noticeSource applies it to the source
-// before bounding it. Bounding the source first and rewriting it afterwards handed the rewriting's
-// own output back to the notice: a target that spells a markdown link seam -- '](' -- is one
-// character longer per seam once the seam is ended, so the source took that room from the shaped
-// error text and the cause was cut. The rewriting is idempotent, so a source that has already
-// crossed it is returned byte-identical by the push's own pass.
+// The rewriting every notice crosses at the single push, in one place because three boundaries
+// need it: the push applies it to the assembled notice, noticeSource applies it to the source
+// before bounding it, and the transport shaper applies it to the shaped text before its length
+// is priced against the snippet bound. Bounding a part first and rewriting it afterwards handed
+// the rewriting's own output back to the notice: a target that spells a markdown link seam --
+// '](' -- is one character longer per seam once the seam is ended, so the source took that room
+// from the shaped error text and the cause was cut (TR-162), and the shaped text itself took the
+// notice cap's room the same way one layer down, which the push then sliced the cause out of
+// (TR-165).
+//
+// It is a fixed point, not one pass: the rules hand each other shapes, so a second application
+// of a single pass is not guaranteed to return what the first produced. Applying this function
+// to its own output therefore changes nothing, which is what lets a caller bound a text and a
+// later caller rewrite it again and still agree on its length -- the room the first reserved is
+// the room the second leaves. net.mjs owns the loop, because the shaper needs the same
+// guarantee, and the property is fuzzed in tests/sweep11-independent-regression.test.mjs rather
+// than asserted here.
 //
 // The tag shape is the one class a notice cannot carry: a notice is published verbatim in the
 // Coverage note, and a Markdown reader draws a live anchor or fetches a remote image from
@@ -193,14 +214,14 @@ function requireNoticeLimit(value) {
 // neutraliseEntityTags refuses that spelling before the literal rule runs, and both rules are
 // the ones the candidate normaliser draws too, so the two boundaries cannot drift apart
 // (TR-122, TR-123).
-function neutraliseNoticeText(text) {
+export function neutraliseNoticeText(text) {
   const spaced = neutraliseTagSpans(neutraliseEntityTags(
     String(text).replace(NOTICE_CONTROLS, (ch) => (/\s/.test(ch) ? ' ' : '')),
   ));
   // The markdown link seam belongs to this path and not to the neutraliser a candidate field
   // uses: a notice is published verbatim in the Coverage note, while a release body's links are
   // ordinary Markdown that the pool has to keep.
-  return neutraliseLinkSeams(neutraliseMarkers(spaced));
+  return noticePreservingRewrites(neutraliseMarkers(spaced));
 }
 
 // The source a notice names is bounded, because the assembled notice is capped afterwards: a
@@ -209,8 +230,9 @@ function neutraliseNoticeText(text) {
 // of what the cap has after the ': ' separator, and the label -- which sits inside that room, not
 // outside it -- is charged against it with its separating space, so the room the shaped error text
 // was granted is what the check reserved whatever label the notice carries (TR-162). The name is
-// bounded after the notice rewriting, so no spelling the rewriting lengthens can take the room
-// back, and the source that filling the room produces is the source the push publishes.
+// bounded after the notice rewriting, and the rewriting is a fixed point, so the source that
+// filling the room produces is returned byte-identical by the push's own pass: no spelling it
+// lengthens can take the room back.
 function noticeSource(label, name, limit) {
   const room = Math.max(0, noticeSourceRoom(requireNoticeLimit(limit)) - String(label).length - 1);
   const text = neutraliseNoticeText(String(name ?? ''));
@@ -551,14 +573,14 @@ function skippedListingPhrase(n) {
     ? `skipped ${n} listing entry name, which is not a repository name`
     : `skipped ${n} listing entry names, which are not repository names`;
 }
-// What one listing's own bound did to it, when it dropped accepted entries. The bound is
-// configuration and the counts are arithmetic, so the notice carries no upstream text; both counts
-// are named, because a lone cap tells an operator how much of the listing was kept but not how much
-// of it was never seen (TR-164). It is the arXiv cap's counterpart in this file, which reports the
-// same class of loss for a capped listing instead of looking complete.
-function truncatedListingPhrase(cap, dropped) {
-  return `listing capped at ${cap} repositories; ${dropped} more `
-    + (dropped === 1 ? 'repository was' : 'repositories were') + ' not requested';
+// What one listing's page did to it, when the answer filled the page that was requested. The page
+// size is configuration and the count is arithmetic, so the notice carries no upstream text -- no
+// repository name, no URL, no answer field (TR-166). It is the arXiv cap's counterpart in this
+// file, which reports the same class of loss for a capped listing instead of looking complete: a
+// listing whose answer filled the page may hold more than the page carried, and the run reads only
+// that page, so without a word the truncated listing reads exactly like a complete one.
+function listingPagePhrase(cap) {
+  return `listing page filled at ${cap} repositories; entries past the first page were not requested`;
 }
 // The shape a repository name has: exactly one slash, an owner that is a GitHub login, and a
 // repository name of the characters GitHub allows in one. A listing's name is answer text that
@@ -717,15 +739,17 @@ export async function collectGithub(rows, ctx) {
           target: entry.name, domain: row.domain, discovered: true, org: row.target, ordinal: entry.ordinal,
         });
       }
-      // The bound drops every accepted entry past the configured count, and without a word about it
-      // the run publishes the same output for a listing that held exactly that count and for one
-      // that held many more; the repository that lost its slot is the one the run never asks about,
-      // and it may be the one an un-updated security patch sits in. The drop is reported as the
-      // capped arXiv listing reports its own cap -- one notice naming the count that was kept and
-      // the count that was not requested (TR-164).
-      const dropped = accepted.length - retained.length;
-      if (dropped > 0) {
-        pushNotice(notices, `${noticeSource('github', row.target, limit)}: ${truncatedListingPhrase(perOrg, dropped)}`, secretsFor(url), limit);
+      // The loss this listing can actually suffer is the opposite of a drop inside the answer: the
+      // request asks for one page and reads it, so the slice above can never be smaller than what
+      // the answer sent -- a report of that drop is unreachable with a conformant answer (TR-166).
+      // What is silent is the page it filled: a listing that answered with exactly the requested
+      // count may hold more than the page carried, and the run neither asks for the next page nor
+      // says so, so its output is identical to a listing that really ended there. The report is
+      // the run's own arithmetic -- the page it asked for and the count it never requested -- and
+      // it is emitted only when the answer filled the page, which is the only case in which an
+      // entry can have gone unread. A shorter answer cannot have lost one, so nothing is said.
+      if (body.length >= perOrg) {
+        pushNotice(notices, `${noticeSource('github', row.target, limit)}: ${listingPagePhrase(perOrg)}`, secretsFor(url), limit);
       }
       if (refused > 0) {
         pushNotice(notices, `${listingSource('github', row.target, firstRefused, limit)}: ${skippedListingPhrase(refused)}`, secretsFor(url), limit);

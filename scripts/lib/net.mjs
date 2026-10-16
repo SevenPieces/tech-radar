@@ -416,7 +416,12 @@ export function shapeHttpError(status, body, url, limit, headers, omitUrl = fals
   // segment is normalised away -- so no by-value removal covers it, and the caller names the
   // organisation row and the entry's ordinal instead.
   const prefix = `HTTP ${status} for `;
-  const shown = omitUrl ? '' : redactSecrets(redactUrl(url), secrets);
+  // The request crosses the notice rewriting before its length is priced, as the transport half's
+  // request does (TR-165): a redacted URL that spells a link seam is one character longer per seam
+  // once the rewriting has ended it, and a request bounded before that rewriting was the notice
+  // cap's room short by exactly that many characters -- the push sliced the assembled notice there
+  // and the tail went with it. The status prefix is the floor and is never cut.
+  const shown = omitUrl ? '' : noticePreservingRewrites(redactSecrets(redactUrl(url), secrets));
   const room = Math.max(0, bound - prefix.length);
   const shaped = omitUrl
     ? new Error(`HTTP ${status}`)
@@ -512,18 +517,34 @@ export function shapeTransportError(err, url, limit, headers, omitUrl = false) {
   // returned 'limit + 21' whenever the cause reached the cap. A repository discovered from an
   // organisation listing is shaped with no request at all (omitUrl): its URL is the answer's
   // own name respelled by the URL serializer, which by-value removal cannot cover.
+  //
+  // The request crosses the notice rewriting above before its length is priced: a redacted URL
+  // that spells a link seam is one character longer per seam once the rewriting has ended it,
+  // and a request bounded and then rewritten was the notice cap's room short by exactly that
+  // many characters -- the push cut the assembled notice there and the cause went with the tail
+  // (TR-165). Normalising first and cutting what it produced makes the length this function
+  // clears against the bound the length the notice carries, so the room the notice check
+  // reserved upstream for this text is the room it survives with.
   const prefix = 'request failed for ';
   const shortPrefix = 'request failed';
   const separator = ': ';
-  const shown = omitUrl ? '' : redactSecrets(redactUrl(url), secrets);
-  const room = Math.max(0, bound - prefix.length - separator.length - cause.length);
+  const causeText = noticePreservingRewrites(cause);
+  const shownOf = (budget) => {
+    if (omitUrl) return '';
+    const shown = noticePreservingRewrites(redactSecrets(redactUrl(url), secrets));
+    return shown.length > budget ? shown.slice(0, budget) : shown;
+  };
+  const room = Math.max(0, bound - prefix.length - separator.length - causeText.length);
   const full = omitUrl
-    ? `${shortPrefix}${separator}${cause}`
-    : `${prefix}${shown.length > room ? shown.slice(0, room) : shown}${separator}${cause}`;
-  const compact = `${shortPrefix}${separator}${cause}`;
-  const text = full.length <= bound ? full : (compact.length <= bound ? compact : cause);
+    ? noticePreservingRewrites(`${shortPrefix}${separator}${causeText}`)
+    : noticePreservingRewrites(`${prefix}${shownOf(room)}${separator}${causeText}`);
+  const compact = noticePreservingRewrites(`${shortPrefix}${separator}${causeText}`);
+  const text = full.length <= bound ? full : (compact.length <= bound ? compact : causeText);
   const shaped = new Error(text);
-  shaped.cause = cause;
+  // The cause field is the same text the message carries, so a caller that reports it (the
+  // operator line reads it back out) reads the bytes the notice published and not the bytes
+  // before the rewriting.
+  shaped.cause = causeText;
   // No process exit status means curl never ran: the caller can tell a broken dependency from a
   // source that answered. Two exceptions do not mean that, and neither may be read as one: a
   // terminated-by-ceiling child ran and only its answer overflowed, and a killed child ran and was
@@ -711,6 +732,35 @@ export function neutraliseLinkSeams(text) {
   return String(text ?? '').replace(LINK_SEAM, '] (');
 }
 
+// The rewriting a notice or a candidate crosses, run until its output stops moving. One pass of
+// the rules above is a function, not a fixed point: a rule can hand the next one a shape it did
+// not have -- a marker's closer followed by the '(' a later word spells is a link seam only
+// after the marker rule has run -- so the text a second pass reads is not always the text the
+// first pass read, and the length a caller measured can be one character per created seam short
+// of the length that would survive. A text that has crossed this function is returned
+// byte-identical by it, because the pass that produces it is the pass this function ends on, so a
+// caller that bounds the text and a later caller that rewrites it again agree on its length: the
+// room the first reserved is the room the second leaves.
+//
+// A pass never lengthens the text as a whole. The entity rule and every marker rule replace a
+// run with a shorter one or with a space, and the tag-span rule replaces the '<' it reads with a
+// space; the only rule that can lengthen anything, the seam rule's '](' to '] (', lengthens only
+// a pair of characters it consumes, and the marker rules above it cannot spell that pair in their
+// own output -- each of them ends with a space or with the plain text an ordinary span carried.
+// A pass that changes nothing ends the loop, and a pass that changes something strictly shortens
+// the text, so the loop terminates; each pass also rewrites strictly fewer marker or entity
+// spellings, so it settles in a small number of passes for any text the rules can read.
+export function noticePreservingRewrites(text) {
+  let out = String(text ?? '');
+  for (;;) {
+    const next = neutraliseLinkSeams(neutraliseMarkers(
+      neutraliseTagSpans(neutraliseEntityTags(out)),
+    ));
+    if (next === out) return out;
+    out = next;
+  }
+}
+
 // The same vocabulary, in the one candidate field that is a URL rather than prose. The
 // renderer reads a marker, a status token or an emphasis marker out of whatever its citation
 // destinations do not cover, and a URL is published as a destination: a line break, or the
@@ -840,6 +890,10 @@ export function neutraliseEntityTags(raw) {
 
 export function plainText(raw, limit) {
   const bound = requirePositive(limit, 'the character limit');
+  // The markdown link seam is deliberately not part of this path: a candidate field is the prose
+  // the digest is written from, and a GitHub release body is Markdown by construction, so its
+  // links are the normal case rather than a hostile spelling. The notice rewriting that ends the
+  // seam belongs to notice text alone (TR-112, TR-165).
   const text = neutraliseMarkers(
     decodeEntities(neutraliseEntityTags(String(raw)).replace(/<[^>]*>/g, ' '))
       .replace(CONTROLS, (ch) => (/\s/.test(ch) ? ' ' : '')),

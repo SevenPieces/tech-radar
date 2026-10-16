@@ -294,9 +294,16 @@ test('TR-163 a tool that genuinely could not be started keeps its own cause', ()
 // repositories or far more. The same file reports the analogous arXiv cap with a notice, and the
 // source half of the same setting is bounded without any report of its own. A listing longer than
 // the count must say so; a listing at or within the count must not.
+//
+// TR-166 refined what "the count" means here: the request asks for one page of the configured
+// size and reads it, so the report cannot be about a slice of the answer that is smaller than the
+// answer -- a conformant answer sends at most what was asked for. The loss is the page it filled,
+// which may hold more than the page carried, and that is what the cases below measure; the
+// "within the count" case is the answer that came back shorter than the page, which cannot have
+// lost an entry.
 // ---------------------------------------------------------------------------------------
 
-const TRUNCATION = /truncat|cap|drop|ignor|beyond|exceed|fewer|partial|incomplete|only\s+\d|more\s+than/i;
+const TRUNCATION = /truncat|drop|ignor|beyond|exceed|partial|incomplete|past\s+the\s+first\s+page|page\s+filled/i;
 
 function listingTransport(entries) {
   const calls = [];
@@ -333,8 +340,8 @@ test('TR-164 a listing longer than the configured count reports the truncation',
   const over = await orgPool(bound + 6, bound);
   const exact = await orgPool(bound, bound);
 
-  // The bound still decides the request volume in both cases: this case is about the silence that
-  // surrounds the drop, not about the drop itself.
+  // The bound still decides the request volume in both cases: a page is asked for once, and no
+  // more repositories are requested from one listing whatever the answer held.
   assert.equal(releaseRequests(over.calls).length, bound,
     'the oversized listing was not bounded to the configured count: '
     + releaseRequests(over.calls).length + ' repository requests');
@@ -342,22 +349,28 @@ test('TR-164 a listing longer than the configured count reports the truncation',
     'the exact listing did not yield the configured count of repository requests: '
     + releaseRequests(exact.calls).length);
 
-  const reported = over.pool.notices.filter((n) => TRUNCATION.test(n));
-  assert.equal(reported.length, 1,
-    'a listing of ' + (bound + 6) + ' entries at github_org_repos ' + bound + ' produced '
-    + reported.length + ' notices reporting the truncation, so the drop is invisible: '
-    + JSON.stringify(over.pool.notices));
-  assert.match(reported[0], /\b(?:10|12|16|6)\b/,
-    'the truncation notice names no count, so the operator cannot tell how much was dropped: '
-    + JSON.stringify(reported[0]));
+  // Both answered with a full page, so both may hold more than the page carried: the report is
+  // the run's own count of the page it asked for, and neither answer may silence it.
+  for (const [label, pool] of [['oversized', over.pool], ['exact', exact.pool]]) {
+    const reported = pool.notices.filter((n) => TRUNCATION.test(n));
+    assert.equal(reported.length, 1,
+      'the ' + label + ' listing at github_org_repos ' + bound + ' produced ' + reported.length
+      + ' notices reporting the truncation, so the page it filled is invisible: '
+      + JSON.stringify(pool.notices));
+    assert.match(reported[0], new RegExp('\\b' + bound + '\\b'),
+      'the truncation notice names no page size, so the operator cannot tell how much may be '
+      + 'missing: ' + JSON.stringify(reported[0]));
+  }
 });
 
-test('TR-164 a listing at or within the configured count reports no truncation', async () => {
+test('TR-164 a listing shorter than the requested page reports no truncation', async () => {
   const bound = 10;
-  for (const entries of [bound - 1, bound]) {
+  // An answer shorter than the page it was asked for cannot have lost an entry: it is the whole
+  // listing, so the run says nothing about it. A full answer is the other case above.
+  for (const entries of [0, 1, bound - 1]) {
     const { pool } = await orgPool(entries, bound);
     assert.deepEqual(pool.notices, [],
       'a listing of ' + entries + ' entries at github_org_repos ' + bound + ' reported a truncation '
-      + 'or another notice: ' + JSON.stringify(pool.notices));
+      + 'or another notice, though it cannot have lost an entry: ' + JSON.stringify(pool.notices));
   }
 });
