@@ -216,16 +216,24 @@ test('TR-141 a hostile repository name the listing supplied cannot rewrite a not
     'the rendered coverage note lost the phrase: ' + coverage);
 });
 
-test('TR-141 a listing entry whose name is not a repository name is skipped, never coerced', async () => {
+test('TR-141 the non-conforming entry names of one listing are reported in one aggregate notice and never coerced', async () => {
   const calls = [];
-  const entries = [5, ['a/b'], {}, null, 'a/b/c', 'a?x=y'];
+  // Six entries whose names are not repository names -- a number, an array, an object, null, a
+  // name with a second slash and a name carrying a query -- and one that is a repository name.
+  // The number of refusals is chosen by the answer, so the refused entries of one listing are
+  // reported once, with their count (TR-152); the array entry would spell a conforming name if it
+  // were coerced, so the single request the run makes and the candidate it keeps are pinned too.
+  const nonConforming = [5, ['a/b'], {}, null, 'a/b/c', 'a?x=y'];
+  const conforming = ORG_ROW + '/kubernetes';
   const net = {
     fetchText: async (url) => {
       calls.push(url);
       if (url === PROBE) return rateLimit(55);
       if (url.includes('/orgs/' + ORG_ROW + '/repos')) {
-        return JSON.stringify(entries.map((full_name) => ({ full_name })));
+        return JSON.stringify([...nonConforming, conforming].map((full_name) => ({ full_name })));
       }
+      if (url.includes('/repos/' + conforming + '/releases')) return K8S_RELEASES;
+      if (url.includes('/tags')) return '[]';
       throw new Error('unexpected request: ' + url);
     },
   };
@@ -233,17 +241,42 @@ test('TR-141 a listing entry whose name is not a repository name is skipped, nev
     settings: RUN_SETTINGS,
     watchlist: [{ kind: 'github-org', target: ORG_ROW, domain: 'infra-cloud', note: '' }],
   }, { ...WINDOW, net });
-  assert.equal(pool.candidates.length, 0,
-    'a name that is not a repository name still produced a candidate: ' + JSON.stringify(pool.candidates));
+
+  // The conforming entry is still used: aggregating the refused half of the listing must not
+  // swallow the usable half, and no non-conforming name produced a candidate.
+  assert.equal(pool.candidates.length, 1,
+    'the listing produced ' + pool.candidates.length + ' candidates, not the one its conforming '
+    + 'entry carried: ' + JSON.stringify(pool.candidates));
+  assert.equal(pool.candidates[0].source, 'github:' + conforming,
+    'the candidate is not the listing conforming entry: ' + pool.candidates[0].source);
+
+  // The refused entries are reported by one aggregate notice that carries their count, so the
+  // number of published notices does not grow with what the answer sent.
   const skip = pool.notices.filter((n) => /skip/i.test(n));
-  assert.equal(skip.length, entries.length,
-    'every non-conforming entry is reported once: ' + JSON.stringify(pool.notices));
-  for (let i = 1; i <= entries.length; i += 1) {
-    assert.ok(skip.some((n) => new RegExp('\\b' + i + '\\b').test(n)),
-      'position ' + i + ' is not named in a notice: ' + JSON.stringify(skip));
+  assert.equal(skip.length, 1,
+    'the non-conforming entries are not reported exactly once: ' + JSON.stringify(pool.notices));
+  const notice = skip[0];
+  assert.ok(notice.includes(ORG_ROW),
+    'the notice does not name the organisation row: ' + notice);
+  assert.ok(new RegExp('(?:^|[^0-9])' + nonConforming.length + '(?:[^0-9]|$)').test(notice),
+    'the notice does not carry the count of the entries it refused: ' + notice);
+
+  // Nothing the answer supplied reaches the notice or the pool: neither a refused name nor any
+  // spelling of one.
+  for (const name of ['a/b/c', 'a?x=y', 'a/b']) {
+    assert.equal(notice.includes(name), false,
+      'the notice quotes an answer-supplied name (' + name + '): ' + notice);
   }
-  assert.equal(calls.filter((u) => u.includes('/repos/')).length, 0,
-    'a request was made from a name that is not a repository name: ' + calls.join('\n'));
+  assert.equal(JSON.stringify(pool).includes('a?x=y'), false,
+    'an answer-supplied name reached the pool: ' + JSON.stringify(pool));
+
+  // No request was made from a name that is not a repository name: the only repository the run
+  // asked about is the conforming entry, so no refused name became a target.
+  const repoCalls = calls.filter((u) => u.includes('/repos/'));
+  assert.equal(repoCalls.length, 1,
+    'the run asked about a name that is not the listing conforming entry: ' + calls.join('\n'));
+  assert.ok(repoCalls[0].includes('/repos/' + conforming + '/releases'),
+    'the one repository the run asked about is not the conforming entry: ' + calls.join('\n'));
 });
 
 // ---------------------------------------------------------------------------------------

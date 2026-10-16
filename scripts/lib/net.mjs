@@ -471,13 +471,16 @@ export function shapeTransportError(err, url, limit, headers, omitUrl = false) {
   // Authorization header, which the fixed cause above cannot carry at all.
   const secrets = requestSecrets(url, headers);
   const cause = redactSecrets(transportCause(err), secrets);
-  // The shaped text obeys the bound exactly. The cause is the part that stays whole: the request
-  // gives way first, so its room is what is left after the prefix, the separator and the whole
-  // cause. A bound too small for that pair falls back to the compact 'request failed: <cause>'
-  // before it cuts anything, so what gives way is the request and never the diagnosis; only a
-  // bound too small even for the compact form is sliced, and that slice is the exactness
-  // guarantee. The earlier shape added the separator outside the arithmetic and returned
-  // 'limit + 21' whenever the cause reached the cap. A repository discovered from an
+  // The shaped text gives way in the order the diagnosis can afford, and the cause is never the
+  // part that gives way. The request's room is what the bound leaves after the prefix, the
+  // separator and the whole cause, so a long request is shortened first; a bound too small for
+  // that pair drops the request entirely and keeps the compact 'request failed: <cause>'; and a
+  // bound too small even for the compact form returns the cause alone, longer than the bound,
+  // rather than cutting the diagnosis in half. The bound is configuration, so it may shorten the
+  // text, but it may never delete the reason a source failed (TR-154). The earlier shape sliced
+  // the compact form, so every bound below the fixed cause's own length published a text whose
+  // cause was gone, and the shape before that added the separator outside the arithmetic and
+  // returned 'limit + 21' whenever the cause reached the cap. A repository discovered from an
   // organisation listing is shaped with no request at all (omitUrl): its URL is the answer's
   // own name respelled by the URL serializer, which by-value removal cannot cover.
   const prefix = 'request failed for ';
@@ -489,7 +492,7 @@ export function shapeTransportError(err, url, limit, headers, omitUrl = false) {
     ? `${shortPrefix}${separator}${cause}`
     : `${prefix}${shown.length > room ? shown.slice(0, room) : shown}${separator}${cause}`;
   const compact = `${shortPrefix}${separator}${cause}`;
-  const text = full.length <= bound ? full : compact.slice(0, bound);
+  const text = full.length <= bound ? full : (compact.length <= bound ? compact : cause);
   const shaped = new Error(text);
   shaped.cause = cause;
   // No process exit status means curl never ran: the caller can tell a broken dependency from a

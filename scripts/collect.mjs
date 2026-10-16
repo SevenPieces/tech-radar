@@ -62,6 +62,22 @@ const MAX_NOTICE_CHARS = 100000;
 const MAX_DATE_MS = 8.64e15;
 const MAX_WINDOW_WEEKS = Math.floor(MAX_DATE_MS / (7 * 24 * 3600 * 1000));
 
+// A refusal that names a setting is a configuration error, and it must reach the operator as the
+// documented exit 2 wherever it is raised rather than as the code reserved for an unexpected
+// failure inside the collector. validateSettings names most of them before the first request, but
+// collectAll is a public seam that resolves the two bound settings itself -- the notice cap and
+// the room it has to leave for the shaped error text -- so the same mistyped value used to
+// surface through main's catch-all as exit 1 whenever the run's selection carried no rows
+// (TR-151). The class is how a caller that has no exit code, a direct collectAll caller, can tell
+// the two apart as well.
+class ConfigurationError extends Error {
+  constructor(message) {
+    super(message);
+    this.name = 'ConfigurationError';
+  }
+}
+function configError(message) { return new ConfigurationError(message); }
+
 // The notice cap is a quantity like every other one, so it is configuration and never a literal
 // here. A caller may pass the settings object it read; a caller that carries none -- a fixture,
 // a direct call -- falls back to the settings that ship beside this script, exactly as the
@@ -114,18 +130,18 @@ function requireNoticeCapRoom(cap, settings) {
   const snippet = Number(raw);
   if (!Number.isFinite(snippet) || snippet <= 0) return;
   const room = Math.ceil(cap / 2) - 2;
-  if (snippet > room) throw new Error(noticeCapRoomError(cap, snippet, room));
+  if (snippet > room) throw configError(noticeCapRoomError(cap, snippet, room));
 }
 function noticeLimit(settings) {
   if (settings && Object.prototype.hasOwnProperty.call(settings, 'notice_max_chars')
     && settings.notice_max_chars !== undefined) {
     const n = Number(settings.notice_max_chars);
-    if (!usableNoticeCap(n)) throw new Error(outOfRangeCap(settings.notice_max_chars));
+    if (!usableNoticeCap(n)) throw configError(outOfRangeCap(settings.notice_max_chars));
     return n;
   }
   const shipped = shippedNoticeCap();
   if (shipped) return shipped;
-  throw new Error('notice_max_chars is missing or invalid in config/settings.md');
+  throw configError('notice_max_chars is missing or invalid in config/settings.md');
 }
 // A cap that arrives as anything else means a call site forgot to resolve one, and an undefined
 // cap silently returns the text unbounded -- the defect this cap closes -- so it is refused. The
@@ -312,8 +328,9 @@ function requiredSettingKeys(rows, options) {
   const keys = new Set();
   if (!options.since) keys.add('window_cap_weeks');
   if (!options.timeout) keys.add('request_timeout_ms');
-  // Every collector can push a notice, so a run with a row to read reads the notice cap too. A
-  // run whose rows were all deselected pushes no notice and needs no cap.
+  // Every collector can push a notice, so a run with a row to read requires the notice cap too. A
+  // run whose rows were all deselected pushes no notice and requires none -- but a value the file
+  // does carry is still validated, wherever it is read, and not only here (TR-151).
   if (rows.length > 0) keys.add('notice_max_chars');
   for (const row of rows) {
     for (const key of SOURCE_SETTINGS[row.kind] ?? []) keys.add(key);
@@ -321,12 +338,21 @@ function requiredSettingKeys(rows, options) {
   return keys;
 }
 
+// Whether the file actually carries a key. A key that is present is validated wherever it is
+// read, whether or not a selected row reads it; a key that is absent is not a configuration
+// error, because a configuration that carries only the settings its own rows need stays legal.
+function settingPresent(settings, key) {
+  return settings !== null && typeof settings === 'object'
+    && Object.prototype.hasOwnProperty.call(settings, key)
+    && settings[key] !== undefined;
+}
+
 function validateSettings(settings, rows, options) {
   const keys = requiredSettingKeys(rows, options);
   for (const key of keys) {
     const n = Number(settings?.[key]);
     if (!Number.isInteger(n) || n <= 0) {
-      throw new Error(`${key} is missing or invalid in config/settings.md`);
+      throw configError(`${key} is missing or invalid in config/settings.md`);
     }
   }
   // A window cap the clock cannot carry is a configuration error that names the setting: the
@@ -334,25 +360,44 @@ function validateSettings(settings, rows, options) {
   // here as a legal value and then throw the runtime's own 'Invalid time value' from
   // windowStart, a message that names no setting at all.
   if (keys.has('window_cap_weeks') && Number(settings.window_cap_weeks) > MAX_WINDOW_WEEKS) {
-    throw new Error(windowCapError(settings.window_cap_weeks));
+    throw configError(windowCapError(settings.window_cap_weeks));
   }
+  // The two bound settings are validated whenever the file carries them, not only when a selected
+  // row reads them (TR-151). A run whose rows were all deselected still resolves the notice cap
+  // inside collectAll and still checks the room it leaves for the shaped error text, so a
+  // mistyped file has to be refused here, by name, rather than surfacing from that seam as the
+  // code reserved for an unexpected failure.
+  const capPresent = settingPresent(settings, 'notice_max_chars');
+  const cap = capPresent ? Number(settings.notice_max_chars) : null;
   // The notice cap is a positive integer like the rest, but it has a usable range as well: a cap
   // too small for the source, the status and the cause, and a cap too large to bound anything,
   // are each refused here -- before the first request -- so the operator reads a configuration
   // error that names the setting instead of a published notice that carries no diagnosis.
-  if (rows.length > 0 && !usableNoticeCap(Number(settings?.notice_max_chars))) {
-    throw new Error(outOfRangeCap(settings?.notice_max_chars));
+  if (capPresent && !usableNoticeCap(cap)) {
+    throw configError(outOfRangeCap(settings.notice_max_chars));
+  }
+  // The snippet bound is the other half of that pair, so it is validated whenever it is present
+  // too: its own type first, then the room the cap leaves it below.
+  const snippetPresent = settingPresent(settings, 'error_snippet_max_chars');
+  if (snippetPresent) {
+    const snippet = Number(settings.error_snippet_max_chars);
+    if (!Number.isInteger(snippet) || snippet <= 0) {
+      throw configError('error_snippet_max_chars is missing or invalid in config/settings.md');
+    }
   }
   // ... and the cap is checked against the shaped-error bound it has to carry, not on its own.
   // The two were validated independently, so a cap that was legal by itself still cut the cause
   // away: with the shipped snippet bound the notice read 'request failed for <url>' and ended
-  // there. The check runs only when this run reads both keys, so a configuration that carries
-  // only what its own rows need stays legal.
-  if (keys.has('notice_max_chars')) requireNoticeCapRoom(Number(settings.notice_max_chars), settings);
+  // there. The cap the check uses is the one the run will actually resolve -- the configured
+  // value, or the shipped fallback when the file carries no cap row at all -- so a snippet bound
+  // too large for that fallback is refused here rather than inside collectAll.
+  if (capPresent || snippetPresent) {
+    requireNoticeCapRoom(capPresent ? cap : noticeLimit(settings), settings);
+  }
   const github = rows.some((r) => r.kind === 'github-repo' || r.kind === 'github-org');
   const reserve = Number(settings?.github_rate_limit_reserve);
   if (github && (!Number.isInteger(reserve) || reserve < 0)) {
-    throw new Error('github_rate_limit_reserve is missing or invalid in config/settings.md');
+    throw configError('github_rate_limit_reserve is missing or invalid in config/settings.md');
   }
   return settings;
 }
@@ -371,7 +416,7 @@ export function resolveOut(options, settings) {
   const override = String(process.env.TECH_RADAR_DIR ?? '').trim();
   if (override !== '') return join(override, '.pool.json');
   if (settings.output_dir === undefined || String(settings.output_dir).trim() === '') {
-    throw new Error('output_dir is missing or invalid in config/settings.md');
+    throw configError('output_dir is missing or invalid in config/settings.md');
   }
   return join(settings.output_dir, '.pool.json');
 }
@@ -383,7 +428,7 @@ export function resolveTimeout(options, settings) {
   if (options.timeout) return options.timeout;
   const ms = Number(settings.request_timeout_ms);
   if (!Number.isFinite(ms) || ms <= 0) {
-    throw new Error('request_timeout_ms is missing or invalid in config/settings.md');
+    throw configError('request_timeout_ms is missing or invalid in config/settings.md');
   }
   return ms;
 }
@@ -394,11 +439,11 @@ export function resolveTimeout(options, settings) {
 export function windowStart(settings, now) {
   const weeks = Number(settings.window_cap_weeks);
   if (!Number.isFinite(weeks) || weeks <= 0) {
-    throw new Error('window_cap_weeks is missing or invalid in config/settings.md');
+    throw configError('window_cap_weeks is missing or invalid in config/settings.md');
   }
   // The same named refusal here, so a direct caller that never runs validateSettings reads the
   // setting and not the date conversion's own 'Invalid time value'.
-  if (weeks > MAX_WINDOW_WEEKS) throw new Error(windowCapError(settings.window_cap_weeks));
+  if (weeks > MAX_WINDOW_WEEKS) throw configError(windowCapError(settings.window_cap_weeks));
   return new Date(now.getTime() - weeks * 7 * 24 * 3600 * 1000).toISOString();
 }
 
@@ -454,8 +499,25 @@ function isRateLimitRefusal(err) {
 // deletes from its own output, so a name taken from an answer would let that answer choose which
 // words of the run's notices and published prose survive.
 function githubSource(label, t, limit) {
-  const name = t.discovered ? `${t.org} repository ${t.ordinal}` : String(t.target ?? '');
-  return noticeSource(label, name, limit);
+  if (!t.discovered) return noticeSource(label, String(t.target ?? ''), limit);
+  return listingSource(label, t.org, t.ordinal, limit);
+}
+// The source of a notice about one entry of an organisation listing. noticeSource bounds the name
+// to half the cap and cuts it from the right, so the position is written first and the
+// organisation row's own name is what a short bound shortens: the row is configuration and may be
+// any length, while the position is arithmetic and is what makes the notice actionable, so the
+// position is the part that must survive the cut (TR-153).
+function listingSource(label, org, ordinal, limit) {
+  return noticeSource(label, `repository ${ordinal} in ${String(org ?? '')}`, limit);
+}
+// What one listing's non-conforming entries are reported as. The entries are aggregated into one
+// notice carrying their count, because a listing answer may hold any number of them and one
+// answer must not decide the volume of the run's published output (TR-152); the run's own noun
+// for what it refused is kept, so the notice still says what was skipped.
+function skippedListingPhrase(n) {
+  return n === 1
+    ? `skipped ${n} listing entry name, which is not a repository name`
+    : `skipped ${n} listing entry names, which are not repository names`;
 }
 // The shape a repository name has: exactly one slash, an owner that is a GitHub login, and a
 // repository name of the characters GitHub allows in one. A listing's name is answer text that
@@ -495,7 +557,7 @@ export async function collectGithub(rows, ctx) {
   const limit = noticeLimit(s);
   const reserve = Number(s.github_rate_limit_reserve);
   if (!Number.isFinite(reserve) || reserve < 0) {
-    throw new Error('github_rate_limit_reserve is missing or invalid in config/settings.md');
+    throw configError('github_rate_limit_reserve is missing or invalid in config/settings.md');
   }
   // A request whose target came out of the organisation listing is fetched with omitUrl, so any
   // shaped error it raises names no request: the URL would spell the answer's own repository name,
@@ -557,14 +619,20 @@ export async function collectGithub(rows, ctx) {
     try {
       const body = parseJson(await get(url), url);
       if (!Array.isArray(body)) throw new Error('unexpected response shape');
+      // A listing entry whose name is not a repository name is answer text the run refuses: it is
+      // never put in a URL, never a request target, and never a value a notice is redacted
+      // against. The entries of one listing are counted and reported once, after the listing has
+      // been read, so the count of notices is the run's own and not the answer's (TR-152); the
+      // first refused position is kept so a listing with one bad entry still names where it sat,
+      // and it is named through listingSource, which keeps the position when the organisation row
+      // is long enough to fill the bound (TR-153).
+      let refused = 0;
+      let firstRefused = 0;
       for (let n = 0; n < body.length; n += 1) {
         const repo = body[n];
-        // A listing entry whose name is not a repository name is answer text the run refuses:
-        // it is never put in a URL, never a request target, and never a value a notice is
-        // redacted against. The notice names the organisation row (configuration) and the
-        // entry's position (arithmetic), and nothing the answer supplied.
         if (!repo || !repositoryName(repo.full_name)) {
-          pushNotice(notices, `${noticeSource('github', `${row.target} repository ${n + 1}`, limit)}: skipped a listing entry whose name is not a repository name`, secretsFor(url), limit);
+          refused += 1;
+          if (firstRefused === 0) firstRefused = n + 1;
           continue;
         }
         // The listing's own position is the repository's ordinal, and the organisation row is
@@ -572,6 +640,12 @@ export async function collectGithub(rows, ctx) {
         targets.push({
           target: repo.full_name, domain: row.domain, discovered: true, org: row.target, ordinal: n + 1,
         });
+      }
+      if (refused > 0) {
+        const source = refused === 1
+          ? listingSource('github', row.target, firstRefused, limit)
+          : noticeSource('github', row.target, limit);
+        pushNotice(notices, `${source}: ${skippedListingPhrase(refused)}`, secretsFor(url), limit);
       }
     } catch (err) {
       pushNotice(notices, `${noticeSource('github', row.target, limit)}: ${err.message}`, secretsFor(url), limit);
@@ -1340,9 +1414,14 @@ export async function main(argv = process.argv.slice(2)) {
       since, until, timeout, domains: options.domain,
     });
   } catch (err) {
+    // collectAll is a public seam that resolves the bound settings itself, so a configuration
+    // error can be raised after validateSettings has already run -- and it is still a
+    // configuration error, the documented exit 2 that names the setting, never the code reserved
+    // for an unexpected failure inside the collector (TR-151).
     console.error(`collect: ${err.message}`);
-    process.exitCode = 1;
-    return 1;
+    const code = err instanceof ConfigurationError ? 2 : 1;
+    process.exitCode = code;
+    return code;
   }
   try {
     writeAtomic(out, `${JSON.stringify(pool, null, 2)}\n`);
