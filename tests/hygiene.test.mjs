@@ -430,10 +430,20 @@ test('a --state-named lock is dropped by the repository and kept by the no-git a
   }
 });
 
-// The other half of the same reading, and the direction Batch 68 was filed for: the run artifacts
-// both answers must drop still agree, and a credential planted in one of them reaches no guard. The
-// fixture is the layout the run writes for itself - '.pool.json' and its lock and temp spellings.
-test('the run artifacts both answers drop still agree, and a credential in one is never read', (t) => {
+// The other half of the same reading, and the direction Batch 68 was filed for: the run artifact
+// ITSELF -- the fixed name the reader never receives -- is dropped by both answers, and a credential
+// planted in it reaches no guard. The fixture is the layout the run writes for itself: '.pool.json'
+// and its lock and temp spellings.
+//
+// Batch 84 (closing sweep F36-1) changed what the fallback does about the LOCK and the TEMP, and this
+// case now pins that direction rather than an agreement it never had: the fixed name is a name fact
+// and both answers drop it, while whether a lock or temp is dropped is a TRACKEDNESS fact that only
+// git can answer. Git answers here -- the fixture's ignore rules cover '*.lock' and '*.tmp' and
+// nothing tracks them -- so git's answer drops both; the no-git answer keeps both and hands them to
+// the guards, which is the direction this file's header names as safe ('skipping a file the reader
+// receives is not'). The sweep measured that direction as the only one available: the two layouts (a
+// tracked lock and an untracked one) are byte-identical on disk.
+test('the run artifact both answers drop is dropped by both, and its untracked lock and temp are kept by the no-git answer', (t) => {
   const dir = walkerFixture({
     '.gitignore': readFileSync(join(SKILL_ROOT, '.gitignore')),
     'config/settings.md': 'a shipped file\n',
@@ -448,18 +458,103 @@ test('the run artifacts both answers drop still agree, and a credential in one i
   try {
     const withGit = shippedFiles(dir);
     assert.deepEqual(withGit, ['.gitignore', 'config/settings.md'],
-      'a run artifact entered an answer: ' + JSON.stringify(withGit));
-    assert.deepEqual(noGitWalk(dir), withGit, 'the two answers disagree about a run artifact');
-    assert.deepEqual(scan(dir, SECRET, 'carries'), [], 'a guard read a run artifact');
+      'a run artifact entered the repository answer: ' + JSON.stringify(withGit));
+    assert.deepEqual(noGitWalk(dir),
+      ['.gitignore', '.pool.json.lock', '.pool.json.tmp', 'config/settings.md'],
+      'the fallback dropped a lock or temp it has no tracking information about');
+    assert.deepEqual(scan(dir, SECRET, 'carries'), [], 'a guard read the run artifact itself');
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
 });
 
-// The state lock's own legacy spelling is named by .gitignore itself ('.tech-radar-state.lock'), and
-// the fallback read it as an ordinary file because the name it guards is in no fixed set. Both
-// answers drop it now: the fallback recognises the state's dotted spelling as machine state.
-test('the state lock spelling .gitignore names for itself is dropped by both answers', (t) => {
+// Closing sweep F36-1 (Medium): Batch 78 closed only the '*.json' spelling of the same disagreement
+// and left every FIXED name in RUN_ARTIFACT_NAMES and every DIGEST_NAME spelling dropped from the
+// no-git answer on the NAME alone. 'git check-ignore' never reports a TRACKED path -- git does not
+// ignore what it carries -- so a TRACKED '.pool.json.lock', '.plan.json.lock',
+// 'tech-radar-state.json.lock', 'tech-radar-2026-10-15.html.lock' or '.pool.json.tmp' is in git's
+// answer and was dropped from the fallback's, and a repository that force-adds its own run artifact's
+// lock never had it judged by a publication guard -- the sweep's fixture carried a credential shape
+// in exactly such a lock, and 10 of its 11 layouts disagreed. The lock's name says nothing about
+// trackedness, so the fallback no longer decides on the name: a lock or temp is dropped only when git
+// can be asked and says it does not carry the file, and where nothing is knowable it is kept. The
+// eleven layouts the sweep measured are built here as one tracked set; every one must be in BOTH
+// answers, and the publication guard must read the credential shape each carries.
+test('every TRACKED lock and temp of a fixed run-artifact name is kept by BOTH answers and judged', (t) => {
+  const names = ['.tech-radar-state.lock', 'tech-radar-state.json.lock', '.pool.json.lock',
+    '.plan.json.lock', '.items.json.lock', '.research.json.lock',
+    'tech-radar-2026-10-15.html.lock', 'tech-radar-2026-10-15.md.lock', '.pool.json.tmp',
+    'tech-radar-state.json.tmp'];
+  const files = { '.gitignore': readFileSync(join(SKILL_ROOT, '.gitignore')), 'config/settings.md': 'a shipped file\n' };
+  for (const name of names) files[name] = 'ghp_' + 'fakefakefakefake' + '\n';
+  const dir = walkerFixture(files, names);
+  if (dir === null) {
+    t.skip('git is not available, so the repository answer was not exercised');
+    return;
+  }
+  try {
+    const withGit = shippedFiles(dir);
+    for (const name of names) {
+      assert.equal(withGit.includes(name), true,
+        name + ' is not in the repository answer, so the case under test was not built');
+    }
+    assert.deepEqual(noGitWalk(dir), withGit,
+      'the two walker answers disagree about a TRACKED lock or temp of a fixed run-artifact name');
+    assert.deepEqual(scan(dir, SECRET, 'carries').sort(),
+      names.map((name) => name + ' carries a GitHub token').sort(),
+      'a TRACKED run-artifact lock the reader receives was not judged by the publication guard');
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+// The trackedness read itself, and the clause that makes it load-bearing (Batch 84; closing sweep
+// F36-1). The sweep's own fixtures cannot distinguish this clause from its absence, because every
+// one of them is read through the PATH-without-git form of the fallback. A tree that sits INSIDE a
+// repository -- the export-inside-a-repository layout every verification pass uses -- is not
+// answered by 'git check-ignore' (git's own work-tree root is not this tree), so the fallback runs
+// with git reachable: 'git ls-files' rooted at that repository then answers, and a lock the
+// repository does not carry is dropped while one it carries is kept. Both directions are measured
+// here, against the same tree read with no git at all, where neither is knowable and both are kept.
+test('a lock the repository above the tree does not carry is dropped, and one it carries is kept', (t) => {
+  const outer = mkdtempSync(join(tmpdir(), 'tech-radar-outer-'));
+  const inner = join(outer, 'export');
+  try {
+    mkdirSync(join(inner, 'config'), { recursive: true });
+    writeFileSync(join(outer, '.gitignore'), readFileSync(join(SKILL_ROOT, '.gitignore')));
+    writeFileSync(join(inner, '.gitignore'), readFileSync(join(SKILL_ROOT, '.gitignore')));
+    writeFileSync(join(inner, 'config', 'settings.md'), 'a shipped file\n');
+    writeFileSync(join(inner, '.pool.json.lock'), '{"host":"the builder"}\n');
+    writeFileSync(join(inner, '.plan.json.tmp'), '{"host":"the builder"}\n');
+    const made = spawnSync('git', ['-C', outer, 'init', '-q'], { encoding: 'utf8' });
+    if (made.error || made.status !== 0) {
+      t.skip('git is not available, so the repository answer was not exercised');
+      return;
+    }
+    spawnSync('git', ['-C', outer, 'add', '-A'], { encoding: 'utf8' });
+    spawnSync('git', ['-C', outer, 'add', '-f', 'export/.pool.json.lock'], { encoding: 'utf8' });
+    spawnSync('git', ['-C', outer, '-c', 'user.email=a@b', '-c', 'user.name=a', 'commit', '-qm', 'fixture'],
+      { encoding: 'utf8' });
+    assert.equal(spawnSync('git', ['-C', outer, 'ls-files', '--', 'export/.pool.json.lock'],
+      { encoding: 'utf8' }).stdout.trim(), 'export/.pool.json.lock',
+      'the fixture lock is not tracked, so the case under test was not built');
+    assert.deepEqual(shippedFiles(inner), ['.gitignore', '.pool.json.lock', 'config/settings.md'],
+      'the fallback did not use the trackedness the repository above the tree can answer');
+    assert.deepEqual(noGitWalk(inner),
+      ['.gitignore', '.plan.json.tmp', '.pool.json.lock', 'config/settings.md'],
+      'where nothing is knowable the fallback dropped a lock or temp the reader may receive');
+  } finally {
+    rmSync(outer, { recursive: true, force: true });
+  }
+});
+
+// The state lock's own legacy spelling is named by .gitignore itself ('.tech-radar-state.lock').
+// Batch 70 recognised the state's dotted spelling as machine state, which made both answers drop an
+// UNTRACKED one; Batch 84 (closing sweep F36-1) moved that verdict to the trackedness read, because
+// the same name can be TRACKED (git's answer then keeps it, and the fallback's name-only drop skipped
+// a file the reader receives). This case now pins the direction: git drops the ignored lock, the no-git
+// answer keeps it for the guards.
+test('the state lock spelling .gitignore names for itself is dropped by the repository and kept by the no-git answer', (t) => {
   const dir = walkerFixture({
     '.gitignore': readFileSync(join(SKILL_ROOT, '.gitignore')),
     'config/settings.md': 'a shipped file\n',
@@ -472,8 +567,9 @@ test('the state lock spelling .gitignore names for itself is dropped by both ans
   try {
     const withGit = shippedFiles(dir);
     assert.deepEqual(withGit, ['.gitignore', 'config/settings.md'],
-      'the state lock entered an answer: ' + JSON.stringify(withGit));
-    assert.deepEqual(noGitWalk(dir), withGit, 'the two answers disagree about the state lock');
+      'the state lock entered the repository answer: ' + JSON.stringify(withGit));
+    assert.deepEqual(noGitWalk(dir), ['.gitignore', '.tech-radar-state.lock', 'config/settings.md'],
+      'the fallback dropped a state lock it has no tracking information about');
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }

@@ -27,7 +27,7 @@
 // with git available and would see any run artifact git keeps but this file drops.
 import { existsSync, lstatSync, readdirSync, statSync } from 'node:fs';
 import { spawnSync } from 'node:child_process';
-import { dirname, join, relative } from 'node:path';
+import { dirname, isAbsolute, join, relative } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 export const SKILL_ROOT = join(dirname(fileURLToPath(import.meta.url)), '..', '..');
@@ -57,26 +57,52 @@ const RUN_ARTIFACT_NAMES = new Set([
   '.plan.json', '.pool.json', '.items.json', '.research.json', 'tech-radar-state.json',
   '.tech-radar-state', '.DS_Store', 'Thumbs.db',
 ]);
-// THE NAME-ONLY BOUND, and the direction this file chooses on it (Batch 78; closing sweep F35-3,
-// reversing Batch 70's clause). A lock or a temp is dropped only when the artifact it guards is a
-// run artifact BY NAME. Batch 70 also dropped one whose guarded sibling merely ENDED IN '.json',
-// which made the two answers disagree the other way: git never ignores a file it carries, so a
-// TRACKED 'domains.json.lock' is in git's answer and the fallback dropped it -- and one fixture's
-// tracked lock carried a credential shape, so a file the reader receives was never judged.
-// The two layouts cannot be told apart without git: a tree holding 'data.json' + a TRACKED
-// 'data.json.lock' and a tree holding the same two files with the lock UNTRACKED are byte-identical
-// on disk, and the fallback exists precisely for the tree where git cannot be asked. Of the two
-// directions the header names, this file takes the one it says is acceptable -- 'a .tmp with no
-// artifact behind it is left for the guards rather than dropped: scanning one file too many is the
-// safe direction for a publication guard, and skipping a file the reader receives is not' -- so a
-// --state-named lock or temp is KEPT by the no-git answer and only git's answer drops it. The cost
-// is recorded and pinned in the suite: an installed skill whose run named its state something.json
-// leaves that run's own lock and temp in the fallback's set, where git's answer had removed them.
+// THE DIRECTION THIS FILE CHOOSES ON THAT BOUND (Batch 78; closing sweep F35-3, reversing Batch 70's
+// clause; Batch 84, closing sweep F36-1). Batch 70 also dropped a lock or temp whose guarded sibling
+// merely ENDED IN '.json', which made the two answers disagree the other way: git never ignores a
+// file it carries, so a TRACKED 'domains.json.lock' is in git's answer and the fallback dropped it --
+// and one fixture's tracked lock carried a credential shape, so a file the reader receives was never
+// judged. Batch 78 reversed that clause so the NAME-ONLY rule keeps such a lock, and Batch 84
+// (closing sweep F36-1) measured that the reversal was only half done: every FIXED name in
+// RUN_ARTIFACT_NAMES and every DIGEST_NAME spelling was still dropped from the fallback's subset on
+// the name alone, so a TRACKED '.pool.json.lock', 'tech-radar-state.json.tmp' or
+// 'tech-radar-2026-10-15.html.lock' -- all of which git's answer keeps, because git does not ignore
+// what it carries -- was still never handed to a publication guard. 10 of the sweep's 11 layouts
+// disagreed.
+//
+// A LOCK'S NAME IS NOT A TRACKEDNESS QUESTION, so the fallback no longer answers one with a name.
+// The fallback's two verdicts are answered by two different things. A path whose OWN name is one of
+// the fixed artifacts the reader never receives -- the pool, the plan, the items, the research file,
+// the state, the OS cruft, a digest -- is dropped by the fallback whenever it is met, because that
+// is a fact about a name and needs no repository. A LOCK or a TEMP is not: the reader may still be
+// handed it, and whether git carries it is a trackedness question only git can answer. So it is
+// dropped only when git can be asked and says it does not carry the file, and KEPT otherwise.
+//
+// When a repository is reachable above the tree -- the export-inside-a-repository layout every
+// verification pass uses, and the layout the sweep's own fixtures build -- the tree's trackedness IS
+// knowable once git can be run ('git ls-files' rooted at the reachable repository, read against the
+// tree's prefix), so it is read rather than guessed. Where nothing is knowable -- no git on PATH,
+// which is the form the suite reads both answers through, and no repository anywhere above the tree,
+// which is every installed skill -- the lock or temp is KEPT and handed to the guards: 'scanning one
+// file too many is the safe direction for a publication guard, and skipping a file the reader
+// receives is not'. That is the one direction this file takes wherever the two answers are genuinely
+// indistinguishable, and it is why the recorded cost below is a kept file rather than a dropped one.
+//
+// The measured answers for the sweep's eleven TRACKED layouts (the lock and temp spelling of every
+// fixed name, a digest, and the --state-named control) are pinned by tests/hygiene.test.mjs: all
+// eleven agree with git's answer now, where ten disagreed before. The cost is the other half of the
+// same reading, and it is recorded and pinned there too: a run artifact's own UNTRACKED lock or temp
+// -- which git ignores and drops -- is kept by the no-git answer, because no name can say whether a
+// repository carries it and the safe direction is to hand it to a guard.
 const RUN_ARTIFACT_SUFFIXES = ['.lock', '.tmp'];
 const DIGEST_NAME = /^tech-radar-.*\.(md|html)$/;
-// Whether the artifact a lock or a temp name GUARDS is itself a run artifact, which is the rule
-// stated above: .gitignore spells any '*.lock' and any '*.tmp' because a lock names the state it
-// guards, and the guards here judge the shipping set. The name alone was the bound, and it made
+// WHICH paths the fallback names as CANDIDATES for the machine-artifact half of the rule (Batch 84;
+// closing sweep F36-1 -- it no longer decides the drop by itself, because whether a candidate IS
+// dropped is a trackedness question and only git can answer one). A candidate is dropped only when
+// git can be asked and says it does not carry the file; where git cannot be asked the candidate is
+// kept. Whether the artifact a lock or a temp name GUARDS is itself a run artifact, read from the
+// name .gitignore spells: .gitignore spells any '*.lock' and any '*.tmp' because a lock names the
+// state it guards, and the guards here judge the shipping set. The name alone was the bound, and it made
 // the walk's two answers disagree: git never ignores a TRACKED file, so a repository that ships a
 // file whose name merely ends in one of these spellings got it from git's answer and lost it from
 // this one (closing sweep F32-5, measured on a tracked 'kept.tmp': git answered
@@ -92,6 +118,8 @@ function guardsRunArtifact(rel, root) {
   if (suffix === undefined) return false;
   const guarded = base.slice(0, base.length - suffix.length);
   if (guarded === '') return true;
+  // A candidate, not a verdict: the fixed names and the digest spellings say which paths the fallback
+  // ASKS about, and the trackedness read below decides whether git's answer already keeps them.
   if (RUN_ARTIFACT_NAMES.has(guarded) || DIGEST_NAME.test(guarded)) return true;
   // The artifact standing beside the lock. It has to be machine state itself, read the one way a
   // name can say so: a run artifact by the rule applied to its own name. A lock beside an ordinary
@@ -194,6 +222,61 @@ function gitIgnored(root, rels) {
   return new Set(String(res.stdout ?? '').split('\0').filter(Boolean));
 }
 
+// THE REPOSITORY REACHABLE ABOVE THIS TREE, or null when there is none to ask (Batch 84; closing
+// sweep F36-1). This is a different question from gitAnswersForThisTree's, and it is the one the
+// fallback needs: git's answer about the SHIPPING SET is only usable when git's own root IS this
+// tree, but git's answer about TRACKEDNESS is usable whenever a repository stands above the tree,
+// because 'git -C <tree> ls-files' resolves the tree inside that repository and reports paths
+// relative to the repository's root. A frozen export unpacked inside a repository -- the layout the
+// verifier's own passes and the sweep's fixtures both use -- has exactly this shape, and there the
+// tree's trackedness is knowable even though its shipping set is not.
+//
+// The nearest ancestor carrying a '.git' entry is found first, and git is then asked to confirm it
+// and to name the work-tree root; a missing binary, a repository that does not contain this tree, or
+// a git that answers with a root outside this tree's ancestry all answer null -- 'nothing is
+// knowable', which is the direction that keeps files rather than dropping them.
+function reachableRepoRoot(root) {
+  let dir = root;
+  for (;;) {
+    if (existsSync(join(dir, '.git'))) break;
+    const parent = dirname(dir);
+    if (parent === dir) return null;
+    dir = parent;
+  }
+  const res = spawnSync('git', ['-C', root, 'rev-parse', '--show-toplevel'], {
+    encoding: 'utf8', maxBuffer: 1024 * 1024,
+  });
+  if (res.error || res.status !== 0) return null;
+  const top = String(res.stdout ?? '').trim();
+  if (top === '') return null;
+  const inside = relative(top, root);
+  if (inside !== '' && (inside.startsWith('..') || isAbsolute(inside))) return null;
+  return top;
+}
+
+// The paths in THIS tree that git CARRIES, as a Set of tree-relative paths, or null when git cannot
+// be asked (Batch 84; closing sweep F36-1). One 'git ls-files' call rooted at the reachable
+// repository answers for the whole tree: the pathspec is the tree's own prefix inside that
+// repository, so the answer is exactly the tracked set of the tree being walked, and it is mapped
+// back to the tree's own relative spellings. An index -- not a commit -- is what is read, because
+// that is the trackedness 'git check-ignore' answers against: a path git stages is a path git
+// carries.
+function gitTrackedUnder(root, repoRoot) {
+  if (repoRoot === null) return null;
+  const prefix = relative(repoRoot, root).split(/[/\\]+/).filter(Boolean).join('/');
+  const res = spawnSync('git', ['-C', repoRoot, 'ls-files', '-z', '--', prefix === '' ? '.' : prefix], {
+    encoding: 'utf8', maxBuffer: 64 * 1024 * 1024,
+  });
+  if (res.error || res.status !== 0) return null;
+  const strip = prefix === '' ? '' : prefix + '/';
+  const tracked = new Set();
+  for (const path of String(res.stdout ?? '').split('\0').filter(Boolean)) {
+    if (strip === '') tracked.add(path);
+    else if (path.startsWith(strip)) tracked.add(path.slice(strip.length));
+  }
+  return tracked;
+}
+
 export function shippedFiles(root = SKILL_ROOT) {
   const walked = [];
   const walk = (dir) => {
@@ -226,8 +309,28 @@ export function shippedFiles(root = SKILL_ROOT) {
   // gets the run-artifact half of the same rule from this file instead, so the two answers agree
   // about the artifacts the skill writes for itself. A file that is not one of those still
   // reaches the guards, whatever path it sits in.
+  // ... and the fallback, which is the answer an installed skill gets (Batch 84; closing sweep
+  // F36-1). Two verdicts, and they are answered by different things. A path whose OWN name is one of
+  // the fixed artifacts the reader never receives is dropped, whatever git would say: that is a name
+  // fact, knowable without git. A LOCK or a TEMP is not -- the reader may still be handed it, and
+  // whether git carries it is a trackedness question only git can answer -- so it is dropped only
+  // when git can be asked about this tree's trackedness and answers that it does not carry the file.
+  // Where nothing is knowable -- a genuinely gitless tree, or the PATH-without-git form the suite
+  // reads both answers through -- the lock or temp is KEPT and handed to the guards, because 'a file
+  // the reader receives must reach a guard'.
   const ignored = gitIgnored(root, walked);
-  return (ignored
-    ? walked.filter((rel) => !ignored.has(rel))
-    : walked.filter((rel) => !isRunArtifact(rel, root))).sort();
+  if (ignored) return walked.filter((rel) => !ignored.has(rel)).sort();
+  const tracked = gitTrackedUnder(root, reachableRepoRoot(root));
+  return walked.filter((rel) => !fallbackDrops(rel, root, tracked)).sort();
+}
+
+// Whether the fallback drops a path (Batch 84; closing sweep F36-1). The two verdicts above, in the
+// one place the fallback asks for them. 'git ls-files' answering with the tree's tracked set is the
+// only thing that can drop a lock or a temp; an absent answer keeps it, and so does an answer that
+// carries it.
+function fallbackDrops(rel, root, tracked) {
+  const base = rel.split('/').pop();
+  if (RUN_ARTIFACT_NAMES.has(base) || DIGEST_NAME.test(base)) return true;
+  if (!guardsRunArtifact(rel, root)) return false;
+  return tracked !== null && !tracked.has(rel);
 }
