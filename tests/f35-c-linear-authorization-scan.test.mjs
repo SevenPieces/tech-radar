@@ -99,12 +99,29 @@ test('F35-C: the cost is linear at four times the input, on both shapes', () => 
   }
 });
 
-test('F35-C: a text with no header line at all is scanned once, not once per line', () => {
+// THE ASSERTION THAT DISCRIMINATES (Batch 85; closing sweep F36-5, test integrity). This case used
+// to assert only that a text carrying NO keyword at all is cheap, and the sweep measured that the
+// assertion passes on the reverted mutant: with no keyword anywhere, 'earliestAfter(-1, 0)' answers
+// null and the pass ends after a SINGLE round of three execs, so the restarted (861aeb0) and the
+// advanced (35f0761) forms are indistinguishable on that input. A text with no header line cannot
+// exercise the pass at all. The prose text is still read here -- ordinary prose must stay byte for
+// byte -- but the COST is now asserted on the input that makes the pass iterate without either of the
+// two spellings it never carries ever matching: a row that names the header and carries no value the
+// reader can start. Every row is read, the resume point advances on the unreadable-value exit, and a
+// restarted matcher has to scan the whole remainder once per row -- which the bound below refuses.
+test('F35-C: ordinary prose is left alone, and a header row with no readable value is scanned linearly', () => {
+  const lines = ('the run covered 43 domains and merged 0 items' + LF).repeat(ROWS);
+  const prose = redactAndCountScanned(lines);
+  assert.equal(prose.out, lines, 'ordinary prose was rewritten');
+  assert.ok(prose.scanned <= MAX_SCAN_RATIO * lines.length,
+    'a text with no header line scanned ' + prose.scanned + ' over ' + lines.length);
   // A spelling the text never carries is the case that made the restarted matchers quadratic: the
   // two matchers that cannot match were asked to scan the whole remainder again on every iteration.
-  const lines = ('the run covered 43 domains and merged 0 items' + LF).repeat(ROWS);
-  const { out, scanned } = redactAndCountScanned(lines);
-  assert.equal(out, lines, 'ordinary prose was rewritten');
-  assert.ok(scanned <= MAX_SCAN_RATIO * lines.length,
-    'a text with no header line scanned ' + scanned + ' over ' + lines.length);
+  const text = ('authorization:' + LF).repeat(ROWS);
+  const { out, scanned } = redactAndCountScanned(text);
+  assert.equal(out, text, 'a header row with no readable value was rewritten');
+  assert.ok(scanned <= MAX_SCAN_RATIO * text.length,
+    'the unreadable-value shape scanned ' + scanned + ' characters over a ' + text.length
+    + '-character text (' + (scanned / text.length).toFixed(2) + 'x, the bound is ' + MAX_SCAN_RATIO
+    + 'x), which is the quadratic the three restarted matchers made');
 });

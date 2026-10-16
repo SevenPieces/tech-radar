@@ -81,7 +81,15 @@ const AUTH_SCHEMES = new Set([
   'basic', 'bearer', 'digest', 'token', 'apikey', 'key', 'signature', 'oauth', 'oauth2', 'jwt',
   'negotiate', 'hawk', 'aws4-hmac-sha256', 'saml',
 ]);
-const AUTH_TOKEN_CHARS = '[^\\s,;"\']+';
+// THE TOKEN CLASS STOPS AT EVERY LINE END (Batch 85; closing sweep F36-2). JavaScript's '\s' is four
+// line terminators and U+0085 is not one of them, so a bare token used to be able to SPAN a NEL: the
+// atom run swallowed '...tok_9f3a2c7d1e5b<U+0085>the' whole, the value's end was already past the
+// line end before authorizationValueLineEndsAt was asked, and the reader then found no terminator and
+// returned source.length -- so the accepted header's value was the whole rest of the document and the
+// tail after the NEL was deleted, not redacted (measured: 'authorization: tok_...' + NEL + 'the run
+// covered 43 domains and merged 0 items' came back as '[redacted]' alone). A token cannot span a line
+// end, and every other line end already stops this class, so U+0085 is excluded here beside them.
+const AUTH_TOKEN_CHARS = '[^\\s,;"\'\u0085]+';
 function credentialShapedToken(token) {
   return token.length >= MIN_SECRET_CHARS
     && /[0-9]/.test(token)
@@ -308,8 +316,25 @@ const NEXT_AUTH_TOKEN = new RegExp('^\\s+(' + AUTH_ATOM + ')');
 // tab, U+3000 (the CJK indentation character), U+2003, U+202F, U+1680, U+205F and U+FEFF -- and a
 // credential wrapped behind any of them was published on both entry points, identically before and
 // after Batch 69. U+2028 and U+2029 are excluded with the other two line terminators: they ARE line
-// terminators, and the value reader's own line terminator is unchanged by this batch.
+// terminators. Batch 85 (closing sweep F36-2) made the value reader agree with that reading -- the
+// value's run ends at AUTH_LINE_TERMINATORS, which is this class's complement among the characters
+// that are either reported as whitespace or as a line end by the ECMAScript and Unicode rules.
 const AUTH_INLINE_SPACE = '\t\v\f \u00a0\u1680\u2000-\u200a\u202f\u205f\u3000\ufeff';
+// WHERE A LINE ENDS (Batch 85; closing sweep F36-2, F36-6). One set, used by every matcher whose
+// question is 'the end of this line', so no rule reads a different boundary from another: CR and LF
+// (with CRLF taken as the one terminator it is), and the three characters this module left out --
+// U+2028 LINE SEPARATOR and U+2029 PARAGRAPH SEPARATOR, which are ECMAScript LineTerminator
+// productions and Unicode categories Zl/Zp, and U+0085 NEXT LINE, which is White_Space=Yes and the
+// character a surface spells a line break with. What the omission cost, measured on both entry points
+// and identically at 861aeb0: 'authorization: tok_...' + U+2028 + 'the run covered 43 domains and
+// merged 0 items' came back as '[redacted]' alone -- the accepted header's value ran to the end of the
+// DOCUMENT, because authorizationValueLineEndsAt found no terminator and returned source.length, and
+// the whole span was replaced by the redaction. The tail of a document is not a header value, so the
+// three characters end a line here exactly as they do everywhere else. The fold's indentation class
+// (FOLD_INDENT) is built from AUTH_INLINE_SPACE and therefore already excludes all five: an indented
+// continuation is indented with whitespace that is NOT a line end, and the boundary the fold stops at
+// is this same set.
+const AUTH_LINE_TERMINATORS = '\\r\\n\\u2028\\u2029\\u0085';
 // The attribute list's own separator: a continuation atom behind a comma OR A SEMICOLON. The ';'
 // is the F31-2 leak: the standard SigV4 order is 'Credential=..., SignedHeaders=host;x-amz-date,
 // Signature=...', and a tail that stopped at the ';' published the Signature on every path on
@@ -320,7 +345,8 @@ const AUTH_INLINE_SPACE = '\t\v\f \u00a0\u1680\u2000-\u200a\u202f\u205f\u3000\uf
 // the earlier revision removed them. The whitespace-ONLY continuation below still stops at a line
 // terminator, because a header value is one line and the notice's own detail is the line after a
 // source label.
-const AUTH_SEPARATED_ATOM = new RegExp('^[' + AUTH_INLINE_SPACE + '\\r\\n]*[,;][' + AUTH_INLINE_SPACE + '\\r\\n]*(' + AUTH_ATOM + ')');
+const AUTH_SEPARATED_ATOM = new RegExp('^[' + AUTH_INLINE_SPACE + AUTH_LINE_TERMINATORS + ']*[,;]['
+  + AUTH_INLINE_SPACE + AUTH_LINE_TERMINATORS + ']*(' + AUTH_ATOM + ')');
 // A run of whitespace inside a header value. It never crosses a line terminator: a header value
 // is one line, and the notice's own detail is the line after a source label, so a run that crossed
 // '\n' could consume the module's own diagnosis.
@@ -492,7 +518,15 @@ function authorizationKeywordStartsAt(source, at) {
 // The three readings the fold's loop makes in place: the next line terminator, the indentation a
 // continuation carries, and the atom (or the list separator) the continuation starts with. Each is
 // sticky or lastIndex-based, so the walk never copies the remainder of the text.
-const LINE_TERMINATOR = /\r\n|\n|\r/g;
+//
+// THE BOUNDARY IS AUTH_LINE_TERMINATORS, the one set stated above the value reader's helpers (Batch
+// 85; closing sweep F36-2). It used to be '/\r\n|\n|\r/', so U+2028, U+2029 and U+0085 were not
+// line ends: the fold found none, returned source.length, and an ACCEPTED header's value was taken
+// to be the whole rest of the document -- the tail after the header was deleted rather than redacted
+// (measured byte-identical on both entry points). FOLD_INDENT, built from AUTH_INLINE_SPACE, already
+// excludes all five characters, so the fold never treats one as an indentation and NEL/LS/PS end a
+// line here exactly as LF does (F36-6).
+const LINE_TERMINATOR = /\r\n|[\n\r\u2028\u2029\u0085]/g;
 const FOLD_INDENT = new RegExp('[' + AUTH_INLINE_SPACE + ']+', 'y');
 const FOLD_SEPARATOR = /[,;]/;
 // The same for the value's own atom run (readAuthorizationValue below): its three reads used to
@@ -501,7 +535,8 @@ const FOLD_SEPARATOR = /[,;]/;
 // leading '^' is dropped for that reason: with the 'y' flag it would match only at index 0.
 const AUTH_ATOM_AT_STICKY = new RegExp(AUTH_ATOM, 'y');
 const NEXT_AUTH_TOKEN_AT = new RegExp('\\s+(' + AUTH_ATOM + ')', 'y');
-const AUTH_SEPARATED_ATOM_AT = new RegExp('[' + AUTH_INLINE_SPACE + '\\r\\n]*[,;][' + AUTH_INLINE_SPACE + '\\r\\n]*(' + AUTH_ATOM + ')', 'y');
+const AUTH_SEPARATED_ATOM_AT = new RegExp('[' + AUTH_INLINE_SPACE + AUTH_LINE_TERMINATORS
+  + ']*[,;][' + AUTH_INLINE_SPACE + AUTH_LINE_TERMINATORS + ']*(' + AUTH_ATOM + ')', 'y');
 const AUTH_WHITESPACE_RUN_AT = new RegExp('[' + AUTH_INLINE_SPACE + ']+', 'y');
 function authorizationValueLineEndsAt(source, end) {
   // The fold is walked in one loop rather than one recursion per continuation line, and the loop
