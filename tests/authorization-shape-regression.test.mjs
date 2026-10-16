@@ -15,7 +15,8 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import {
-  redactSecrets, requestSecretSets, requestSecrets, shapeHttpError, shapeTransportError,
+  redactSecrets, redactCredentialShapes, requestSecretSets, requestSecrets, shapeHttpError,
+  shapeTransportError,
 } from '../scripts/lib/net.mjs';
 import { assembleNotice } from '../scripts/collect.mjs';
 
@@ -91,7 +92,17 @@ test('sweep F28-4 a URL-shaped header value gives up its userinfo credential', (
   assert.equal(redactSecrets('a authorization: https://x.example/a both', []),
     'a authorization: https://x.example/a both',
     'a URL with no credential was consumed');
-  assert.equal(redactSecrets('authorization: token1 token2', []), '[redacted] token2',
+  // Batch 61: the acceptance is ONE gate, applied on both entry points, and 'token1' is a BARE
+  // token that is not credential-shaped (six characters, no digit), so this is not a credential
+  // header and the text is returned byte for byte - here and on the credential-free path alike
+  // (the row below is the half of the old expectation that stays true and is still pinned: the
+  // whitespace-separated SECOND token of an unrecognised value survives).
+  assert.equal(redactSecrets('authorization: token1 token2', []), 'authorization: token1 token2',
+    'a bare value that is not credential-shaped was consumed');
+  assert.equal(redactSecrets('authorization: token1 token2', []),
+    redactCredentialShapes('authorization: token1 token2'),
+    'the two entry points disagree about a bare value');
+  assert.equal(redactSecrets('authorization: tok_9f3a2c7d1e5b token2', []), '[redacted] token2',
     'the second token of an unrecognised value is no longer preserved');
 });
 
@@ -257,15 +268,14 @@ test('sweep F30-3b the refusal reads the value from the header\'s own colon', ()
   }
 });
 
-// Recorded residues of the same rule, measured at Batch 56 and left standing: a value that NESTS
-// its quotes, a quoted value behind a bare attribute, and an unbalanced single quote (an apostrophe
-// inside the value) are still published at this module surface. They are pre-existing (identical at
-// aabc3dd, b2a7dc9 and 6ee1f64, before Batch 54 read a quoted value at all), Batch 54 and Batch 56
-// both narrowed the class, and the shipped collectors never hand this rule a detail carrying one
-// (an upstream body does not reach a notice; only query values and userinfo do, and those are
-// collected by value). Asserted so a later change that closes them is a deliberate one, and so
-// nobody mistakes the class for closed.
-test('sweep F30-2 recorded residues: nested quotes, a leading attribute, an unbalanced single quote', () => {
+// The three residues Batch 56 recorded and left standing (its own comment said they were asserted
+// "so a later change that closes them is a deliberate one"). Batch 61 closed them: the ONE value
+// reading follows a run of atoms, so a quoted value NESTED in quotes, a quoted value behind a bare
+// attribute ('realm=example, "tok_..."', which the comma of the attribute list introduces) and an
+// unbalanced single quote (an apostrophe inside the value, read as an unterminated quoted atom that
+// carries the credential) all give up the credential now, on both entry points. The record is
+// inverted here, with the same three spellings.
+test('sweep F30-2 the recorded residues are closed by the one value reading', () => {
   const VALUE = 'tok_9f3a2c7d1e5b';
   const residues = [
     'authorization: "pre "' + VALUE + '" post"',
@@ -273,8 +283,16 @@ test('sweep F30-2 recorded residues: nested quotes, a leading attribute, an unba
     "authorization: 'user's " + VALUE + "'",
   ];
   for (const text of residues) {
-    assert.ok(redactSecrets(text, []).includes(VALUE),
-      'a recorded residue was closed, so this record is stale: ' + JSON.stringify(redactSecrets(text, [])));
+    for (const [path, out] of [['the notice path', redactSecrets(text, [])],
+      ['the credential-free path', redactCredentialShapes(text)]]) {
+      assert.ok(!out.includes(VALUE),
+        'a residue still publishes the credential on ' + path + ': '
+        + JSON.stringify(text) + ' -> ' + JSON.stringify(out));
+      assert.equal(redactSecrets(out, []), out,
+        'the rewrite is not a fixed point on ' + path + ': ' + JSON.stringify(out));
+    }
+    assert.equal(redactSecrets(text, []), redactCredentialShapes(text),
+      'the two entry points disagree about a residue: ' + JSON.stringify(text));
   }
 });
 
@@ -287,4 +305,109 @@ test('the run\'s own authorization header is still collected whole and removed',
   const out = redactSecrets(echoed, secrets);
   assert.ok(!out.includes('SECRETTOKEN123'),
     'an echo of the run\'s own header published the credential: ' + JSON.stringify(out));
+});
+
+// ---------------------------------------------------------------------------------------
+// Batch 61 (closing sweep F31-1..F31-5, High/Medium/Low). The authorization shape had TWO
+// implementations that drifted apart: redactSecrets read the value unbounded, while
+// redactCredentialShapes read it behind 'credentialShapedOnly' -- a gate asked of the token AFTER
+// the scheme, which is the attribute NAME ('username=', 'oauth_consumer_key='), so an attribute
+// list's credential was published byte for byte on the credential-free path while the identical
+// text was '[redacted]' on the notice path (F31-1). The tail also stopped at ';' (a standard SigV4
+// 'Signature=' survived on EVERY path; F31-2), a quoted token after a scheme was read by nobody
+// (F31-3), a JSON-dumped header was read by no path at all (F31-4), and the three quoted residues
+// Batch 56 recorded were live on the candidate path (F31-5).
+//
+// There is ONE matcher, ONE acceptance and ONE reading now, shared by both entry points (net.mjs
+// 'readAuthorizationValue' and 'redactShapeRules'), and the only difference left between them is
+// whether the by-value removal also runs. The gate Batch 57 added is kept where it belongs: a
+// value that names NO recognised scheme is consumed only when one of its atoms is
+// credential-shaped, which is what keeps the prose below byte-identical. Both directions are
+// asserted here, row by row, together with the agreement property: the same input through both
+// entry points publishes the same text.
+// ---------------------------------------------------------------------------------------
+const SWEEP_VALUE = 'tok_' + '9f3a2c7d1e5b';
+const SWEEP_B64 = Buffer.from('user:' + 'password1').toString('base64');
+const SWEEP_AWS_KEY = 'AKIA' + 'EXAMPLE';
+
+// Every spelling the closing sweep published, with the credential it published.
+const SWEEP_LEAKS = [
+  ['F31-1 a Digest attribute list', 'authorization: Digest username="u", response="deadbeef1234"', 'deadbeef1234'],
+  ['F31-1 an OAuth attribute list',
+    'authorization: OAuth oauth_consumer_key="abc", oauth_token="SECRETTOKEN123"', 'SECRETTOKEN123'],
+  ['F31-1 a reordered SigV4 attribute list',
+    'authorization: AWS4-HMAC-SHA256 SignedHeaders=host;x-amz-date, Credential=' + SWEEP_AWS_KEY
+    + '/20261017, Signature=deadbeef1234', 'dead' + 'beef1234'],
+  ['F31-2 a standard SigV4 attribute list',
+    'authorization: AWS4-HMAC-SHA256 Credential=' + SWEEP_AWS_KEY
+    + '/20261017/us-east-1, SignedHeaders=host;x-amz-date, Signature=' + '9f8e7d6c5b4a' + '3f2e1d0c',
+    '9f8e7d6c5b4a' + '3f2e1d0c'],
+  ['F31-3 a quoted Basic credential', 'authorization: Basic "' + SWEEP_B64 + '"', SWEEP_B64],
+  ['F31-3 a quoted Basic credential, single quotes', "authorization: Basic '" + SWEEP_B64 + "'", SWEEP_B64],
+  ['F31-3 the Basic rule alone, quoted', 'Basic "' + SWEEP_B64 + '"', SWEEP_B64],
+  ['F31-3 a quoted Bearer credential', 'authorization: Bearer "TOKEN9f3a2c7d"', 'TOKEN9f3a2c7d'],
+  ['F31-4 a JSON-dumped header', '{"authorization": "' + SWEEP_VALUE + '"}', SWEEP_VALUE],
+  ['F31-4 a JSON-dumped proxy header', '{"proxy-authorization":"' + SWEEP_VALUE + '"}', SWEEP_VALUE],
+  ['F31-5 nested quotes', 'authorization: "pre "' + SWEEP_VALUE + '" post"', SWEEP_VALUE],
+  ['F31-5 a quoted value behind a bare attribute',
+    'authorization: realm=example, "' + SWEEP_VALUE + '"', SWEEP_VALUE],
+  ['F31-5 an unbalanced single quote', "authorization: it's " + SWEEP_VALUE, SWEEP_VALUE],
+  ['F31-5 an unbalanced single quote behind a quoted pair',
+    "authorization: 'user's " + SWEEP_VALUE + "'", SWEEP_VALUE],
+];
+
+test('F31 every spelling the closing sweep published is removed, and both entry points agree', () => {
+  for (const [what, text, credential] of SWEEP_LEAKS) {
+    const notice = redactSecrets(text, []);
+    const candidate = redactCredentialShapes(text);
+    for (const [path, out] of [['the notice path', notice], ['the credential-free path', candidate]]) {
+      assert.ok(!out.includes(credential),
+        what + ' published its credential on ' + path + ': '
+        + JSON.stringify(text) + ' -> ' + JSON.stringify(out));
+      assert.equal(redactSecrets(out, []), out,
+        what + ' is not a fixed point on ' + path + ': ' + JSON.stringify(out));
+    }
+    assert.equal(notice, candidate,
+      'the two entry points disagree about ' + what + ': '
+      + JSON.stringify(notice) + ' vs ' + JSON.stringify(candidate));
+  }
+});
+
+// The other direction: the ordinary prose BOTH paths must return byte for byte. Every row carries
+// one of the words the rules are named after and none of them is a credential header, so no row
+// may be rewritten - and the two paths may not disagree about one either.
+const SWEEP_PROSE = [
+  'The bearer credential held by the gateway is rotated weekly',
+  'authorization: required for this feed',
+  'authorization: read-only',
+  'authorization: "see the notes"',
+  'authorization: a failure with no message',
+  'authorization: token1 token2',
+  'authorization: see https://a.example/v2 for the details',
+  'the basic setup is documented',
+  'Basic authentication is used',
+  'the release said "the architecture is documented" in the notes',
+  'rss https://a.example/authorization: request failed for x',
+  'authorization: "HTTP 503"',
+];
+
+// The documented reading of a scheme: the credential token goes and the prose after it stays,
+// because a value that NAMES a scheme stops at the first run of bare words. This row is NOT in the
+// byte-identical list above - it is a credential header and its token goes - but the prose half is
+// the property the one reading must keep, on both entry points.
+test('F31 the prose after a scheme\'s token survives, on both entry points', () => {
+  const text = 'Authorization: Basic abcdefgh and then prose';
+  assert.equal(redactSecrets(text, []), '[redacted] and then prose',
+    'the prose after a scheme\'s token was consumed: ' + JSON.stringify(redactSecrets(text, [])));
+  assert.equal(redactCredentialShapes(text), redactSecrets(text, []),
+    'the two entry points disagree about the prose after a scheme\'s token');
+});
+
+test('F31 ordinary prose is byte-identical through both entry points', () => {
+  for (const text of SWEEP_PROSE) {
+    assert.equal(redactSecrets(text, []), text,
+      'the notice path reaped ordinary prose: ' + JSON.stringify(redactSecrets(text, [])));
+    assert.equal(redactCredentialShapes(text), text,
+      'the credential-free path reaped ordinary prose: ' + JSON.stringify(redactCredentialShapes(text)));
+  }
 });

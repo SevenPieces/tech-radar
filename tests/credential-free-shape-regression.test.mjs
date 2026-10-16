@@ -112,13 +112,26 @@ test('F30-1 a run WITH a credential behaves as it did before the change', async 
     assert.deepEqual(withCredential.titles, free.titles,
       'the credentialed run and the credential-free run disagree on ' + what);
   }
-  // The credentialed path is deliberately unchanged, over-redaction included: the wider Bearer
-  // shape still reaps an ordinary 'bearer credential' there, because a notice or a pool field on
-  // that path is priced against a real value set and a missed Bearer value is a disclosure.
+  // Batch 61: the credentialed path is no longer a WIDER reading of the same sentence. The generic
+  // Bearer alternative was bounded to a credential-shaped value on the credential-free candidate
+  // path and left wide on the notice/credentialed path, so this prose row was '[redacted]' on one
+  // and byte-identical on the other - exactly the drift the one matcher removes. There is ONE
+  // Bearer rule now and it is bounded on both paths: the ordinary row is byte-identical on a
+  // credentialed run too, while a credential-shaped Bearer value is still removed on both (the
+  // curated vendor shapes cover the token classes a curated value set cannot know) and a Bearer
+  // value standing in an authorization header is consumed by the header rule whatever it spells.
   const prose = 'The bearer credential held by the gateway is rotated weekly';
   const withCredential = await poolTitles([PLAIN_ROW, CREDENTIAL_ROW], prose);
-  assert.equal(withCredential.titles[0], 'The [redacted] held by the gateway is rotated weekly',
-    'the credentialed path changed: ' + JSON.stringify(withCredential.titles[0]));
+  assert.equal(withCredential.titles[0], prose,
+    'the credentialed path reaps ordinary Bearer prose again: ' + JSON.stringify(withCredential.titles[0]));
+  const bearerRow = 'release note: Bearer ' + BEARER_VALUE;
+  const freeBearer = await poolTitles([PLAIN_ROW], bearerRow);
+  const credentialedBearer = await poolTitles([PLAIN_ROW, CREDENTIAL_ROW], bearerRow);
+  assert.ok(!freeBearer.titles[0].includes(BEARER_VALUE)
+    && !credentialedBearer.titles[0].includes(BEARER_VALUE),
+  'a credential-shaped Bearer value survived on one of the paths');
+  assert.deepEqual(credentialedBearer.titles, freeBearer.titles,
+    'the two runs disagree about a credential-shaped Bearer value');
 });
 
 test('F30-1 the credential-free pass is a fixed point and keeps F28-4 closed', async () => {
@@ -178,5 +191,59 @@ test('F30-1 the shape half removes only credential-shaped values', () => {
   ]) {
     assert.notEqual(redactCredentialShapes(text), text,
       'the bounded shape pass missed a credential: ' + JSON.stringify(text));
+  }
+});
+
+// ---------------------------------------------------------------------------------------
+// Batch 61 (closing sweep F31-1..F31-5). The credential-free pool pass and the notice path used to
+// read a credential header differently, and the pool published what the notice removed: an
+// attribute list's quoted credential (the gate read the attribute NAME after the scheme, which is
+// not credential-shaped, so the whole match was abandoned), a standard SigV4 'Signature=' (the
+// tail stopped at ';'), a quoted token after a scheme (read by nobody), a JSON-dumped header (read
+// by no path) and the three quoted residues Batch 56 recorded. One matcher reads them now, on both
+// paths, with the same acceptance; the pool rows below are the end-to-end measurement of that.
+// ---------------------------------------------------------------------------------------
+const SWEEP_B64 = Buffer.from('user:' + 'password1').toString('base64');
+
+const SWEEP_POOL_ROWS = [
+  ['F31-1 a Digest attribute list',
+    'authorization: Digest username="u", response="deadbeef1234"', 'deadbeef1234'],
+  ['F31-1 an OAuth attribute list',
+    'authorization: OAuth oauth_consumer_key="abc", oauth_token="SECRETTOKEN123"', 'SECRETTOKEN123'],
+  ['F31-1 a reordered SigV4 attribute list',
+    'authorization: AWS4-HMAC-SHA256 SignedHeaders=host;x-amz-date, Credential=' + 'AKIA'
+    + 'EXAMPLE/20261017, Signature=deadbeef1234', 'AKIA' + 'EXAMPLE'],
+  ['F31-2 a standard SigV4 attribute list',
+    'authorization: AWS4-HMAC-SHA256 Credential=' + 'AKIA'
+    + 'EXAMPLE/20261017/us-east-1, SignedHeaders=host;x-amz-date, Signature=9f8e7d6c5b4a3f2e1d0c',
+    '9f8e7d6c5b4a' + '3f2e1d0c'],
+  ['F31-3 a quoted Basic credential', 'authorization: Basic "' + SWEEP_B64 + '"', SWEEP_B64],
+  ['F31-3 a quoted Bearer credential', 'authorization: Bearer "TOKEN9f3a2c7d"', 'TOKEN9f3a2c7d'],
+  ['F31-4 a JSON-dumped header', '{"authorization": "' + QUOTED_VALUE + '"}', QUOTED_VALUE],
+  ['F31-4 a JSON-dumped proxy header', '{"proxy-authorization":"' + QUOTED_VALUE + '"}', QUOTED_VALUE],
+  ['F31-5 nested quotes', 'authorization: "pre "' + QUOTED_VALUE + '" post"', QUOTED_VALUE],
+  ['F31-5 a quoted value behind a bare attribute',
+    'authorization: realm=example, "' + QUOTED_VALUE + '"', QUOTED_VALUE],
+  ['F31-5 an unbalanced single quote', "authorization: it's " + QUOTED_VALUE, QUOTED_VALUE],
+];
+
+test('F31 the credential-free pool publishes none of the sweep spellings, and the credentialed run agrees', async () => {
+  for (const [what, text, credential] of SWEEP_POOL_ROWS) {
+    const free = await poolTitles([PLAIN_ROW], text);
+    const withCredential = await poolTitles([PLAIN_ROW, CREDENTIAL_ROW], text);
+    assert.ok(free.titles.length >= 1, 'the row produced no candidate at all: ' + JSON.stringify(free));
+    for (const [which, fields] of [
+      ['the credential-free run', [...free.titles, ...free.summaries]],
+      ['the credentialed run', [...withCredential.titles, ...withCredential.summaries]],
+    ]) {
+      for (const field of fields) {
+        assert.ok(!field.includes(credential),
+          what + ' published its credential in ' + which + ': ' + JSON.stringify(field));
+      }
+    }
+    // The two runs agree: the shape half reads the same text on both, and the by-value half has
+    // nothing left to remove once the shape pass has consumed the header.
+    assert.deepEqual(withCredential.titles, free.titles,
+      'the credentialed run and the credential-free run disagree about ' + what);
   }
 });

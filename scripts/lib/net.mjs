@@ -66,12 +66,13 @@ export function redactUrl(url) {
 // the scheme plus one further token unconditionally, so a watchlist target whose own path ends in
 // 'authorization' supplied the word, the ': ' separator supplied the colon, and the rule ate the
 // first words of whatever followed -- a transport cause lost its leading word and a pushed HTTP
-// status disappeared (S26-F5). It now looks at what stands after the colon: a recognised scheme (or
-// a first token that is itself credential-shaped) means the credential-bearing token is the one
-// after it, while an unrecognised first token is consumed alone and the token after it survives. A
-// token is credential-shaped when it carries a non-alphabetic marker -- a digit or one of the
-// +/=._- characters a base64, hex or JWT value is built from -- so the word '403' after 'HTTP' and
-// the word 'resolve' after 'could' are prose and stay readable.
+// status disappeared (S26-F5). It now reads what stands after the colon, and Batch 61 made that ONE
+// reading for both entry points: a value that NAMES a recognised scheme is a credential header
+// whatever it spells, so its whole value is consumed, while a value that names none is a BARE token
+// and is consumed only when one of its atoms is credential-shaped. A token is credential-shaped
+// when it carries a non-alphabetic marker -- a digit or one of the +/=._- characters a base64, hex
+// or JWT value is built from -- so the word '403' after 'HTTP' and the word 'resolve' after 'could'
+// are prose and stay readable.
 const AUTH_SCHEMES = new Set([
   'basic', 'bearer', 'digest', 'token', 'apikey', 'key', 'signature', 'oauth', 'oauth2', 'jwt',
   'negotiate', 'hawk', 'aws4-hmac-sha256', 'saml',
@@ -86,15 +87,16 @@ function credentialShapedToken(token) {
 // NOT here -- it has to read what follows its own match to know whether the next token is the
 // credential, and a plain replacement would remove the keyword before that decision could be made.
 // It runs as its own rule, 'redactAuthorizationShapes', beside this list.
-// The three are named rather than anonymous because ONE caller applies two of them without the
-// third: the credential-free candidate pass (redactCredentialShapes below) reads the two curated
-// vendor spellings as they stand and bounds the generic Bearer alternative to a credential-shaped
-// value, so an ordinary 'the bearer credential held' is not reaped on that path.
-const SHAPE_BEARER = /\bBearer\s+[^\s,;"']{8,}/gi;
+// Batch 61: this list is the two curated vendor spellings and nothing else. It used to carry a
+// third, WIDER Bearer alternative that only redactSecrets applied, so the two entry points
+// disagreed about what a Bearer value is: an ordinary 'The bearer credential held by the gateway'
+// was '[redacted]' on the notice path and byte-identical on the credential-free candidate path.
+// The generic Bearer alternative is ONE rule now ('redactBearerValues' below) and both paths run
+// it, at the same place in the same order, so 'redactSecrets(x, [])' and
+// 'redactCredentialShapes(x)' publish the same text for every x.
 const SHAPE_CLASSIC_TOKEN = /\bgh[pousr]_[A-Za-z0-9]{6,}\b/g;
 const SHAPE_FINE_GRAINED_PAT = /\bgithub_pat_[A-Za-z0-9_]{20,}\b/g;
 const SECRET_SHAPES = [
-  SHAPE_BEARER,
   SHAPE_CLASSIC_TOKEN,
   SHAPE_FINE_GRAINED_PAT,
 ];
@@ -146,25 +148,14 @@ const SECRET_SHAPES = [
 //     inside the match is kept byte for byte by the branch in redactAuthorizationShapes, and a value
 //     that begins 'request failed' is refused below. The last-resort alternatives are therefore after
 //     the closed ones, so a value that does close is read as the closed token it is.
-const AUTH_QUOTED_VALUE = '(?:"(?:[^"\\\\]|\\\\.)*"|\'(?:[^\'\\\\]|\\\\.)*\'|"(?:[^"\\\\]|\\\\.)*|\'(?:[^\'\\\\]|\\\\.)*)';
-const AUTH_BARE_VALUE = '[^\\s,;"\']+(?![\\s,;"\']\\s)';
-const AUTH_BARE_VALUE_BOUNDED = '[^\\s,;"\']+';
-const AUTHORIZATION_SHAPE = new RegExp(
-  '((?<!\\/)\\b(?:proxy-)?authorization\\s*:\\s*)(' + AUTH_QUOTED_VALUE + '|' + AUTH_BARE_VALUE + ')',
-  'gi',
-);
-// The bounded reading's own pattern (redactCredentialShapes, and the options note below): the same
-// alternation with the bare token read GREEDILY, without the trailing lookahead. That lookahead is
-// what makes the shipped reading backtrack a bare token to its last-but-one character when a
-// separator and a space follow it ('authorization: tok_..., more' -> '[redacted]b, more', measured
-// at a54a744 on the notice path too), which is harmless where it is the only reading but would
-// leave a one-character fragment of a credential on the credential-free candidate path - the path
-// this pattern was added for. The value's own shape is the bound on that path, so the lookahead is
-// not needed there for anything.
-const AUTHORIZATION_SHAPE_BOUNDED = new RegExp(
-  '((?<!\\/)\\b(?:proxy-)?authorization\\s*:\\s*)(' + AUTH_QUOTED_VALUE + '|' + AUTH_BARE_VALUE_BOUNDED + ')',
-  'gi',
-);
+const AUTHORIZATION_KEYWORD = /(?<!\/)\b(?:proxy-)?authorization["']?\s*:\s*/gi;
+// The atoms a header VALUE is built from (see 'readAuthorizationValue' below): a quoted string --
+// double or single, an escaped quote inside it read as one character, or a quote that is never
+// closed and therefore runs to the end of the text -- or a bare token. A bare token never crosses
+// whitespace and excludes the two separators a header value uses (',' and ';') and both quote
+// characters, which is what lets the reader see 'username=' and '"u"' as the two atoms they are.
+const AUTH_ATOM = '(?:"(?:[^"\\\\]|\\\\.)*"|\'(?:[^\'\\\\]|\\\\.)*\'|"(?:[^"\\\\]|\\\\.)*|\'(?:[^\'\\\\]|\\\\.)*|' + AUTH_TOKEN_CHARS + ')';
+const AUTH_ATOM_AT = new RegExp('^' + AUTH_ATOM);
 
 // The two refusals above, read from the text after the HEADER'S OWN COLON before the match is made,
 // so that the quoted and the unquoted spelling of the same header value are refused by one rule: a
@@ -208,21 +199,21 @@ function authorizationValueRefused(rest) {
   return /^request failed/i.test(value);
 }
 
-// The one shape in the list above that has to read what FOLLOWS its match: the authorization rule
-// consumes the token after the scheme it matched, and only when that token is the credential. The
-// replacer receives the end of the match and the text, reads the next token with the lookahead
-// above, and returns what the sentinel replaces. Both passes of the redaction call it, so the
-// single-token match the list makes and the two-token removal the credential calls for stay in one
-// place.
-const NEXT_AUTH_TOKEN = new RegExp('^\\s+(' + AUTH_TOKEN_CHARS + ')');
-// The rest of a header VALUE once the credential-bearing token has been read: a quoted string that
-// stands against the token ('oauth_consumer_key="..."') and any comma-separated continuation of the
-// same attribute list. A whitespace-separated run of bare prose is NOT part of it, which is what
-// keeps 'Authorization: Basic abcdefgh and then prose' readable. The rule consumed one token and
-// stopped, so an OAuth or Digest attribute list published its quoted credential
-// ('OAuth oauth_consumer_key="abc", oauth_token="SECRETTOKEN123"' -> '[redacted]"abc",
-// oauth_token="SECRETTOKEN123"'; sweep F28-4).
-const AUTH_VALUE_TAIL = /^(?:\s*"[^"]*"|\s*'[^']*'|\s*,\s*(?:[^\s,;"']+|"[^"]*"|'[^']*'))*/;
+// The credential token a recognised scheme introduces, read with the SAME atom the value reader
+// below uses: the quoted spelling is the same token ('Basic "dXNlcjpwYXNzd29yZDE="', 'Bearer
+// "TOKEN9f3a2c7d"'), and it used to be read by nobody -- the token class excluded both quote
+// characters, so the scheme was consumed and the credential inside the quotes was published byte
+// for byte on both paths (sweep F31-3).
+const NEXT_AUTH_TOKEN = new RegExp('^\\s+(' + AUTH_ATOM + ')');
+// The attribute list's own separator: a continuation atom behind a comma OR A SEMICOLON. The ';'
+// is the F31-2 leak: the standard SigV4 order is 'Credential=..., SignedHeaders=host;x-amz-date,
+// Signature=...', and a tail that stopped at the ';' published the Signature on every path on
+// every run -- pre-existing, never filed before the closing sweep.
+const AUTH_SEPARATED_ATOM = new RegExp('^[\\t \\u00a0]*[,;][\\t \\u00a0]*' + AUTH_ATOM);
+// A run of whitespace inside a header value. It never crosses a line terminator: a header value
+// is one line, and the notice's own detail is the line after a source label, so a run that crossed
+// '\n' could consume the module's own diagnosis.
+const AUTH_WHITESPACE_RUN = /^[\t \u00a0]+/;
 // The scaffold branch below: a match that carries a scaffold span is not a header value to consume
 // whole, and it is not raw text to publish whole either - the two halves of one value have to part
 // company (sweep F30-3). The span is the module's own diagnosis and is kept byte for byte; every
@@ -238,26 +229,96 @@ function consumeCredentialShapedTokens(text) {
     return credentialShapedToken(token) ? REDACTION_SENTINEL : token;
   });
 }
-// The optional second argument is the bounded reading, and it exists for exactly one caller: the
-// credential-free candidate pass (redactCredentialShapes). There the run issued no credential, so
-// there is no value set to remove anything BY VALUE with - the shape rules are the whole of the
-// protection, and they must not reap ordinary pool prose. With 'credentialShapedOnly' the rule
-// consumes a match only when the value it READ is credential-shaped (the module's own definition:
-// a digit-bearing run of at least MIN_SECRET_CHARS characters, not all digits), and otherwise
-// leaves the text byte for byte. So 'authorization: required for this feed', 'authorization:
-// read-only' and 'authorization: "see the notes"' survive on that path, while the sweep's
-// 'authorization: "tok_9f3a2c7d1e5b"', the quoted Bearer value and the AWS SigV4 attribute list
-// still go. The shipped notice path and the credentialed pool path call it with no options and are
-// unchanged.
-function redactAuthorizationShapes(text, options = {}) {
-  const credentialShapedOnly = options.credentialShapedOnly === true;
-  // The bounded reading has its own pattern: the same alternation with the bare token read
-  // greedily (see AUTHORIZATION_SHAPE_BOUNDED). The shipped pattern is untouched.
-  const pattern = credentialShapedOnly ? AUTHORIZATION_SHAPE_BOUNDED : AUTHORIZATION_SHAPE;
+// THE ONE READING OF A CREDENTIAL HEADER'S VALUE (Batch 61; sweep F31-1, F31-2, F31-3, F31-5).
+// One matcher, one acceptance and one reading, shared by redactSecrets and
+// redactCredentialShapes. The two used to drift because the acceptance lived in an OPTION of this
+// rule ('credentialShapedOnly'), which only one of the two paths passed.
+//
+// The value is a run of ATOMS (see AUTH_ATOM above). It begins with the first atom after the
+// header's colon, and the run continues with
+//   - the scheme's own credential token, when the first atom NAMES a recognised scheme
+//     ('Basic "dXNl..."', 'Bearer tok_...', 'OAuth oauth_consumer_key="..."'), and
+//   - every atom standing directly against the previous one ('username="u"' is the bare token
+//     'username=' and the quoted value 'u' with nothing between them) or behind the attribute
+//     list's own separator, which is ',' AND ';' (AUTH_SEPARATED_ATOM above; the SigV4 leak).
+// A whitespace-separated run of BARE words is NOT part of the value: that is what keeps
+// 'authorization: required for this feed' and 'Authorization: Basic abcdefgh and then prose'
+// readable. (The one exception -- a value that names no scheme, once a quoted atom has been read --
+// is stated with the continuation below.)
+//
+// ACCEPTANCE, and it is the same on both paths. A value whose first atom names a recognised scheme
+// is a credential header whatever it spells, so its WHOLE value is consumed and no shape gate may
+// veto it: that veto was the F31-1 drift (the gate read the attribute NAME standing after the
+// scheme -- 'username=', 'oauth_consumer_key=' -- which is not credential-shaped, so the whole
+// match was abandoned and the credential inside the attribute list was published byte for byte).
+// A value that does not name a scheme is a BARE token, and the gate Batch 57 added is kept for it:
+// the value is consumed only when one of its atoms is credential-shaped, which is what keeps
+// 'authorization: required for this feed', 'authorization: read-only' and
+// 'authorization: "see the notes"' byte-identical on both paths.
+function authorizationAtomIsShaped(atom) {
+  return credentialShapedToken(atom) || credentialShapedToken(stripSurroundingQuotes(atom));
+}
+function readAuthorizationValue(source, at) {
+  const first = AUTH_ATOM_AT.exec(source.slice(at));
+  if (first === null) return null;
+  const atoms = [first[0]];
+  let end = at + first[0].length;
+  const schemeWord = stripSurroundingQuotes(first[0]).split(/\s+/, 1)[0].toLowerCase();
+  const hasScheme = AUTH_SCHEMES.has(schemeWord);
+  if (hasScheme) {
+    const token = NEXT_AUTH_TOKEN.exec(source.slice(end));
+    if (token !== null) {
+      atoms.push(token[1]);
+      end += token[0].length;
+    }
+  }
+  // The continuation of the run. Two continuations always hold: an atom standing directly against
+  // the one before it, and an atom behind the attribute list's separator (',' or ';'). A gap of
+  // WHITESPACE ALONE continues the run in one case only -- a value that names no scheme, once a
+  // QUOTED atom has been read. That is the residue the unbalanced quote leaves behind: the value
+  // "authorization: 'user's tok_..." reads the quoted atom "'user'", the bare "s", and then the
+  // credential beyond the whitespace; a value that is a run of bare words ('authorization:
+  // required for this feed', 'authorization: see https://a.example/v2 for the details') never
+  // crosses it, and a value that NAMES a scheme never does either, which is the documented
+  // "Basic abcdefgh and then prose" behaviour. The gate below is the other half of the prose
+  // protection: a run that carries no credential-shaped atom is left byte for byte.
+  for (;;) {
+    const separated = AUTH_SEPARATED_ATOM.exec(source.slice(end));
+    if (separated !== null) {
+      atoms.push(separated[0]);
+      end += separated[0].length;
+      continue;
+    }
+    const attached = AUTH_ATOM_AT.exec(source.slice(end));
+    if (attached !== null) {
+      atoms.push(attached[0]);
+      end += attached[0].length;
+      continue;
+    }
+    if (hasScheme || !atoms.some((atom) => /^["']/.test(atom))) break;
+    const gap = AUTH_WHITESPACE_RUN.exec(source.slice(end));
+    if (gap === null) break;
+    const nextAt = end + gap[0].length;
+    const next = AUTH_ATOM_AT.exec(source.slice(nextAt));
+    if (next === null) break;
+    atoms.push(next[0]);
+    end = nextAt + next[0].length;
+  }
+  return { end, hasScheme, credentialShaped: atoms.some(authorizationAtomIsShaped) };
+}
+function redactAuthorizationShapes(text) {
   const source = String(text);
   let out = '';
   let at = 0;
-  for (const match of source.matchAll(pattern)) {
+  for (const match of source.matchAll(AUTHORIZATION_KEYWORD)) {
+    // A keyword the previous match already consumed (a value that names a header of its own) is not
+    // read twice: the run's end is the resume point, exactly as in every other rule here.
+    if (match.index < at) continue;
+    const headerText = match[0];
+    const valueAt = match.index + headerText.length;
+    const value = readAuthorizationValue(source, valueAt);
+    if (value === null) continue;
+    const valueText = source.slice(valueAt, value.end);
     // A match whose value carries the scaffold placeholder is the notice's OWN diagnosis, masked by
     // protectScaffold, and never a header value to consume: the placeholder is written by this module
     // and normalised out of every input and every value, so the only text that can carry one is a
@@ -269,35 +330,20 @@ function redactAuthorizationShapes(text, options = {}) {
     // ('authorization: <HTTP 503>') comes back byte-identical, and a value that carries both keeps
     // the diagnosis and gives up the credential. The span is restored at the end of the pass as any
     // other is.
-    const headerText = match[1];
-    const matchedValue = match[2];
-    if (matchedValue.includes(SCAFFOLD_PLACEHOLDER)) {
-      out += source.slice(at, match.index) + consumeCredentialShapedTokens(match[0]);
-      at = match.index + match[0].length;
+    if (valueText.includes(SCAFFOLD_PLACEHOLDER)) {
+      out += source.slice(at, match.index) + consumeCredentialShapedTokens(source.slice(match.index, value.end));
+      at = value.end;
       continue;
     }
     // The two refusals read the text after the header's own colon WHOLE, not the matched token: the
     // transport seam is the two-word phrase 'request failed', and a refusal that saw only its first
     // word consumed that word and left '[redacted] failed for ...' where the notice's own wording
     // belongs.
-    if (authorizationValueRefused(source.slice(match.index + headerText.length))) continue;
-    const first = matchedValue;
-    const next = NEXT_AUTH_TOKEN.exec(source.slice(match.index + match[0].length));
-    const consumeSecond = next !== null
-      && !next[1].includes(SCAFFOLD_PLACEHOLDER)
-      && (AUTH_SCHEMES.has(first.toLowerCase()) || credentialShapedToken(next[1]));
-    // The bounded reading (see the note above this function): a match whose value is not
-    // credential-shaped is not a header value on this path, and is left where it stands.
-    if (credentialShapedOnly
-      && !credentialShapedToken(stripSurroundingQuotes(consumeSecond ? next[1] : first))) continue;
+    if (authorizationValueRefused(source.slice(valueAt))) continue;
+    // The acceptance stated above this function, applied identically by both entry points.
+    if (!value.hasScheme && !value.credentialShaped) continue;
     out += source.slice(at, match.index) + REDACTION_SENTINEL;
-    at = consumeSecond ? match.index + match[0].length + next[0].length : match.index + match[0].length;
-    if (consumeSecond) {
-      // The attribute list is consumed only while it is the shaper's own text or a value: a
-      // placeholder inside it belongs to the scaffold and stops the consumption there.
-      const tail = AUTH_VALUE_TAIL.exec(source.slice(at));
-      if (tail !== null && tail[0] !== '' && !tail[0].includes(SCAFFOLD_PLACEHOLDER)) at += tail[0].length;
-    }
+    at = value.end;
   }
   return out + source.slice(at);
 }
@@ -534,7 +580,15 @@ function decodedBasicToken(text) {
   // The text starts at the whitespace the 'Basic' keyword requires, and the run of base64
   // characters ends at the first separator: the token is a prefix of it, which is why the loop
   // below shortens the run instead of matching it whole.
-  const prefix = /^\s+([A-Za-z0-9+/]+={0,2})/.exec(' ' + String(text));
+  //
+  // Batch 61: the token may stand in QUOTES, and the quoted spelling is the same credential
+  // ('Basic "dXNlcjpwYXNzd29yZDE="', sweep F31-3). The token class above excludes both quote
+  // characters, so a quoted run was read by nobody and the credential inside it was published byte
+  // for byte. The quotes are part of the SPAN this function returns, so the caller replaces them
+  // with the token and the published line keeps no orphan quote.
+  const raw = String(text);
+  const quote = raw.startsWith('"') || raw.startsWith("'") ? raw[0] : '';
+  const prefix = /^\s*([A-Za-z0-9+/]+={0,2})/.exec(quote === '' ? ' ' + raw : raw.slice(1));
   if (prefix === null) return null;
   const run = prefix[1];
   for (let length = run.length; length >= 8; length -= 1) {
@@ -555,7 +609,10 @@ function decodedBasicToken(text) {
     // around the colon. 'Basic auth', 'Basic authentication' and every other ordinary word decode
     // to text that carries no colon and are left alone.
     if (!/^[\x20-\x7e]+$/.test(decoded) || !/^[^:=]+:[^:=]+$/.test(decoded)) continue;
-    return candidate;
+    // A quoted run only counts as the token when its closing quote stands right after the
+    // candidate: anything else is a longer run whose tail happens to be inside the quotes.
+    if (quote !== '' && raw[1 + length] !== quote) continue;
+    return quote === '' ? candidate : quote + candidate + quote;
   }
   return null;
 }
@@ -982,8 +1039,7 @@ export function redactSecrets(text, secrets) {
     // 'x' of 'x<word>Basic <b64>' is not a value, so the shape stands). Between the two, the
     // values are removed longest first, and the marker-bearing values before the markers they
     // carry become the placeholder.
-    for (const shape of SECRET_SHAPES) out = out.replace(shape, REDACTION_SENTINEL);
-    out = redactAuthorizationShapes(out);
+    out = redactShapeRules(out);
     for (const value of sorted) {
       if (value.length >= MIN_SECRET_CHARS) {
         out = out.split(value).join(REDACTION_SENTINEL);
@@ -1016,15 +1072,31 @@ export function redactSecrets(text, secrets) {
   return restored.replace(REDACTION_SENTINEL_RE, REDACTED_MARKER);
 }
 
-// The generic Bearer alternative, bounded to a credential-shaped value. It is not part of
-// SECRET_SHAPES because SECRET_SHAPES runs on the notice path too, and the wider spelling is
-// deliberate there: a notice is the run's only diagnosis and a missed Bearer value is a
-// disclosure, while the candidate fields are the prose the digest is written from. 'Bearer
-// credential held' is prose; 'Bearer abcdefghijklmnopqrstuvwxyz012345' is a value.
+// THE ONE GENERIC BEARER RULE (Batch 61). It is bounded to a credential-shaped value on BOTH
+// paths: 'The bearer credential held by the gateway is rotated weekly' is ordinary advisory prose,
+// and the two entry points may not disagree about what a Bearer value is -- the wider spelling used
+// to run on the notice path alone, so the same sentence was '[redacted]' there and byte-identical
+// in the credential-free pool. 'Bearer credential held' is prose; 'Bearer
+// abcdefghijklmnopqrstuvwxyz012345' is a value. A Bearer value standing in an authorization header
+// is not read by this rule at all: it is the header's own scheme, and the header rule consumes the
+// whole value (whatever it spells) because the header says it is one.
 const BEARER_VALUE = /\bBearer\s+([^\s,;"']+)/gi;
-function redactCredentialShapedBearer(text) {
+function redactBearerValues(text) {
   return String(text).replace(BEARER_VALUE, (m, token) => (
     credentialShapedToken(token) ? REDACTION_SENTINEL : m));
+}
+
+// THE ONE SHAPE PIPELINE (Batch 61): the curated vendor shapes, the one Bearer rule and the one
+// authorization rule, in one order, run by BOTH entry points. redactSecrets calls it, removes the
+// run's own values (the by-value half, which needs a value set and therefore removes nothing when
+// the set is empty) and then applies the Basic rule; redactCredentialShapes calls it and applies
+// the Basic rule. With an empty value set the two entry points publish the same text for every
+// input, which is the property the two used to break.
+function redactShapeRules(input) {
+  let out = input;
+  for (const shape of SECRET_SHAPES) out = out.replace(shape, REDACTION_SENTINEL);
+  out = redactBearerValues(out);
+  return redactAuthorizationShapes(out);
 }
 
 // THE SHAPE HALF OF THE REDACTION, ON ITS OWN (superseding normalizeInternalChars as the collector's
@@ -1042,14 +1114,12 @@ function redactCredentialShapedBearer(text) {
 //
 // What does NOT run here is the BY-VALUE removal, and that is the TR-110 contract rather than an
 // oversight: with an empty set there is nothing to remove by value, and with a set the candidate
-// pass is already the conditional one the collector documents below. What this function also does
-// NOT do is take the shape rules as the notice path takes them:
-//   - the generic Bearer alternative is bounded to a credential-shaped value, because
-//     'The bearer credential held by the gateway' is ordinary advisory prose and this is the pool
-//     the digest is written from;
-//   - the authorization rule is called with 'credentialShapedOnly', so 'authorization: read-only'
-//     and 'authorization: required for this feed' survive and only a credential-shaped value is
-//     consumed.
+// pass is already the conditional one the collector documents below. Batch 61 removed the other
+// difference: this function used to run its own Bearer bound and its own optioned reading of the
+// authorization rule, so the two entry points disagreed about what a credential header is. Both
+// now run the SAME shape rules ('redactShapeRules' above) with the same acceptance, and the only
+// thing this path does not do is the by-value removal - which is why
+// 'redactSecrets(x, [])' and 'redactCredentialShapes(x)' are the same text for every x.
 // The scaffold protection and the marker reading are the same ones redactSecrets uses, so an
 // 'HTTP 503' span inside the text is kept byte for byte and a marker already in the text is inert.
 // The two internal characters are normalised exactly as before (withoutSentinel inside
@@ -1058,10 +1128,9 @@ export function redactCredentialShapes(text) {
   const scaffold = protectScaffold(maskStripped(withoutSentinel(text)));
   let out = protectMarkers(scaffold.text);
   const applyShapes = (input) => {
-    let s = input.replace(SHAPE_CLASSIC_TOKEN, REDACTION_SENTINEL)
-      .replace(SHAPE_FINE_GRAINED_PAT, REDACTION_SENTINEL);
-    s = redactCredentialShapedBearer(s);
-    s = redactAuthorizationShapes(s, { credentialShapedOnly: true });
+    // The same shape pipeline redactSecrets runs, in the same order and with the same acceptance
+    // (Batch 61): the curated shapes, the one Bearer rule and the one authorization rule.
+    const s = redactShapeRules(input);
     // The Basic rule is applied twice per pass for the reason the notice path states: a chain of
     // back-to-back credential shapes reaches the same text in half the passes.
     return redactBasicCredentials(redactBasicCredentials(s));
