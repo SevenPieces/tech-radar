@@ -149,6 +149,20 @@ const SECRET_SHAPES = [
 //     that begins 'request failed' is refused below. The last-resort alternatives are therefore after
 //     the closed ones, so a value that does close is read as the closed token it is.
 const AUTHORIZATION_KEYWORD = /(?<!\/)\b(?:proxy-)?authorization["']?\s*:\s*/gi;
+// Sweep F31-4's neighbour rows: the keyword was that one spelling with a word boundary on each
+// side, so two header NAMES a real surface writes were read by nothing. 'authorisation' is the
+// British spelling of the same header - the colon and the value after it are identical, only the
+// name differs - and 'HTTP_AUTHORIZATION', the name a server dump gives the header, has no word
+// boundary before 'authorization' because the name is joined to its prefix by an underscore, a
+// word character. Each gets its own matcher rather than one wider alternation: the boundary that
+// keeps 'xauthorization' (a name that merely ends in the keyword) and 'Authorization2' out is the
+// '\b' plus the negative lookbehind above, and widening that boundary in place also let a dotted
+// prefix through. The underscore matcher is the one deliberate exception, and it is the shape a
+// dump writes ('HTTP_AUTHORIZATION', 'X_AUTHORIZATION', 'HTTP_X_AUTHORIZATION'); it keeps the same
+// lookbehind for '/', so the notice seam ('.../authorization: HTTP 503') is still refused.
+const AUTHORIZATION_KEYWORD_BRITISH = /(?<!\/)\bauthorisation["']?\s*:\s*/gi;
+const AUTHORIZATION_KEYWORD_UNDERSCORED = /(?<![\w.\/-])(?:[A-Za-z0-9]+_)+(?:proxy-)?authori(?:s|z)ation["']?\s*:\s*/gi;
+const AUTHORIZATION_KEYWORDS = [AUTHORIZATION_KEYWORD, AUTHORIZATION_KEYWORD_BRITISH, AUTHORIZATION_KEYWORD_UNDERSCORED];
 // The atoms a header VALUE is built from (see 'readAuthorizationValue' below): a quoted string --
 // double or single, an escaped quote inside it read as one character, or a quote that is never
 // closed and therefore runs to the end of the text -- or a bare token. A bare token never crosses
@@ -310,10 +324,24 @@ function redactAuthorizationShapes(text) {
   const source = String(text);
   let out = '';
   let at = 0;
-  for (const match of source.matchAll(AUTHORIZATION_KEYWORD)) {
+  // Every keyword matcher is scanned from the resume point and the EARLIEST match is read, so the
+  // three spellings share one left-to-right pass and a value the previous match consumed is still
+  // never read twice. The spelling order in AUTHORIZATION_KEYWORDS breaks a tie, and only the
+  // three matchers can tie at one index when one name carries two of the spellings at once.
+  const earliestAfter = (index, from) => {
+    let best = null;
+    for (const re of AUTHORIZATION_KEYWORDS) {
+      re.lastIndex = from;
+      const m = re.exec(source);
+      if (m === null) continue;
+      if (best === null || m.index < best.index) best = m;
+    }
     // A keyword the previous match already consumed (a value that names a header of its own) is not
-    // read twice: the run's end is the resume point, exactly as in every other rule here.
-    if (match.index < at) continue;
+    // read twice: the run's end is the resume point, and a skip advances past the match the reader
+    // declined so the same spelling is not attempted again.
+    return best !== null && best.index > index ? best : null;
+  };
+  for (let match = earliestAfter(-1, 0); match !== null; match = earliestAfter(match.index, at)) {
     const headerText = match[0];
     const valueAt = match.index + headerText.length;
     const value = readAuthorizationValue(source, valueAt);

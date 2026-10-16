@@ -411,3 +411,59 @@ test('F31 ordinary prose is byte-identical through both entry points', () => {
       'the credential-free path reaped ordinary prose: ' + JSON.stringify(redactCredentialShapes(text)));
   }
 });
+// ---------------------------------------------------------------------------------------
+// Closing sweep F31-4's neighbour rows (the Batch 61 record left the keyword-reading surface
+// measured but not closed) and F31-6. Two of the spellings are the same header NAME written
+// differently and are read now: the British 'authorisation', and the underscore-joined
+// 'HTTP_AUTHORIZATION' a server dump writes. The rest are recorded BOUNDS, each pinned here byte
+// for byte so a later change that closes one is a deliberate one and a change that widens the
+// rule beyond it fails this file:
+//   - 'Authorization2:' and 'xauthorization:' are names that merely end in the keyword, so no
+//     header grammar reads them, and 'xauthorization:' was already asserted to survive above;
+//   - '<authorization>' is XML/HTML rather than a header name (there is no ':'),
+//   - 'authorization=' and 'authorization ->' use a separator that is not a header's colon, and
+//     reading a credential across one would reap prose that uses the word in a sentence;
+//   - the '/'-preceded keyword is the notice seam's own defence (F31-6): removing that lookbehind
+//     makes the assembly's own '.../authorization: <cause>' seam lose its cause.
+const NEIGHBOUR_BOUNDS = [
+  'Authorization2: ' + SWEEP_VALUE,
+  'xauthorization: ' + SWEEP_VALUE,
+  '<authorization>' + SWEEP_VALUE + '</authorization>',
+  'authorization= ' + SWEEP_VALUE,
+  'authorization -> ' + SWEEP_VALUE,
+  'see https://a.example/x/authorization: ' + SWEEP_VALUE + ' now',
+];
+
+test('F31-4 a header name joined by an underscore, or spelled the British way, is read', () => {
+  for (const text of [
+    'HTTP_AUTHORIZATION: ' + SWEEP_VALUE,
+    'http_authorization: ' + SWEEP_VALUE,
+    'HTTP_X_AUTHORIZATION: ' + SWEEP_VALUE,
+    'X_AUTHORIZATION: ' + SWEEP_VALUE,
+    'authorisation: ' + SWEEP_VALUE,
+    'Authorisation: ' + SWEEP_VALUE,
+    'PROXY_AUTHORIZATION: Bearer ' + SWEEP_VALUE,
+    'HTTP_AUTHORISATION: Basic ' + SWEEP_B64,
+  ]) {
+    const notice = redactSecrets(text, []);
+    const candidate = redactCredentialShapes(text);
+    for (const [path, out] of [['the notice path', notice], ['the credential-free path', candidate]]) {
+      assert.ok(!out.includes(SWEEP_VALUE) && !out.includes(SWEEP_B64),
+        'the header name was read by nothing on ' + path + ': '
+        + JSON.stringify(text) + ' -> ' + JSON.stringify(out));
+      assert.equal(redactSecrets(out, []), out,
+        'the rewrite is not a fixed point on ' + path + ': ' + JSON.stringify(out));
+    }
+    assert.equal(notice, candidate,
+      'the two entry points disagree about ' + JSON.stringify(text));
+  }
+});
+
+test('F31-4 and F31-6 the recorded bounds still hold, byte for byte, on both entry points', () => {
+  for (const text of NEIGHBOUR_BOUNDS) {
+    assert.equal(redactSecrets(text, []), text,
+      'a recorded bound was closed or rewritten by the notice path: ' + JSON.stringify(text));
+    assert.equal(redactCredentialShapes(text), text,
+      'a recorded bound was closed or rewritten by the credential-free path: ' + JSON.stringify(text));
+  }
+});
