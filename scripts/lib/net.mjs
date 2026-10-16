@@ -165,6 +165,39 @@ const SECRET_SHAPES = [
 // alone (closing sweep F34-5). One matcher reads them all, so the value that follows is read
 // exactly as it is behind the ASCII colon.
 //
+// THE COLON-SHAPED CLASS IS READ WHOLE (Batch 83; final verification F35-E). The verification named
+// four further spellings; Batch 81 read three of them (U+02D0, U+FE13, U+A789), and the fourth --
+// the Hebrew punctuation SOF PASUQ U+05C3 -- was still read by nothing, so a credential behind it was
+// published byte for byte on both entry points (measured at e3f2fcf: 'authorization' + U+05C3 +
+// ' tok_...' came back unchanged). Batch 83 reads it, and closes the rest of the same class rather
+// than leaving it one character over again: every Basic-Multilingual-Plane character whose Unicode
+// NAME carries COLON, of a category a surface writes (punctuation, symbol, modifier letter), except
+// the ones named SEMICOLON and the currency sign -- the half triangular colon U+02D1, the raised
+// colon U+02F8, the seven Syriac colons U+0703-U+0709, the Ethiopic colon U+1365 and preface colon
+// U+1366, the Mongolian colon U+1804, the tricolon U+205D, the mathematical colons U+2254, U+2255,
+// U+2982, U+2A74 and U+2AF6, the APL quad colon U+2360, and the Bamum colon U+A6F4. The class is
+// anchored immediately after the header NAME in every spelling of that name, so what widens is only
+// the text a surface that has already spelled 'authorization' can hand over, and the widening is
+// measured in both directions: the differential of the pre-batch module and this one over every line
+// of every tracked text file changes 0 lines, and a credential behind each new spelling goes while
+// ordinary prose that merely carries the character anywhere else is byte-identical on both entry
+// points.
+//
+// WHAT IS DELIBERATELY NOT THIS SEPARATOR (recorded, and pinned by the suite). A SEMICOLON is not a
+// colon: the ASCII ';', the Arabic U+061B, the Ethiopic U+1364, the reversed U+204F, the turned
+// U+2E35, the vertical U+FE14, the small U+FE54, the fullwidth U+FF1B, the Bamum U+A6F6 and the
+// semicolon underbar U+236E stay unread, exactly as the ASCII ';' always has -- the semicolon is the
+// attribute list's own separator INSIDE a value (AUTH_SEPARATED_ATOM), not the mark a header name is
+// joined to its value by. The colon sign U+20A1 is a currency sign rather than punctuation, and the
+// TAG COLON U+E003A is a deprecated format character. The dot-shaped marks U+00B7, U+0387, U+1803,
+// U+2027, U+2E31 and U+1F16B are full stops and marks rather than colons; reading those would make
+// the class 'any punctuation' and put ordinary prose at risk for no spelling a surface writes a
+// header with. A colon-named SUPPLEMENTARY-plane character (U+10781, U+10782, U+12471 to U+12474,
+// U+1DA8A) is not read either, because this module's matchers are not Unicode-flagged and a
+// non-flagged class would carry their surrogate halves rather than the characters. Every excluded
+// spelling is measured: 'authorization' + the character + ' tok_...' is published for each of them,
+// unchanged since ded9b8c.
+//
 // THE NUMERIC REFERENCE NEEDS NO SEMICOLON (Batch 81; closing sweep F35-6). HTML resolves '&#58'
 // -- a numeric character reference whose semicolon is missing is a parse error the spec still
 // resolves -- so an undecoded surface can hand over a colon spelled that way and every reader of
@@ -174,7 +207,7 @@ const SECRET_SHAPES = [
 // separator and is not read as one. The NAMED reference without its semicolon ('&colon') is still
 // not read, and deliberately: HTML resolves no named reference without a semicolon unless it is in
 // its legacy list, and 'colon' is not. Pinned in the suite as a bound.
-const AUTH_COLON = '(?:[:\uFF1A\uFE55\u2236\uFE13\uA789\u02D0\u205A\u0589\u1361]|&#0*58(?![0-9]);?|&#[xX]0*3[aA](?![0-9a-fA-F]);?|&colon;)';
+const AUTH_COLON = '(?:[:\uFF1A\uFE55\u2236\uFE13\uA789\u02D0\u205A\u0589\u1361\u05C3\u02D1\u02F8\u0703\u0704\u0705\u0706\u0707\u0708\u0709\u1365\u1366\u1804\u205D\u2254\u2255\u2360\u2982\u2A74\u2AF6\uA6F4]|&#0*58(?![0-9]);?|&#[xX]0*3[aA](?![0-9a-fA-F]);?|&colon;)';
 // The NAME's own letters, in the two spellings a surface can hand over: the letter itself, or the
 // character reference that spells it (decimal or hexadecimal, either case, any number of leading
 // zeros). Closing sweep F34-5: 'authoriz&#97;tion:' was read by nothing, because every matcher
