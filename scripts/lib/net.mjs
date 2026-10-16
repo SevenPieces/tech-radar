@@ -113,20 +113,50 @@ const SECRET_SHAPES = [
 // so a bare quoted value never matched at all and was published byte for byte at every cap
 // ('authorization: "tok_..."', "authorization: 'tok_...'", the real 'authorization: "Bearer <token>"'
 // and an AWS SigV4 'authorization: "AWS4-HMAC-SHA256 Credential=..., Signature=..."'). The quoted
-// alternative is read as ONE token, and it is the QUOTED form that is refused or consumed -- the
+// alternatives are read as ONE token, and it is the QUOTED form that is refused or consumed -- the
 // value inside the quotes is what the refusal tests, so a quoted URL keeps its userinfo removal and
 // the notice's own 'request failed for ...' seam still publishes. Prose that merely carries a quote
 // in a sentence is untouched, because this rule only starts after an authorization header keyword:
 // measured, 'the release said "the architecture is documented" in the notes' is returned byte for
-// byte. The unquoted alternative stays first so the first-quoted-token case it already consumed
-// ('oauth_consumer_key="abc"' inside an attribute list) is read exactly as before.
-const AUTHORIZATION_SHAPE = /(?<!\/)\b(?:proxy-)?authorization\s*:\s*(?:"[^"]*"|'[^']*'|[^\s,;"']+)(?![\s,;"']\s)/gi;
+// byte.
+//
+// Batch 56 (sweep F30-2, Med; sweep F30-3b, Low). Three things the Batch 54 spelling did not read:
+//   - the trailing lookahead '(?![\s,;"']\s)' stood OUTSIDE the alternation, so it applied to the
+//     quoted alternatives too. A quoted alternative cannot backtrack INSIDE its quotes, so when the
+//     closing quote was followed by a separator and whitespace or by two whitespace characters
+//     ('", more', '"; more', two spaces, a tab indent, a CRLF, two no-break spaces) the lookahead
+//     failed and the regex found NO match at all - the common shape in the text these rules read (a
+//     wrapped log line, an indented list). The lookahead is now part of the BARE alternative alone,
+//     where it can still backtrack to a shorter token, and the quoted alternatives are followed by
+//     whatever they are followed by: a separator, whitespace, or the end of the text.
+//   - an escaped quote inside the value ('authorization: "tok\"TOKEN"') ended the quoted run at the
+//     escape, and the rest of the value was published. The quoted alternatives read a backslash
+//     and the character after it as one character of the value, so the whole run is one token.
+//   - a quoted run with no closing quote ('authorization: "TOKEN') is read DELIBERATELY now: it runs
+//     to the end of the text and is consumed like any other header value. The alternative reading -
+//     leave an unterminated quote where it stands - publishes the credential, and the two things a
+//     notice's own diagnosis needs are protected before this rule ever sees them: a scaffold span
+//     inside the match is kept byte for byte by the branch in redactAuthorizationShapes, and a value
+//     that begins 'request failed' is refused below. The last-resort alternatives are therefore after
+//     the closed ones, so a value that does close is read as the closed token it is.
+const AUTH_QUOTED_VALUE = '(?:"(?:[^"\\\\]|\\\\.)*"|\'(?:[^\'\\\\]|\\\\.)*\'|"(?:[^"\\\\]|\\\\.)*|\'(?:[^\'\\\\]|\\\\.)*)';
+const AUTH_BARE_VALUE = '[^\\s,;"\']+(?![\\s,;"\']\\s)';
+const AUTHORIZATION_SHAPE = new RegExp(
+  '((?<!\\/)\\b(?:proxy-)?authorization\\s*:\\s*)(' + AUTH_QUOTED_VALUE + '|' + AUTH_BARE_VALUE + ')',
+  'gi',
+);
 
-// The two refusals above, read from the text after the colon before the match is made, so that the
-// quoted and the unquoted spelling of the same header value are refused by one rule: a header value
-// may be quoted or not ('"https://user:pw@host/path"' is the same value as the bare spelling), and
-// the earlier lookahead read only the bare spelling - which is why a quoted credential was never
-// read at all while a quoted URL had to be refused. The text is read with its surrounding quotes
+// The two refusals above, read from the text after the HEADER'S OWN COLON before the match is made,
+// so that the quoted and the unquoted spelling of the same header value are refused by one rule: a
+// header value may be quoted or not ('"https://user:pw@host/path"' is the same value as the bare
+// spelling), and the earlier lookahead read only the bare spelling - which is why a quoted
+// credential was never read at all while a quoted URL had to be refused. The colon is the one the
+// keyword carries, not the match's last one (sweep F30-3b): the match is the keyword AND the value,
+// so reading from 'match[0].lastIndexOf(':')' moved the read whenever the value itself carried a
+// colon - 'authorization: "note: request failed TOKEN"' was read from ' request failed TOKEN"' and
+// refused whole (publishing the credential), while 'authorization: "https://a.example:8443/x"' was
+// read from '8443/x"' and consumed (the assembly's own seam, which is refused when it is read
+// whole). The text is read with its surrounding quotes
 // peeled, which is how the shaper's own transport seam is recognised:
 //   - a URL that carries no userinfo is the assembly's own seam beside a request ('authorization:
 //     https://a.example/x') and has no credential to remove, so it is left where it stands; a URL
@@ -167,31 +197,49 @@ const NEXT_AUTH_TOKEN = new RegExp('^\\s+(' + AUTH_TOKEN_CHARS + ')');
 // ('OAuth oauth_consumer_key="abc", oauth_token="SECRETTOKEN123"' -> '[redacted]"abc",
 // oauth_token="SECRETTOKEN123"'; sweep F28-4).
 const AUTH_VALUE_TAIL = /^(?:\s*"[^"]*"|\s*'[^']*'|\s*,\s*(?:[^\s,;"']+|"[^"]*"|'[^']*'))*/;
+// The scaffold branch below: a match that carries a scaffold span is not a header value to consume
+// whole, and it is not raw text to publish whole either - the two halves of one value have to part
+// company (sweep F30-3). The span is the module's own diagnosis and is kept byte for byte; every
+// OTHER run of the same value is read as a token, and only a token that is credential-shaped - the
+// module's own definition, a digit-bearing run of at least MIN_SECRET_CHARS characters - is
+// consumed. That is what keeps '"HTTP 503"' whole (the only non-scaffold runs in it are the two
+// quote characters, which carry no credential) while '"HTTP 503 tok_9f3a2c7d1e5b"' gives up the
+// credential and keeps the status.
+const AUTH_VALUE_TOKEN_RE = /[^\s,;"']+/g;
+function consumeCredentialShapedTokens(text) {
+  return String(text).replace(AUTH_VALUE_TOKEN_RE, (token) => {
+    if (token.includes(SCAFFOLD_PLACEHOLDER)) return token;
+    return credentialShapedToken(token) ? REDACTION_SENTINEL : token;
+  });
+}
 function redactAuthorizationShapes(text) {
   const source = String(text);
   let out = '';
   let at = 0;
   for (const match of source.matchAll(AUTHORIZATION_SHAPE)) {
-    // A match whose token is (or contains) the scaffold placeholder is the notice's OWN diagnosis,
-    // masked by protectScaffold, and never a header value: the placeholder is written by this module
+    // A match whose value carries the scaffold placeholder is the notice's OWN diagnosis, masked by
+    // protectScaffold, and never a header value to consume: the placeholder is written by this module
     // and normalised out of every input and every value, so the only text that can carry one is a
-    // span protectScaffold wrote. Consuming it deleted the HTTP status from every notice whose
-    // source label ends in the bare word 'authorization' (verification F28-3). The match is left
-    // exactly where it stands, and the span is restored at the end of the pass as any other is.
-    // A quoted value is read as its own content for this test as well: a span protectScaffold wrote
-    // could in principle sit inside the quotes beside the keyword, and the scaffold's own text must
-    // survive wherever it stands. The quotes themselves are scaffold text too, so a match whose whole
-    // value is quoted is skipped on the content alone - the same rule, read one level in.
-    const matchedValue = match[0].slice(match[0].lastIndexOf(':') + 1).trim();
-    const quoted = matchedValue.length >= 2
-      && ((matchedValue.startsWith('"') && matchedValue.endsWith('"'))
-        || (matchedValue.startsWith("'") && matchedValue.endsWith("'")));
-    const valueText = quoted ? matchedValue.slice(1, -1) : matchedValue;
-    if (valueText.includes(SCAFFOLD_PLACEHOLDER)) continue;
-    // The two refusals read the text after the colon WHOLE, not the matched token: the transport seam
-    // is the two-word phrase 'request failed', and a refusal that saw only its first word consumed
-    // that word and left '[redacted] failed for ...' where the notice's own wording belongs.
-    if (authorizationValueRefused(source.slice(match.index + match[0].lastIndexOf(':') + 1))) continue;
+    // span protectScaffold wrote. Consuming it whole deleted the HTTP status from every notice whose
+    // source label ends in the bare word 'authorization' (verification F28-3), and skipping the WHOLE
+    // match published a credential standing beside the span ('authorization: "HTTP 503 tok_..."';
+    // sweep F30-3). The two readings are reconciled here: the span is kept byte for byte and every
+    // other credential-shaped token of the match is consumed, so a match whose value is only the span
+    // ('authorization: <HTTP 503>') comes back byte-identical, and a value that carries both keeps
+    // the diagnosis and gives up the credential. The span is restored at the end of the pass as any
+    // other is.
+    const headerText = match[1];
+    const matchedValue = match[2];
+    if (matchedValue.includes(SCAFFOLD_PLACEHOLDER)) {
+      out += source.slice(at, match.index) + consumeCredentialShapedTokens(match[0]);
+      at = match.index + match[0].length;
+      continue;
+    }
+    // The two refusals read the text after the header's own colon WHOLE, not the matched token: the
+    // transport seam is the two-word phrase 'request failed', and a refusal that saw only its first
+    // word consumed that word and left '[redacted] failed for ...' where the notice's own wording
+    // belongs.
+    if (authorizationValueRefused(source.slice(match.index + headerText.length))) continue;
     const first = matchedValue;
     const next = NEXT_AUTH_TOKEN.exec(source.slice(match.index + match[0].length));
     const consumeSecond = next !== null

@@ -132,18 +132,149 @@ test('sweep F29-3 a bare quoted authorization value is removed, single or double
     'a URL with no userinfo inside quotes was consumed');
 });
 
-test('sweep F29-3 ordinary quoted prose survives where the header shape is absent', () => {
+// Batch 56 (sweep F30-3, Low) corrected this test's own stated reason. The three prose rows do
+// survive because the header shape is absent, but the two rows that carry the header keyword did
+// not: 'xauthorization: "tok_9f3a2c7d1e5b"' survives because the keyword has no word boundary in
+// front of it, and 'authorization: "HTTP 503"' survived because the scaffold placeholder for the
+// status stood inside the value and the rule skipped the WHOLE match. That skip is what published
+// 'authorization: "HTTP 503 tok_9f3a2c7d1e5b"' byte for byte, so the fixture was passing for the
+// reason the comment denied and could not catch the leak beside it. The correction: the rows are
+// kept (each still survives, byte for byte) and the reason for each is stated, and the leak the
+// old rationale hid is asserted in the new test below.
+test('sweep F29-3 ordinary quoted prose survives, and the two header-shaped rows for their own reasons', () => {
   for (const text of [
+    // No header shape at all: the rule never starts.
     'the release said "the architecture is documented" in the notes',
     "he said 'hello world' loudly",
     'quote before: "the archived releases were moved"',
     'a "quoted" word and a plain one',
-    'authorization: "HTTP 503"',
+    // The keyword is there but has no word boundary in front of it, so the rule still never starts.
     'xauthorization: "tok_9f3a2c7d1e5b"',
+    // The keyword IS there: this row survives because the value holds only the scaffold span the
+    // module wrote for the status ('HTTP 503') and two quote characters, and neither carries a
+    // credential-shaped token. It is NOT a row about the shape being absent.
+    'authorization: "HTTP 503"',
   ]) {
     assert.equal(redactSecrets(text, []), text,
-      'ordinary quoted prose was rewritten: ' + JSON.stringify(text) + ' -> '
+      'a quoted-prose row was rewritten: ' + JSON.stringify(text) + ' -> '
       + JSON.stringify(redactSecrets(text, [])));
+  }
+});
+
+// Batch 56 (sweep F30-2, Med; sweep F30-3b, Low; sweep F30-3, Low). The Batch 54 quoted-value rule
+// read only the ONE spelling the sweep measured it against: a quoted value with nothing after the
+// closing quote. The trailing lookahead was outside the alternation, so it applied to the quoted
+// alternatives too, and a quoted alternative cannot backtrack inside its quotes - one separator and
+// one space after the closing quote, or two whitespace characters, and the regex found no match at
+// all. The escaped quote ended the run early, the refusal read the match's LAST colon instead of the
+// header's own, and a scaffold span inside the value skipped the whole match.
+test('sweep F30-2 a quoted value is one token however it is followed', () => {
+  const VALUE = 'tok_9f3a2c7d1e5b';
+  const cases = [
+    'authorization: "' + VALUE + '", more',      // a separator and a space
+    'authorization: "' + VALUE + '"; more',      // the other separator and a space
+    'authorization: "' + VALUE + '"  more',      // two spaces
+    'authorization: "' + VALUE + '"\n\nmore',  // a blank line
+    'authorization: "' + VALUE + '"\r\nmore',  // one CRLF terminator
+    'authorization: "' + VALUE + '"\t\tmore',  // a tab indent
+    'authorization: "' + VALUE + '"\u00a0\u00a0more', // two no-break spaces
+    'authorization: "' + VALUE + '", realm=example',    // a trailing attribute
+    'authorization: "' + VALUE + "'",    // a mismatched closing delimiter
+  ];
+  for (const text of cases) {
+    const out = redactSecrets(text, []);
+    assert.ok(!out.includes(VALUE),
+      'the quoted header value survived: ' + JSON.stringify(text) + ' -> ' + JSON.stringify(out));
+    assert.equal(redactSecrets(out, []), out,
+      'the quoted-value rewrite is not a fixed point: ' + JSON.stringify(out));
+  }
+});
+
+test('sweep F30-2 an escaped quote inside the value does not end the run', () => {
+  const VALUE = 'tok_9f3a2c7d1e5b';
+  const out = redactSecrets('authorization: "tok\\"' + VALUE + '"', []);
+  assert.equal(out, '[redacted]',
+    'the escaped quote ended the quoted run early and published the rest: ' + JSON.stringify(out));
+});
+
+test('sweep F30-2 an unterminated quote runs to the end of the text and is consumed', () => {
+  // The decision is deliberate and is stated here: a header value that opens a quote and never
+  // closes it is read as a value to the end of the text. The alternative - leave it where it stands
+  // - publishes the credential, and the two things a notice's own diagnosis needs are protected
+  // before the rule reads the text: a scaffold span inside the match is kept byte for byte, and a
+  // value that begins 'request failed' is refused. Both halves are asserted below, so the decision
+  // cannot be reversed without failing this file.
+  const VALUE = 'tok_9f3a2c7d1e5b';
+  for (const text of ['authorization: "' + VALUE, "authorization: '" + VALUE]) {
+    const out = redactSecrets(text, []);
+    assert.ok(!out.includes(VALUE),
+      'the unterminated quoted value survived: ' + JSON.stringify(text) + ' -> ' + JSON.stringify(out));
+  }
+  const seam = 'rss https://a.example/authorization: request failed for x';
+  assert.equal(redactSecrets(seam, []), seam, 'the transport seam was consumed: ' + JSON.stringify(redactSecrets(seam, [])));
+});
+
+test('sweep F30-3 the scaffold span survives and the credential beside it does not', () => {
+  const VALUE = 'tok_9f3a2c7d1e5b';
+  for (const [text, expected] of [
+    ['authorization: "HTTP 503 ' + VALUE + '"', 'authorization: "HTTP 503 [redacted]"'],
+    ['authorization: "HTTP 503 for ' + VALUE + '"', 'authorization: "HTTP 503 for [redacted]"'],
+    ['authorization: "ok HTTP 503"', 'authorization: "ok HTTP 503"'],
+    ['authorization: "HTTP 503"', 'authorization: "HTTP 503"'],
+  ]) {
+    const out = redactSecrets(text, []);
+    assert.equal(out, expected,
+      'the scaffold span and the credential did not part company: ' + JSON.stringify(text) + ' -> ' + JSON.stringify(out));
+    assert.equal(redactSecrets(out, []), out,
+      'the scaffold rewrite is not a fixed point: ' + JSON.stringify(out));
+  }
+});
+
+test('sweep F30-3b the refusal reads the value from the header\'s own colon', () => {
+  const VALUE = 'tok_9f3a2c7d1e5b';
+  // Direction 1 (disclosure): a colon inside the value used to move the read into the value's own
+  // words, so a value that happened to carry 'request failed' after its last colon was refused whole
+  // and the credential was published.
+  for (const text of [
+    'authorization: "note: request failed ' + VALUE + '"',
+    'authorization: "x: request failed ' + VALUE + '"',
+  ]) {
+    const out = redactSecrets(text, []);
+    assert.ok(!out.includes(VALUE),
+      'a colon inside the value moved the refusal read: ' + JSON.stringify(text) + ' -> ' + JSON.stringify(out));
+  }
+  // Direction 2 (over-redaction): the assembly's own seam is a URL with no userinfo, and a seam
+  // target that carries a port or a colon in its query was consumed while the read was the match's
+  // last colon. Read from the header's own colon it is refused, like every other URL with no
+  // userinfo in it.
+  for (const text of [
+    'authorization: "https://a.example:8443/x"',
+    'authorization: "https://a.example/x?t=1:2"',
+    'authorization: https://a.example/x?t=1:2',
+  ]) {
+    assert.equal(redactSecrets(text, []), text,
+      'the assembly\'s own seam URL was consumed: ' + JSON.stringify(redactSecrets(text, [])));
+  }
+});
+
+// Recorded residues of the same rule, measured at Batch 56 and left standing: a value that NESTS
+// its quotes, a quoted value behind a bare attribute, and an unbalanced single quote (an apostrophe
+// inside the value) are still published at this module surface. They are pre-existing (identical at
+// aabc3dd, b2a7dc9 and 6ee1f64, before Batch 54 read a quoted value at all), Batch 54 and Batch 56
+// both narrowed the class, and the shipped collectors never hand this rule a detail carrying one
+// (an upstream body does not reach a notice; only query values and userinfo do, and those are
+// collected by value). Asserted so a later change that closes them is a deliberate one, and so
+// nobody mistakes the class for closed.
+test('sweep F30-2 recorded residues: nested quotes, a leading attribute, an unbalanced single quote', () => {
+  const VALUE = 'tok_9f3a2c7d1e5b';
+  const residues = [
+    'authorization: "pre "' + VALUE + '" post"',
+    'authorization: realm=example, "' + VALUE + '"',
+    "authorization: 'user's " + VALUE + "'",
+  ];
+  for (const text of residues) {
+    assert.ok(redactSecrets(text, []).includes(VALUE),
+      'a recorded residue was closed, so this record is stale: ' + JSON.stringify(redactSecrets(text, [])));
   }
 });
 
