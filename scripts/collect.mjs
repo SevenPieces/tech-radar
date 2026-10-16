@@ -541,7 +541,11 @@ export function assembleNotice(source, detail, secrets, limit) {
     // while it is a contiguous run of that redaction.
     const room = Math.max(0, cap - NOTICE_SEPARATOR_CHARS - repriced.length);
     if (room === 0) return join(repriced.slice(0, cap));
-    const line = head.slice(0, Math.min(head.length, room)) + NOTICE_SEPARATOR + repriced;
+    // The head is a slice of the WHOLE line, never the head's own pass: 'head' is a different
+    // text from 'whole' whenever a rule read across the ': ' seam or a value spanned it, and a
+    // slice of it can carry a byte the whole-line pass removed (the F27-5 class). 'whole' is
+    // always long enough -- it starts with the whole of head0 and the redaction only removes.
+    const line = whole.slice(0, Math.min(whole.length, room)) + NOTICE_SEPARATOR + repriced;
     return join(line.length <= cap ? line : repriced.slice(0, cap));
   }
   return join(boundedNotice(whole, head, tail, cap, labelRoom));
