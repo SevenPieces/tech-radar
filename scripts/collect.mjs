@@ -213,7 +213,9 @@ function requireNoticeLimit(value) {
 // of two callers rather than of the boundary. The '<' opens the tag, so replacing exactly it
 // ends the markup while the rest of the span stays legible, and only a span the shape rule
 // reads is touched: a legitimate server message that says 'a < b' or 'see <id>' is returned
-// byte-identical. The encoded spelling of the same opener is the second half of the class: a
+// byte-identical, and so is an unterminated opener ('<script' cut off by a bound), because the
+// rule's shape ends at the '>' that closes the span and an opener that has none draws no markup
+// in the readers a notice is published to (net.mjs states the same contract, TR-171). The encoded spelling of the same opener is the second half of the class: a
 // notice is never decoded, so '&lt;a href=...&gt;' was published as the anchor it spells.
 // neutraliseEntityTags refuses that spelling before the literal rule runs, and both rules are
 // the ones the candidate normaliser draws too, so the two boundaries cannot drift apart

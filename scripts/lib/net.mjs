@@ -827,13 +827,20 @@ export function neutraliseUrl(url) {
 
 // The tag shape itself, as one rule with one contract: a '<' that opens a markup tag has a tag
 // name or a closer slash or a declaration marker immediately after it, so '<a href=x>', '</a>',
-// '<img src=x>' and '<!DOCTYPE html>' are tag-shaped while an ordinary comparison is not. The
-// name may run on to any '>' on the same span, which is what makes the rule reach the tags that
-// carry no '>' of their own ('<script' cut off by a length bound or a hostile body). One rule is
-// shared because the same text crosses two boundaries -- a candidate field and the notice push --
-// and a second spelling of the shape would let one boundary drift from the other (TR-122). Every
-// span is read, not the first: a message carrying a live anchor and a live closer after it is a
-// message carrying two tags, and the second one is markup whether or not the first was.
+// '<img src=x>' and '<!DOCTYPE html>' are tag-shaped while an ordinary comparison is not. Every
+// alternative also ends with the '>' that closes the span, so the rule reaches exactly the tags
+// that carry one. Measured: '<script', '<img' and '<a href=x' -- an opener cut off by a length
+// bound or by a hostile body -- come back byte-identical, as does a bare '<foo>' whose name is
+// not in the markup vocabulary below. The gap is inert rather than papered over: a Markdown
+// reader draws no markup from an unterminated opener, and the renderer escapes '&', '<' and '>'
+// on the way out (scripts/render-html.mjs), so the byte reaches a reader as the text it is. The
+// rule is not widened to cover that spelling, because the same alternation is what keeps the
+// ordinary comparisons byte-identical: 'a < b' and 'see <id>' have to stay as they are, and an
+// opener with no '>' of its own cannot be told from them. One rule is shared because the same
+// text crosses two boundaries -- a candidate field and the notice push -- and a second spelling
+// of the shape would let one boundary drift from the other (TR-122). Every span is read, not the
+// first: a message carrying a live anchor and a live closer after it is a message carrying two
+// tags, and the second one is markup whether or not the first was.
 const TAG_SHAPE = '<\\/[A-Za-z][\\w:.-]*\\s*>|<![^<>]*>|<[A-Za-z][\\w:.-]*[^<>]*>';
 export const TAG_SPAN = new RegExp(TAG_SHAPE);
 const TAG_SPANS = new RegExp(TAG_SHAPE, 'g');
