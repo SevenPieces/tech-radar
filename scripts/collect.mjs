@@ -1715,11 +1715,14 @@ export async function collectAll(config, opts) {
   // ordinary configured value under one of them ('?state=archived', '?status=releases') put an
   // ordinary word into this union and the pass below rewrote a feed's published prose with it
   // ('the archived releases' became 'the [redacted] releases'). The two questions are asked apart
-  // now (net.mjs isCredentialBearingName / credentialShapedValue): a value reaches this set when
-  // the name is genuinely credential-bearing, or when the value is itself credential-shaped, so a
-  // token-named position that really carries a credential is still removed here while an ordinary
-  // value under an ordinary token name - and under an ordinary compound of one, '?state-of-the-art='
-  // - never rewrites a published word. The per-source pass above stays as it is.
+  // now (net.mjs isCredentialBearingName): a value reaches this set exactly when the NAME is
+  // genuinely credential-bearing, so an ordinary value under an ordinary token name - and under an
+  // ordinary compound of one, '?state-of-the-art=' - never rewrites a published word, at any length
+  // (Batch 53 deleted the value-shape half and its twelve-character threshold, which reaped the
+  // ordinary words 'configuration', 'documentation' and 'architecture' while publishing an 8-11
+  // character lower-case credential; the measurement is in net.mjs). The per-source pass above stays
+  // as it is, and a token-named value is still removed from every notice, because it stays in the
+  // notice set - only the candidate set was ever the question here.
   const redactedCandidates = candidates.map((candidate) => {
     const out = { ...candidate };
     for (const [field, value] of Object.entries(out)) {

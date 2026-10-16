@@ -11,25 +11,40 @@
 // rewrote the published prose of an unrelated source: 'the archived releases' became 'the
 // [redacted] releases'. That is the exact class TR-110 closed, reopened.
 //
-// The two questions are asked apart now: a name is credential-BEARING when a genuinely
-// credential-bearing spelling (a stem, or a fused session/CSRF spelling) spells it, and a value
-// under a token-only name is a candidate value only when the value is itself credential-shaped.
-// Batch 51 widened the second half of that predicate, and this paragraph is corrected with it: a
-// value is credential-shaped when it carries a digit, a capital or a non-alphanumeric, non-space
-// character OR when it is a pure lower-case word of at least twelve characters. The mark alone
-// published a pure lower-case credential ('?state=abcdefghijklmnop', '?status=openssltoken',
-// '?authorization=lowercaseonlysecret') in the candidate pool while the same value under
-// '?token=' was redacted end to end; the length reading and its measured threshold are stated in
-// scripts/lib/net.mjs and pinned at both boundaries at the end of this file. The notice set is
-// unchanged: every credential position still collects from three characters up.
+// The two questions are asked apart, and Batch 53 finished the split: a name is credential-BEARING
+// when a genuinely credential-bearing spelling (a stem, or a fused session/CSRF spelling) spells it,
+// and the candidate half of the rule asks that question of the NAME ALONE. A token-only name is
+// therefore not a candidate position at all - not for any value, at any length, in any shape.
+//
+// Batch 46 had made the value's own shape the second question (a digit, a capital or a
+// non-alphanumeric, non-space mark) and Batch 51 added a length reading to it (a pure lower-case
+// word of at least twelve characters). Two independent verification passes measured that gate
+// failing in BOTH directions on the shipped paths: '?state=abcdefghijk' (11, no mark) was published
+// in the candidate pool while the identical value under '?token=' was redacted, and
+// '?state=configuration', '?state=documentation', '?state=architecture' and
+// '?status=infrastructure' are ordinary English words of twelve or more characters with no mark
+// either, so an ordinary configured value reaped a feed's published prose ('[redacted] drift in the
+// podspec is a common failure'), including through the ordinary compounds '?mac-address=',
+// '?x-state=' and '?state-of-the-art='. The gate and its threshold were deleted rather than
+// re-tuned, because no threshold separates a random short token from a short English word.
+//
+// **This is a deliberate residual, and it is recorded here as one.** A credential standing under a
+// TOKEN-ONLY name is not candidate-protected: an answer that echoes it publishes it in the pool
+// fields, and the tests at the end of this file assert exactly that instead of asserting the
+// protection that does not exist. The trade is TR-110's: 'a value that is ordinary configuration is
+// not a credential and never rewrites published prose' (scripts/collect.mjs), and over-redaction of
+// the published digest is the worse failure. The notice surface is unchanged - every credential
+// position, token-only names included, still collects from three characters up, so a notice that
+// quotes the run's own request still redacts the value - and the shipped config/watchlist.md carries
+// no query parameter on any of its 93 rows, so the shipped configuration cannot reach the residual
+// at all.
 //
 // The F27-1 (High) closure rests on the other half: a name that is credential-bearing by its own
 // spelling ('password', 'token', 'clientid', 'sessionid', ...) is collected for BOTH sets whatever
-// its value spells, and a token-named position whose value really is a credential is collected for
-// both as well.
+// its value spells, at every length and in every shape.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { hostOf, isDiscoveryOnly, requestSecretSets, requestSecrets } from '../scripts/lib/net.mjs';
+import { hostOf, isDiscoveryOnly, redactSecrets, requestSecretSets, requestSecrets } from '../scripts/lib/net.mjs';
 import { collectAll } from '../scripts/collect.mjs';
 
 const WINDOW = { since: '2026-09-16T00:00:00Z', until: '2026-09-23T00:00:00Z' };
@@ -91,14 +106,27 @@ test('F27-1 a genuinely credential-bearing name keeps both sets whatever its val
   }
 });
 
-test('F27-1 a credential-shaped value under a token name keeps both sets, end to end', async () => {
+// Batch 53 correction. This test asserted that a credential-SHAPED value (a digit, a capital, a
+// separator) under a token-only name keeps both sets. That expectation is the shape half of the
+// gate Batch 46/51 built, and the shipped rule does not have it any more: eligibility is decided by
+// the name, and a token-only name is not credential-bearing. The value's shape changes nothing
+// either way, which is the point - the shape is exactly what could not separate a short random
+// token from a short English word. What the test now pins is the residual itself, in contrast with
+// the credential-bearing name beside it.
+test('F27-1 residual: no value under a token-only name is candidate-protected, in any shape', async () => {
   for (const name of ['state', 'status', 'uuid', 'authorization']) {
     const value = 'Q7x2K9fLmZq4';
+    const sets = requestSecretSets('https://feeds.example/x?' + name + '=' + value, {});
+    assert.ok(sets.all.includes(value),
+      '?' + name + '= left the notice set: ' + JSON.stringify(sets));
+    assert.deepEqual(sets.credentials, [],
+      '?' + name + '= entered the candidate set: ' + JSON.stringify(sets));
     const title = await poolTitle('https://feeds.example/feed.xml?' + name + '=' + value,
       'the server echoed ' + value + ' back');
-    assert.ok(!title.includes(value),
-      'the credential-shaped value under ?' + name + '= reached the pool: ' + JSON.stringify(title));
+    assert.ok(title.includes(value),
+      'the recorded residual changed: ?' + name + '= is candidate-protected after all: ' + JSON.stringify(title));
   }
+  // The contrast, unchanged: the same shape under a credential-BEARING name is removed end to end.
   const plain = await poolTitle('https://feeds.example/feed.xml?token=PLAINTEXTpw',
     'the server echoed PLAINTEXTpw back');
   assert.ok(!plain.includes('PLAINTEXTpw'),
@@ -126,8 +154,12 @@ test('F28-5 an ordinary compound of a token name does not rewrite candidate pros
       'The landscape of Rust in 2026');
     assert.equal(title, 'The landscape of Rust in 2026',
       '?' + name + '= rewrote published prose: ' + JSON.stringify(title));
-    assert.ok(requestSecretSets('https://feeds.example/x?' + name + '=Q7x2K9fLmZq4', {}).credentials
-      .includes('Q7x2K9fLmZq4'), '?' + name + '= lost its credential-shaped value');
+    // Batch 53 correction: the candidate half belongs to the NAME, so a compound of a token-only
+    // name is not a candidate position for a credential-shaped value either - the shape no longer
+    // decides anything. The corrected expectation is the whole token-only rule: no candidate value,
+    // whatever it spells, while the name stays a notice position.
+    assert.deepEqual(requestSecretSets('https://feeds.example/x?' + name + '=Q7x2K9fLmZq4', {}).credentials,
+      [], '?' + name + '= became a candidate position after all');
   }
 });
 
@@ -172,24 +204,25 @@ test('F28-6 a credential-shaped value under a fused name is kept out of the pool
 
 
 // ---------------------------------------------------------------------------------------
-// Batch 51: the boundary the shape test's second reading stands on. The mark alone (a digit, a
-// capital, a non-alphanumeric) missed a PURE LOWER-CASE credential: '?state=abcdefghijklmnop',
-// '?status=openssltoken' and '?authorization=lowercaseonlysecret' were published in the candidate
-// pool while the same value under '?token=' was redacted end to end. The predicate now also reads
-// LENGTH, and the threshold is measured rather than chosen: every ordinary pure lower-case value
-// under a token-only name in the suite, the sweeps and the TR-110/TR-116 controls is at most ten
-// characters ('archived' 8, 'releases' 8, 'required' 8, 'landscape' 9, 'identifier' 10,
-// 'descending' 10), while the credentials the residual names are 12, 16 and 19. Twelve is
-// therefore the first length at which no ordinary value was observed, and the value must also be a
-// single lower-case word: a 12+ character PHRASE carries spaces and is not a credential.
+// Batch 53: the token-only rule at every length and in every shape, both directions.
+//
+// Batch 46 made the value's shape the second half of the candidate gate and Batch 51 added a
+// twelve-character length reading to it. Both halves are gone: the candidate half asks the NAME
+// question alone, so a token-only name contributes no candidate value at all. The two tests below
+// replace the length-boundary pair that pinned the deleted threshold - the ordinary side, which the
+// threshold got right, and the credential side, which it got wrong and which is now the recorded
+// residual rather than a protection.
 const TOKEN_NAMES = ['st', 'state', 'status', 'sid', 'sso', 'mac', 'hash', 'uuid', 'authorization'];
 
-test('F28-1 residual: the ordinary side of the length boundary stays out of the candidate set', () => {
-  // The measured ordinary values, plus the eleven-character English words a parameter may
-  // legitimately carry. None of them may rewrite published prose.
+test('F28-1: no ordinary value, at any length, enters the candidate set under a token-only name', () => {
+  // The values the threshold's own evidence named, the twelve-plus-character English words that
+  // proved the threshold wrong in the over-redaction direction, and a phrase. None of them may
+  // rewrite published prose, and none may enter the candidate set under any token-only name.
   const ordinary = [
     'archived', 'releases', 'required', 'landscape', 'identifier', 'descending',
     'performance', 'environment', 'description', 'temperature', 'unavailable',
+    'architecture', 'introduction', 'configuration', 'documentation', 'infrastructure',
+    'international', 'transmission', 'organisation', 'communication',
     // A phrase is a value a source publishes, never a credential, whatever its length.
     'the archived releases were moved',
   ];
@@ -199,34 +232,54 @@ test('F28-1 residual: the ordinary side of the length boundary stays out of the 
       assert.equal(sets.credentials.includes(value), false,
         '?' + name + '= put the ordinary value ' + JSON.stringify(value) + ' into the candidate set: '
         + JSON.stringify(sets));
+      assert.equal(sets.all.includes(value), true,
+        '?' + name + '= lost the notice position for ' + JSON.stringify(value) + ': '
+        + JSON.stringify(sets));
     }
   }
 });
 
-test('F28-1 residual: a pure lower-case credential crosses the boundary for every token name', () => {
+test('F29-1 the recorded residual: every token name leaves every value out of the candidate set', () => {
+  // 'abcdefghijk' (8-11, no mark) is the window the verification pass filed as F29-1; the three
+  // longer spellings are the ones Batch 51 was written for. All of them are notice positions and
+  // none is a candidate position, which is the trade this file records rather than a protection it
+  // asserts. Corrected from the Batch 51 expectation that the 12+ spellings crossed into both sets.
   for (const name of TOKEN_NAMES) {
-    for (const value of ['abcdefghijkl', 'abcdefghijklmnop', 'openssltoken', 'lowercaseonlysecret']) {
-      assert.ok(value.length >= 12, 'the fixture is not on the credential side: ' + value);
+    for (const value of ['abcdefghijk', 'abcdefghijkl', 'abcdefghijklmnop', 'openssltoken',
+      'lowercaseonlysecret']) {
       const sets = requestSecretSets('https://feeds.example/x?' + name + '=' + value, {});
       assert.ok(sets.all.includes(value),
         '?' + name + '=' + value + ' left the notice set: ' + JSON.stringify(sets));
-      assert.ok(sets.credentials.includes(value),
-        '?' + name + '=' + value + ' left the candidate set: ' + JSON.stringify(sets));
+      assert.deepEqual(sets.credentials, [],
+        '?' + name + '=' + value + ' entered the candidate set: ' + JSON.stringify(sets));
+      // The notice surface still redacts it: the value is a notice position, and a notice that
+      // quotes the run's own request gives it up.
+      const notice = 'rss https://feeds.example/feed.xml: HTTP 503 for https://feeds.example/x?'
+        + name + '=' + value;
+      assert.ok(!redactSecrets(notice, sets.all).includes(value),
+        'the notice echo of ?' + name + '= published the value');
     }
   }
 });
 
-test('F28-1 residual: a pure lower-case credential under a token name reaches no pool field', async () => {
-  for (const [name, value] of [['state', 'abcdefghijklmnop'], ['status', 'openssltoken'],
-    ['authorization', 'lowercaseonlysecret']]) {
+test('F29-1 the residual end to end, and the ordinary prose that must survive byte for byte', async () => {
+  // The recorded residual, measured on the shipped path: a token-named value echoed by an answer is
+  // published in the candidate pool. This is the price of TR-110's rule and it is what the test now
+  // pins; it was previously expected to be redacted.
+  for (const [name, value] of [['state', 'abcdefghijk'], ['state', 'abcdefghijklmnop'],
+    ['status', 'openssltoken'], ['authorization', 'lowercaseonlysecret']]) {
     const title = await poolTitle('https://feeds.example/feed.xml?' + name + '=' + value,
       'the server echoed ' + value + ' back');
-    assert.ok(!title.includes(value),
-      'the lower-case credential of ?' + name + '= reached the pool: ' + JSON.stringify(title));
+    assert.ok(title.includes(value),
+      'the recorded residual changed: ?' + name + '=' + value + ' is candidate-protected: '
+      + JSON.stringify(title));
   }
-  // The ordinary side of the same boundary is published prose and must survive byte for byte.
+  // The over-redaction direction, which is the worse failure TR-110 names, is closed at every
+  // length: the ordinary value is published prose and must survive byte for byte.
   for (const [name, value] of [['state', 'archived'], ['status', 'releases'],
-    ['uuid', 'identifier'], ['state', 'performance']]) {
+    ['uuid', 'identifier'], ['state', 'performance'], ['state', 'configuration'],
+    ['state', 'architecture'], ['status', 'infrastructure'], ['mac-address', 'documentation'],
+    ['x-state', 'architecture'], ['state-of-the-art', 'configuration']]) {
     const text = 'the ' + value + ' list was published';
     const title = await poolTitle('https://feeds.example/feed.xml?' + name + '=' + value, text);
     assert.equal(title, text,

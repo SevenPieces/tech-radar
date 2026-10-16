@@ -293,6 +293,15 @@ function isCredentialName(name) {
 // union, and the candidate pass then rewrote the published prose of an unrelated source
 // ('the archived releases' became 'the [redacted] releases'). That is a regression of exactly the
 // class TR-110 closed, and this is where the two questions come apart (sweep F28-1, Med).
+//
+// This is now the WHOLE of the candidate question: a token-only name is not a candidate position
+// for any value, at any length. Batches 46 and 51 had made the value's own shape the second
+// question and left this one half in force, which published an 8-11 character lower-case credential
+// ('?state=abcdefghijk') while reaping the twelve-character ordinary words that are the same shape;
+// Batch 53 deleted that second question and the threshold with it. The residual it leaves is
+// recorded above: a credential that stands under a token-only name is not in the candidate set, so
+// an answer echoing it publishes it - the notice echo is still redacted, because the value stays in
+// the notice set.
 function isCredentialBearingName(name) {
   const normalized = normalizedParamName(name);
   if (normalized === '') return false;
@@ -304,41 +313,30 @@ function isCredentialBearingName(name) {
     || CREDENTIAL_FUSED.some((stem) => normalized.endsWith(stem));
 }
 
-// A value that is itself credential-shaped, in one of two ways. The first is a mark no ordinary
-// configured word carries: a digit, a capital, or a character that is not an alphanumeric or a
-// space. The second is LENGTH, and it exists because the first way misses a pure lower-case
-// alphabetic credential: 'abcdefghijklmnop', 'openssltoken' and 'lowercaseonlysecret' carry a digit
-// or a capital in no character, so under the mark alone they stayed out of the candidate set while
-// the SAME value under '?token=' went in - which is the F27-1 class surviving in a narrower shape
-// (verification F28-1 residual, Batch 51). An ordinary English word is short and a credential is
-// not: the threshold is read from the evidence rather than chosen, and the measurement is stated
-// here. Every ordinary pure lower-case value the suite, the sweeps and the TR-110/TR-116 controls
-// put under a token-only name is at most ten characters - 'archived' and 'releases' are 8,
-// 'landscape' 9, 'identifier' and 'descending' 10, 'required' 8 - while the three credentials the
-// residual names are 12, 16 and 19. Twelve is therefore the first length at which no ordinary
-// configured value has been observed, and it leaves the eleven-character English words that ARE
-// plausible parameter values ('performance', 'environment', 'description', 'temperature',
-// 'unavailable') on the ordinary side. The length alone is not enough: the value must also be a
-// single lower-case word (no space, no separator), because a value that carries a space is a
-// PHRASE, and '?state=the archived releases were moved' is the whole-notice rewrite the candidate
-// gate exists to refuse.
+// A TOKEN-ONLY name is not a candidate position AT ALL - not for any value, at any length, in any
+// shape - and the candidate half of the rule is now exactly the name question above. Batches 46 and
+// 51 decided it by the VALUE instead: a value under a token-only name became a candidate when it
+// carried a digit, a capital or a non-alphanumeric mark, or when it was a pure lower-case word of at
+// least twelve characters. That gate failed in BOTH directions and no threshold repairs it, which is
+// why it is gone rather than re-tuned (verification F29-1 and closing sweep F29-1/F29-2, both
+// measured on the shipped paths):
 //
-// A name that is credential-bearing by its own spelling (the stems, and the fused session
-// spellings) needs no such test: 'password' is a credential position whatever its value spells,
-// and the High F27-1 closure rests on that. This is the SECOND half of the candidate rule for a
-// token-only name, and it keeps both directions closed at once: an ordinary configured value under
-// an ordinary token name rewrites no published prose, while a value that IS a credential is not a
-// word any prose is built from, and it is collected from three characters up in the notice set and
-// from the free-text floor up in the candidate set exactly as before.
-const CREDENTIAL_SHAPED_VALUE = /[0-9]|[A-Z]|[^A-Za-z0-9\s]/;
-const MIN_LOWER_CASE_CREDENTIAL_CHARS = 12;
-const LOWER_CASE_WORD_VALUE = /^[a-z]+$/;
-function credentialShapedValue(value) {
-  const v = String(value ?? '');
-  if (CREDENTIAL_SHAPED_VALUE.test(v)) return true;
-  return v.length >= MIN_LOWER_CASE_CREDENTIAL_CHARS && LOWER_CASE_WORD_VALUE.test(v);
-}
-
+//   - too narrow: a pure lower-case credential of 8-11 characters carries no mark and is under the
+//     threshold, so '?state=abcdefghijk' left the candidate set while the identical value under
+//     '?token=' stayed in it, and an answer echoing it published it in the pool ('the server echoed
+//     abcdefghijk back', where b2a7dc9 redacted it);
+//   - too wide: every ordinary English word of twelve or more characters carries no mark either, so
+//     '?state=configuration', '?state=documentation', '?state=architecture' and
+//     '?status=infrastructure' put an ordinary configured value into the candidate union and the
+//     candidate pass rewrote a feed's published prose with it ('[redacted] drift in the podspec is a
+//     common failure'), including through the ordinary compounds '?mac-address=configuration',
+//     '?x-state=documentation' and '?state-of-the-art=architecture'.
+//
+// The design decides the tie, and TR-110 states it where the candidate set is applied
+// (collect.mjs): 'a value that is ordinary configuration is not a credential and never rewrites
+// published prose'. Over-redaction of the published digest is the worse failure, so a token-only
+// name contributes nothing to the candidate set and everything to the notice set.
+//
 // The name as the server reads it: a percent-encoded spelling of a credential name is the same
 // parameter to the server, so it is the same parameter here. Both the stem list and the token rule
 // are re-run on the decoded form.
@@ -523,21 +521,21 @@ export function requestSecretSets(url, headers) {
   // short word under a credential name ('new', 'beta', 'live') stays in the notice's removal set
   // while it cannot rewrite the prose a candidate carries.
   //
-  // The candidate half asks one question more, and it is the question the two rules differ on: a
-  // value crosses into the candidate set when the name is itself credential-bearing, or when the
-  // value is credential-shaped. A token-only name ('state', 'status', 'uuid', 'hash', ...) whose
-  // value is an ordinary configured word is NOT a candidate position, which is what keeps
-  // '?state=archived' from rewriting a feed's own 'the archived releases' (sweep F28-1); the value
-  // is still collected for the notice set from three characters up, and a token-named position whose
-  // value really is a credential is collected for both. The shape test reads the value the server
-  // holds, which is the decoded one at every call site below, and it reads the shape TWICE: the
-  // mark a word does not carry, or a pure lower-case word long enough to be a token rather than an
-  // English word (credentialShapedValue, and the threshold it states). Without the second reading
-  // the same value was a candidate under '?token=' and published under '?state=' (Batch 51).
+  // The candidate half asks the other question, and it asks it of the NAME alone: a value crosses
+  // into the candidate set exactly when the name is credential-BEARING (candidateCredentialParam).
+  // A token-only name ('state', 'status', 'uuid', 'hash', ...) is therefore not a candidate
+  // position at all. Its value is still collected for the notice set from three characters up, so
+  // a notice quoting the run's own request still redacts it, and it never reaches the candidate set
+  // - which is what keeps an ordinary configured word under such a name from rewriting a feed's own
+  // prose at ANY length. The candidate half used to ask a second question of the VALUE (a
+  // digit/capital/separator mark, or, after Batch 51, a pure lower-case word of twelve or more
+  // characters); that gate failed in both directions and was deleted in Batch 53 - see the note
+  // above 'The name as the server reads it' for the measurement. The residual it leaves is
+  // deliberate and is recorded there: a credential standing under a token-only name is not
+  // candidate-protected.
   const queryEligibility = (name, value, length) => ({
     notice: length >= MIN_CREDENTIAL_VALUE_CHARS,
-    candidate: length >= MIN_SECRET_CHARS
-      && (candidateCredentialParam(name) || credentialShapedValue(value)),
+    candidate: length >= MIN_SECRET_CHARS && candidateCredentialParam(name),
   });
   const raw = String(url ?? '');
   try {
