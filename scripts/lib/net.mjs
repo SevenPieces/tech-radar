@@ -341,26 +341,75 @@ function urlSpelling(value) {
 // builds it, which is the only place that knows whether the value came from the request's URL or
 // from a header or from prose. The shape list covers the credential classes no curated set can
 // know.
+// The character a pass writes while it works, and the one thing no input may carry: it stands in
+// for every removed span until the marker is put in its place at the very end of the one pass.
+// A pass that inserted '[redacted]' at once could have that marker read back by the same pass or by
+// a later one whenever a removed value is a substring of the marker itself ('redacted', 'redacted]',
+// 'edacted]', '[redacte'), and each re-read grows the text by another marker. The sentinel cannot be
+// re-read: it carries no letter, bracket or space, so neither a by-value removal, the word-bounded
+// removal of a short value, the loose pattern, the Basic shape nor any of SECRET_SHAPES can match
+// inside it. Both the text and every value are normalised to contain none of it before the pass
+// starts, so nothing here can collide with text a caller meant.
+const REDACTION_SENTINEL = '\uFFFF';
+const REDACTION_SENTINEL_RE = /\uFFFF/g;
+const REDACTED_MARKER = '[redacted]';
+function withoutSentinel(value) {
+  return String(value ?? '').replace(REDACTION_SENTINEL_RE, ' ');
+}
+
+// The marker's own shape, read as a span: a marker an earlier pass wrote is the one region this
+// pass does not scan, so the pass applied again to its own output changes nothing. Without that
+// the marker is not a fixed point, because every substring of it ('redacted', 'redacted]',
+// 'edacted]', '[redacte', '[redacted') is a value a request can carry, and a later pass would
+// rewrite the marker the previous one wrote: it grows by one occurrence of itself per pass
+// ('[[redacted]]', '[[[[redacted]]]]'), and a notice published that way is rewritten again by
+// every pass that follows it. Only a published marker is protected; no other text is skipped.
+const MARKER_SPAN_RE = /\[redacted\]/g;
+function forEachUnmarkedSpan(text, fn) {
+  if (!text.includes(REDACTED_MARKER)) return fn(text);
+  MARKER_SPAN_RE.lastIndex = 0;
+  let out = '';
+  let last = 0;
+  let m;
+  while ((m = MARKER_SPAN_RE.exec(text)) !== null) {
+    out += fn(text.slice(last, m.index)) + m[0];
+    last = m.index + m[0].length;
+  }
+  return out + fn(text.slice(last));
+}
+
+// One pass over the input produces the published text. Every removal the pass makes is one
+// sentinel, and the marker is put in its place only when the whole pass has ended, so no removal
+// can read back a marker this pass wrote; and a marker an earlier pass wrote is a span this pass
+// does not read at all, so the text the pass publishes is a fixed point of the pass. The output
+// is never longer than the text that went in plus, for each removal, the difference between the
+// marker and the value that stood there -- and a value below the floor is removed only where it
+// stands as its own token, so a value that is merely part of a longer word stays (TR-110).
 export function redactSecrets(text, secrets) {
-  let out = redactBasicCredentials(String(text ?? ''));
   const values = new Set();
   for (const raw of secrets ?? []) {
-    const value = String(raw ?? '');
+    const value = withoutSentinel(raw);
     if (value === '') continue;
     values.add(value);
     const respelled = urlSpelling(value);
-    if (respelled !== null) values.add(respelled);
+    if (respelled !== null) values.add(withoutSentinel(respelled));
   }
-  for (const value of [...values].sort((a, b) => b.length - a.length)) {
-    if (value.length >= MIN_SECRET_CHARS) {
-      out = out.split(value).join('[redacted]');
-      out = out.replace(looseValue(value), '[redacted]');
-    } else {
-      out = out.replace(boundedValue(value), '[redacted]');
+  const sorted = [...values].sort((a, b) => b.length - a.length);
+  const mark = (span) => {
+    let out = redactBasicCredentials(span);
+    for (const value of sorted) {
+      if (value.length >= MIN_SECRET_CHARS) {
+        out = out.split(value).join(REDACTION_SENTINEL);
+        out = out.replace(looseValue(value), REDACTION_SENTINEL);
+      } else {
+        out = out.replace(boundedValue(value), REDACTION_SENTINEL);
+      }
     }
-  }
-  for (const shape of SECRET_SHAPES) out = out.replace(shape, '[redacted]');
-  return out;
+    for (const shape of SECRET_SHAPES) out = out.replace(shape, REDACTION_SENTINEL);
+    return out;
+  };
+  return forEachUnmarkedSpan(withoutSentinel(text), mark)
+    .replace(REDACTION_SENTINEL_RE, REDACTED_MARKER);
 }
 
 // Pure and offline-testable: it splits the status line off the captured bytes and
@@ -395,9 +444,24 @@ function requirePositive(value, what) {
 // bounded, tag-stripped snippet is still built, and stays on the error as its internal
 // body field, because the caller's refusal predicate is the one thing that has to read
 // the answer; it is a classification input and never notice text.
-export function shapeHttpError(status, body, url, limit, headers, omitUrl = false) {
+// The secrets a shaped text is priced against: the request's own values, plus the run-wide union
+// when the caller carries one (extraSecrets). A notice is published under the union, and a detail
+// the shaper bounded against the request's own values alone can be grown by the wider set after it
+// was priced, which is what took the HTTP status off a notice at the least accepted pair. The
+// optional parameter is additive: called with its shipped signature the shaper prices against the
+// request alone, exactly as before, and every existing caller keeps its behaviour.
+function pricedSecrets(url, headers, extraSecrets) {
+  const secrets = new Set(requestSecrets(url, headers));
+  for (const raw of extraSecrets ?? []) {
+    const value = String(raw ?? '');
+    if (value !== '') secrets.add(value);
+  }
+  return secrets;
+}
+
+export function shapeHttpError(status, body, url, limit, headers, omitUrl = false, extraSecrets = null) {
   const bound = requirePositive(limit, 'the error snippet limit in characters');
-  const secrets = requestSecrets(url, headers);
+  const secrets = pricedSecrets(url, headers, extraSecrets);
   const source = Buffer.isBuffer(body) ? body : Buffer.from(String(body ?? ''));
   // By-value redaction runs before every bound this text meets: the decoded answer is redacted
   // before it is cut, so a value the request sent cannot be published in half by the cut, and
@@ -499,11 +563,63 @@ function transportCause(err) {
 // err.status is curl's *process* exit code and err.stdout may hold a partial body
 // plus the write-out status line, so neither is read as an HTTP status. The cause is
 // the fixed vocabulary above, never curl's stderr line. Pure and offline-testable.
-export function shapeTransportError(err, url, limit, headers, omitUrl = false) {
+// A shaped error re-priced against the set it will be published under. The shaped errors carry the
+// facts the text was built from -- the status or the transport cause, the request and the omitUrl
+// decision -- so a caller that learns of a wider secret set after the shaping (the collector's
+// run-wide union) can rebuild the text instead of re-cutting the line it was given. A text the
+// shipped transport shaped is already bounded; a custom transport on the public collectAll seam can
+// hand back a text its own shaper bounded against the request alone, and this is the seam that
+// prices it against the union before a notice is assembled. Anything that is not a shaped error is
+// returned untouched.
+export function repriceShapedError(err, extraSecrets, snippetLimit) {
+  if (err === null || typeof err !== 'object') return err;
+  const bound = Number.isFinite(Number(snippetLimit)) && Number(snippetLimit) > 0
+    ? Number(snippetLimit) : null;
+  const url = String(err.url ?? '');
+  const omitUrl = url === '';
+  let candidate = null;
+  if (Number.isInteger(err.httpStatus)) {
+    const prefix = 'HTTP ' + err.httpStatus + ' for ';
+    const room = bound === null ? Infinity : Math.max(0, bound - prefix.length);
+    const shown = omitUrl ? '' : noticePreservingRewrites(redactSecrets(redactUrl(url), extraSecrets));
+    const text = omitUrl
+      ? 'HTTP ' + err.httpStatus
+      : prefix + (shown.length > room ? shown.slice(0, room) : shown);
+    candidate = new Error(text);
+    candidate.cause = 'HTTP ' + err.httpStatus;
+    candidate.httpStatus = Number(err.httpStatus);
+  } else if (err.httpStatus === null && typeof err.cause === 'string') {
+    const cause = noticePreservingRewrites(redactSecrets(err.cause, extraSecrets));
+    const prefix = 'request failed for ';
+    const shortPrefix = 'request failed';
+    const separator = ': ';
+    const shown = omitUrl ? '' : noticePreservingRewrites(redactSecrets(redactUrl(url), extraSecrets));
+    const room = bound === null ? Infinity : Math.max(0, bound - prefix.length - separator.length - cause.length);
+    const full = omitUrl
+      ? shortPrefix + separator + cause
+      : prefix + (shown.length > room ? shown.slice(0, room) : shown) + separator + cause;
+    const compact = shortPrefix + separator + cause;
+    candidate = new Error(bound !== null && full.length > bound && compact.length <= bound ? compact : full);
+    candidate.cause = cause;
+    candidate.httpStatus = null;
+  } else {
+    return err;
+  }
+  if (bound !== null && candidate.message.length > bound) return err;
+  const out = new Error(String(err.message));
+  for (const key of Object.keys(err)) out[key] = err[key];
+  out.message = candidate.message;
+  out.cause = candidate.cause;
+  return out;
+}
+
+export function shapeTransportError(err, url, limit, headers, omitUrl = false, extraSecrets = null) {
   const bound = requirePositive(limit, 'the error snippet limit in characters');
   // err.message is never a cause: Node builds it from the whole argv, and the argv carries the
-  // Authorization header, which the fixed cause above cannot carry at all.
-  const secrets = requestSecrets(url, headers);
+  // Authorization header, which the fixed cause above cannot carry at all. The text is priced
+  // against the request's own values plus the run-wide union when the caller carries one, for the
+  // same reason shapeHttpError is (extraSecrets).
+  const secrets = pricedSecrets(url, headers, extraSecrets);
   const cause = redactSecrets(transportCause(err), secrets);
   // The shaped text gives way in the order the diagnosis can afford, and the cause is never the
   // part that gives way. The request's room is what the bound leaves after the prefix, the

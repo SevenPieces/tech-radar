@@ -15,7 +15,7 @@ import { readConfig, readSettings } from './lib/mdtable.mjs';
 import {
   fetchText, hostOf, isDiscoveryOnly, splitItems, field, atomLink, plainText, redactUrl,
   neutraliseMarkers, neutraliseLinkSeams, noticePreservingRewrites, neutraliseUrl, redactSecrets,
-  requestSecrets, requestSecretSets, neutraliseTagSpans, neutraliseEntityTags,
+  requestSecrets, requestSecretSets, neutraliseTagSpans, neutraliseEntityTags, repriceShapedError,
 } from './lib/net.mjs';
 
 // The collector must work from any working directory, so the default configuration
@@ -253,13 +253,17 @@ function pushNotice(notices, text, secrets, limit) {
 // A notice is the source it names, the ': ' separator and the detail it carries, and the cap
 // is what the three of them have to fit in. The parts are redacted and rewritten apart and only
 // then bounded, because the run's own redaction is a change of length like any other and has to
-// be part of what the cap is priced against (TR-168). The shaper prices the detail at
-// error_snippet_max_chars against the request's own secrets; the set the notice is finally
-// published under is the run's union, which is wider, so a detail the union lengthens after the
-// fact used to grow an already-bounded source, the slice removed the overflow from the tail, and
-// the tail is where the status and the transport cause sit. Here the source is the part that
-// gives way -- down to the room the redacted detail leaves it, and never past its own half, which
-// is the division the cap check reserves -- and the detail is never cut.
+// be part of what the cap is priced against (TR-168). The set the notice is finally published
+// under is the run's union, which is wider than the request's own values, so a detail the union
+// lengthened after it was priced used to grow an already-bounded source, the slice removed the
+// overflow from the tail, and the tail is where the status and the transport cause sit. Two things
+// closed that: every redaction pass is now a fixed point (a marker it wrote is a span no later pass
+// reads, so no removal can lengthen what a pass published), and a detail whose union redaction
+// still leaves it too long for the cap is re-built smaller from the shaped error's own facts -- the
+// status or the transport cause and the request -- by the bounded fallback below, never cut. Here
+// the source is the part that gives way -- down to the room the redacted detail leaves it, and
+// never past its own half, which is the division the cap check reserves -- and the detail is
+// dropped only when it does not fit even with no source at all.
 //
 // The two passes stay the whole line's passes. A rule of either one that read across the
 // separator (the tag-span rule's unterminated opener reaching a detail that carries a '>', the
@@ -267,17 +271,43 @@ function pushNotice(notices, text, secrets, limit) {
 // than the whole line's own result, so the composition is checked and the whole line is
 // published, bounded by the cap, whenever the check fails: the bytes a notice carries are always
 // the bytes one pass over it produces.
+// The published text of a notice whose parts do not compose into one pass, or whose redacted
+// detail cannot fit beside the source: the detail is rebuilt from the shaped error's own facts (the
+// status or the cause and the request) rather than cut, so the one thing the cap may never remove --
+// the status prefix and the transport cause -- is kept whole. The cap gives way to that floor
+// exactly as the shaper documents it: the source is dropped to nothing, and a detail that cannot
+// fit even alone is still the status, never the middle of a line. A string the caller built has no
+// shaped metadata to rebuild from, so the whole line's own single pass is bounded by the cap as it
+// always was.
+function boundedFallback(whole, detail, secrets, cap) {
+  const repriced = repriceShapedError(detail, secrets, cap);
+  if (repriced !== detail) {
+    const priced = neutraliseNoticeText(String(repriced.message ?? ''));
+    if (priced.length + NOTICE_SEPARATOR_CHARS <= cap) return priced;
+    if (priced.length <= cap) return priced;
+    return priced.slice(0, cap);
+  }
+  return whole.slice(0, cap);
+}
 function assembleNotice(source, detail, secrets, limit) {
   const cap = requireNoticeLimit(limit);
   const head0 = String(source ?? '');
   const tail0 = String(detail ?? '');
   const whole = neutraliseNoticeText(redactSecrets(head0 + NOTICE_SEPARATOR + tail0, secrets));
   const head = neutraliseNoticeText(redactSecrets(head0, secrets));
-  const tail = neutraliseNoticeText(redactSecrets(tail0, secrets));
-  if (whole !== head + NOTICE_SEPARATOR + tail) return whole.slice(0, cap);
-  // The detail alone cannot fit: nothing is left to give but the detail, and that is the
-  // shaper's documented floor (a bound under its own compact form), not a cut a redaction made.
-  if (tail.length + NOTICE_SEPARATOR_CHARS > cap) return whole.slice(0, cap);
+  let tail = neutraliseNoticeText(redactSecrets(tail0, secrets));
+  if (whole !== head + NOTICE_SEPARATOR + tail) return boundedFallback(whole, tail0, secrets, cap);
+  // The redacted detail does not fit beside the source. The detail is where the status and the
+  // cause sit and it is never the part that is cut: a shaped detail is re-built smaller from its
+  // own facts, and the source gives way -- to nothing, if that is what it takes -- rather than the
+  // tail losing the one thing the notice exists to say. A detail no re-pricing can shrink and that
+  // still cannot fit alone is bounded by its own shaper's floor, which the bounded fallback states.
+  if (tail.length + NOTICE_SEPARATOR_CHARS > cap) {
+    const repriced = repriceShapedError(tail0, secrets, cap);
+    if (repriced === tail0) return boundedFallback(whole, tail0, secrets, cap);
+    tail = neutraliseNoticeText(String(repriced.message ?? ''));
+    if (tail.length + NOTICE_SEPARATOR_CHARS > cap) return boundedFallback(whole, tail0, secrets, cap);
+  }
   const room = Math.min(noticeSourceRoom(cap), cap - NOTICE_SEPARATOR_CHARS - tail.length);
   return (head.length > room ? head.slice(0, room) : head) + NOTICE_SEPARATOR + tail;
 }
@@ -304,10 +334,11 @@ function rowsSecrets(rows, headers) {
 
 // The notices as they are published: each one redacted against the union above, which the push
 // already applied when it priced the notice, so this is the confirmation that the collection has
-// no value the run's own output still carries. Applying it again is idempotent - a value that is
-// gone stays gone - and the notice keeps the host and the reason it exists, so it stays
-// diagnosable. It stays because a caller can reach this module's collectors without collectAll,
-// and the source's own rows are then the union the push priced against.
+// no value the run's own output still carries. The pass is a fixed point -- a marker it wrote is a
+// span no later pass reads, so re-applying it changes nothing, not even when a collected value is
+// a substring of the marker itself -- and the notice keeps the host and the reason it exists, so it
+// stays diagnosable. It stays because a caller can reach this module's collectors without
+// collectAll, and the source's own rows are then the union the push priced against.
 function redactNotices(notices, secrets, limit) {
   const out = [];
   for (const notice of notices) pushNotice(out, notice, secrets, limit);
@@ -1331,7 +1362,7 @@ export async function collectAll(config, opts) {
     timeout: resolveTimeout({ timeout: opts.timeout ?? null }, config.settings),
     net: {
       ...baseNet,
-      fetchText: (url, timeout, headers, ...rest) => {
+      fetchText: async (url, timeout, headers, ...rest) => {
         // A request is issued with omitUrl (the last argument) when its target came out of an
         // answer rather than out of configuration. Such a request carries no request credential
         // of its own: its URL spells the answer's text, so anything a URL reader found in it
@@ -1343,7 +1374,20 @@ export async function collectAll(config, opts) {
           for (const secret of all) issuedSecrets.add(secret);
           for (const secret of credentials) issuedCredentialSecrets.add(secret);
         }
-        return baseNet.fetchText(url, timeout, headers, ...rest);
+        // A shaped failure is priced here against the run-wide union as well as against the
+        // request's own values, because that is the set the notice is published under: the shaper
+        // bounds the text it builds to error_snippet_max_chars, and a value only another row's
+        // request carried used to be removed from it afterwards, lengthening a text that was
+        // already priced until the assembled notice had no room for the status and the cause. The
+        // re-pricing is a rebuild from the shaped error's own facts (the status or the transport
+        // cause, the request), never a re-cut of the text, and a text it cannot bound is left as it
+        // was -- the cap assembly below keeps the detail whole whatever arrives (TR-168).
+        try {
+          return await baseNet.fetchText(url, timeout, headers, ...rest);
+        } catch (err) {
+          const priced = repriceShapedError(err, runSecrets, rest[1]);
+          throw priced === err ? err : priced;
+        }
       },
     },
     domains: opts.domains ?? null,
@@ -1392,9 +1436,10 @@ export async function collectAll(config, opts) {
   );
   // The union pass TR-99 asks for: every notice the run produced, from every source and every
   // row, is redacted once more against every value of every request the run issued. Every notice
-  // was already priced against the configuration-wide superset of this set (runSecrets above), so
-  // the pass is a confirmation rather than a rewrite: a notice it could still change is a notice
-  // a redaction could have lengthened after its cap was applied, which is the seam TR-168 closes.
+  // was already priced against the configuration-wide superset of this set (runSecrets above), and
+  // the redaction is a fixed point, so the pass is a confirmation rather than a rewrite: it cannot
+  // change a notice the push published, and in particular cannot lengthen one after its cap was
+  // applied, which is the seam TR-168 closes.
   const union = [...issuedSecrets];
   const credentialUnion = [...issuedCredentialSecrets];
   const notices = [];
