@@ -276,10 +276,30 @@ const AUTH_WHITESPACE_RUN = /^[\t \u00a0]+/;
 // consumed. That is what keeps '"HTTP 503"' whole (the only non-scaffold runs in it are the two
 // quote characters, which carry no credential) while '"HTTP 503 tok_9f3a2c7d1e5b"' gives up the
 // credential and keeps the status.
-const AUTH_VALUE_TOKEN_RE = /[^\s,;"']+/g;
+//
+// Batch 75 (closing sweep F34-4) made two things true of that run. The closing bracket is NOT part
+// of it: a diagnosis writes a parenthetical ('rate limit reached (remaining 0 of 60, resets
+// 2026-10-16T20:48:42.000Z); 55 repository release listings not checked'), and the class used to take
+// the ')' glued to whatever stood beside it, so a run removed from a notice's own detail took the
+// bracket that closed its parenthetical with it. A credential is a run of token characters and none
+// of them is a bracket, so stopping the class before ')' can only keep a bracket out of a removal --
+// it cannot split a credential. And the run's own reset stamp is not reaped: the instant a
+// rate-limit notice names is written by this module (collect.mjs's budgetNotice), the shape test
+// calls it credential-shaped -- it is long and it carries digits -- and the scan below therefore
+// reaped it out of the notice's own detail, handing the reader 'resets [redacted]; 55 repository
+// release listings not checked' in place of the time the allowance comes back. A token that IS an
+// ISO-8601 instant is diagnosis vocabulary this module writes, not a credential standing in a value.
+//
+// The bound this leaves, stated rather than hidden: a credential spelled exactly as an ISO-8601
+// instant is not reaped HERE. It is still removed by value wherever the run carried it and by the
+// curated shape list above, and no credential class the module knows is spelled that way -- an
+// instant is a timestamp.
+const DIAGNOSTIC_INSTANT_RE = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:Z|[+-]\d{2}:?\d{2})?$/;
+const AUTH_VALUE_TOKEN_RE = /[^\s,;"')]+/g;
 function consumeCredentialShapedTokens(text) {
   return String(text).replace(AUTH_VALUE_TOKEN_RE, (token) => {
     if (token.includes(SCAFFOLD_PLACEHOLDER)) return token;
+    if (DIAGNOSTIC_INSTANT_RE.test(token)) return token;
     return credentialShapedToken(token) ? REDACTION_SENTINEL : token;
   });
 }
