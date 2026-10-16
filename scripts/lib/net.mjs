@@ -300,6 +300,9 @@ const AUTH_WHITESPACE_RUN = new RegExp('^[' + AUTH_INLINE_SPACE + ']+');
 // reaped it out of the notice's own detail, handing the reader 'resets [redacted]; 55 repository
 // release listings not checked' in place of the time the allowance comes back. A token that IS an
 // ISO-8601 instant is diagnosis vocabulary this module writes, not a credential standing in a value.
+// Batch 79 (closing sweep F35-4) applies this same test in the acceptance path too
+// (authorizationAtomIsShaped below): the exemption used to run only here, so a value whose second
+// atom is the instant was ACCEPTED as a credential header and consumed whole.
 //
 // The bound this leaves, stated rather than hidden: a credential spelled exactly as an ISO-8601
 // instant is not reaped HERE. It is still removed by value wherever the run carried it and by the
@@ -371,6 +374,16 @@ function consumeCredentialShapedTokens(text) {
 //     paths (closing sweep F33-5, its narrow residual). Removing the lookbehind would cost the
 //     assembly's own diagnosis, which is the run's only one.
 function authorizationAtomIsShaped(atom) {
+  // THE INSTANT EXEMPTION IS IN THE ACCEPTANCE TEST TOO (Batch 79; closing sweep F35-4). Batch 75's
+  // sentence -- 'A token that IS an ISO-8601 instant is diagnosis vocabulary this module writes, not
+  // a credential standing in a value' -- was applied in exactly one place, the declined-value scan
+  // that consumeCredentialShapedTokens runs, while the function that decides whether a value IS a
+  // credential header kept calling the instant credential-shaped. A value whose second atom is the
+  // instant ('authorization: resets 2026-10-16T21:48:54.000Z') was therefore consumed WHOLE, and the
+  // notice's own stamp went with it, in the branch the batch did not touch. The test is the same
+  // anchored one the scan uses, so a token that merely BEGINS with, carries or is joined to an
+  // instant is not exempt: only a token that IS one.
+  if (DIAGNOSTIC_INSTANT_RE.test(stripSurroundingQuotes(atom))) return false;
   return credentialShapedToken(atom) || credentialShapedToken(stripSurroundingQuotes(atom));
 }
 // The scheme a value NAMES, read from its first atom with any punctuation glued to the name
