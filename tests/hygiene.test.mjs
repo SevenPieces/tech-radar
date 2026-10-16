@@ -345,3 +345,49 @@ test('a tracked file merely named like a run artifact is kept by both answers, a
     rmSync(dir, { recursive: true, force: true });
   }
 });
+
+// Closing sweep F33-3 (the class F32-5 was filed for, narrowed but not closed by Batch 66). The
+// F32-5 case above is a lookalike with NO artifact of its own name beside it. This case is the one
+// Batch 66's 'beside it' clause still got wrong: the repository tracks BOTH 'notes' and 'notes.tmp',
+// so the temp file guards an ordinary shipped file rather than a run artifact, and the rule - which
+// read the name alone - dropped it from the no-git answer while git's answer kept it. Batch 67
+// requires the artifact standing beside the lock to be a run artifact by its own name, so both
+// answers keep 'notes.tmp' and the hygiene guard judges a file the reader receives.
+test('a tracked temp file beside a tracked file of its own name is kept and judged', (t) => {
+  const dir = mkdtempSync(join(tmpdir(), 'tech-radar-pair-'));
+  try {
+    mkdirSync(join(dir, 'config'), { recursive: true });
+    writeFileSync(join(dir, '.gitignore'), readFileSync(join(SKILL_ROOT, '.gitignore')));
+    writeFileSync(join(dir, 'config', 'settings.md'), 'a shipped file\n');
+    writeFileSync(join(dir, 'notes'), 'ordinary notes\n');
+    writeFileSync(join(dir, 'notes.tmp'), 'Task ' + '7 ' + 'ran the probes\n');
+    const made = spawnSync('git', ['-C', dir, 'init', '-q'], { encoding: 'utf8' });
+    if (made.error || made.status !== 0) {
+      t.skip('git is not available, so the repository answer was not exercised');
+      return;
+    }
+    spawnSync('git', ['-C', dir, 'add', '-A'], { encoding: 'utf8' });
+    spawnSync('git', ['-C', dir, 'add', '-f', 'notes', 'notes.tmp'], { encoding: 'utf8' });
+    spawnSync('git', ['-C', dir, '-c', 'user.email=a@b', '-c', 'user.name=a', 'commit', '-qm', 'fixture'],
+      { encoding: 'utf8' });
+    assert.equal(gitSaysIgnored('notes.tmp', dir), false,
+      'the fixture temp file is not tracked, so the case under test was not built');
+    const withGit = shippedFiles(dir);
+    assert.equal(withGit.includes('notes.tmp'), true,
+      "the repository's own answer dropped a file it ships: " + JSON.stringify(withGit));
+    assert.equal(withGit.includes('notes'), true,
+      "the repository's own answer dropped the file the temp name guards: " + JSON.stringify(withGit));
+    assert.deepEqual(scan(dir, PROCESS, 'names'), ['notes.tmp names a build task number'],
+      'a shipped leak beside a tracked lookalike was not judged');
+    const moduleUrl = pathToFileURL(join(SKILL_ROOT, 'tests', 'lib', 'shipped-files.mjs')).href;
+    const child = spawnSync(process.execPath, ['-e',
+      'import(process.argv[1]).then((m) => process.stdout.write(JSON.stringify(m.shippedFiles(process.argv[2]))))',
+      moduleUrl, dir],
+      { encoding: 'utf8', env: { ...process.env, PATH: '/nonexistent' } });
+    assert.equal(child.status, 0, 'the fallback walk did not run: ' + String(child.stderr).split('\n')[0]);
+    assert.deepEqual(JSON.parse(String(child.stdout)), withGit,
+      'the two answers disagree about a temp file whose guarded artifact is an ordinary shipped file');
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});

@@ -77,7 +77,16 @@ function guardsRunArtifact(rel, root) {
   const guarded = base.slice(0, base.length - suffix.length);
   if (guarded === '') return true;
   if (RUN_ARTIFACT_NAMES.has(guarded) || DIGEST_NAME.test(guarded)) return true;
-  return existsSync(join(root, rel.slice(0, rel.length - suffix.length)));
+  // The artifact standing beside the lock. It has to be a RUN artifact itself, by the rule applied
+  // to its own name: a state file may be named by --state, so its own name carries no fixed
+  // spelling, but the artifact it guards is machine state, and a lock beside an ordinary shipped
+  // file is not the lock of anything. The rule read the NAME ALONE until Batch 67, so a repository
+  // that shipped both 'notes' and 'notes.tmp' lost 'notes.tmp' from the no-git answer while git's
+  // answer - which never ignores what it carries - kept it, and the hygiene guard never judged a
+  // file the reader receives (closing sweep F33-3, the class F32-5 was filed for).
+  const beside = rel.slice(0, rel.length - suffix.length);
+  if (!existsSync(join(root, beside))) return false;
+  return isRunArtifact(beside, root);
 }
 function isRunArtifact(rel, root) {
   const base = rel.split('/').pop();
