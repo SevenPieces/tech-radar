@@ -29,7 +29,7 @@ Every quantity and policy lives here, so no script and no document hardcodes one
 | request_timeout_ms | 20000 | Longest a single request may take before curl gives up |
 | title_max_chars | 200 | Longest candidate title kept once upstream markup is stripped |
 | summary_max_chars | 400 | Longest candidate summary kept once upstream markup is stripped |
-| error_snippet_max_chars | 200 | Longest server text quoted in the notice for an HTTP failure |
+| error_snippet_max_chars | 200 | Longest text a notice carries for a failed request: curl's own diagnostic line, or the whole shaped HTTP error (status and redacted URL); an upstream response body is never quoted |
 | discovery_hosts | news.ycombinator.com, lobste.rs, reddit.com, x.com, twitter.com, techmeme.com, news.google.com, news.baidu.com, v2ex.com, juejin.cn, zhihu.com, sspai.com, weibo.com | Discovery surfaces; never citable as the source |
 | short_max_chars | 18 | Longest navigation chip label kept; a longer one is clipped at a word boundary |
 | user_agent | tech-radar/1.0 | Sent on every request so sources can identify the client |

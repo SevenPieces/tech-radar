@@ -307,9 +307,9 @@ the advisory listing and 55 tag listings. Of those, 59 are charged (the 55 relea
 tag listings) and the remaining 52 tag listings go unchecked, which forces a rate-limit notice into the coverage
 note. Both outcomes were observed on the probe date:
 
-- **From a partly spent budget the tail fails.** The first full run met an hour whose budget was already
-  consumed. It printed `HTTP 403` notices carrying `API rate limit exceeded` for the trailing repositories
-  and for the advisory request.
+- **From a partly spent budget the tail fails.** On the probe date the first full run met an hour whose budget
+  was already consumed. It printed `HTTP 403` notices for the trailing repositories and for the advisory
+  request, each recording the rate limit as the cause.
 - **From a fresh budget the run completes.** The second full run started at `used 0, remaining 60`, exited 0
   with **0 notices**, and produced **841 candidates** across 22 domains.
 

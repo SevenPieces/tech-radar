@@ -6,7 +6,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
-import { decodeBuffer, decodeEntities, field, atomLink, splitItems, neutraliseMarkers, plainText, isDiscoveryOnly, hostOf, shapeHttpError, shapeTransportError, splitCurlOutput, redactUrl, fetchText, neutraliseUrl, requestSecrets, redactSecrets, neutraliseEntityTags } from '../scripts/lib/net.mjs';
+import { decodeBuffer, decodeEntities, field, atomLink, splitItems, neutraliseMarkers, neutraliseLinkSeams, plainText, isDiscoveryOnly, hostOf, shapeHttpError, shapeTransportError, splitCurlOutput, redactUrl, fetchText, neutraliseUrl, requestSecrets, redactSecrets, neutraliseEntityTags } from '../scripts/lib/net.mjs';
 import { curlAvailable } from './lib/commands.mjs';
 
 test('decodeBuffer passes UTF-8 through', () => {
@@ -170,27 +170,64 @@ test('splitCurlOutput strips the status line and leaves the body byte-identical'
   assert.equal(noStatus.body.toString('utf8'), 'a body with no status line');
 });
 
-test('shapeHttpError names the HTTP status and quotes the rate-limit body', () => {
+// The notice names the failure and never quotes the answer: a 4xx/5xx body is upstream text of
+// arbitrary content, and a notice is published verbatim in the Coverage note, so the shaped HTTP
+// error carries the status and the redacted request only. The upstream body appears nowhere in
+// the message -- not truncated, not summarised, not as a "no response body" placeholder.
+test('shapeHttpError names the HTTP status and the URL and never quotes the upstream body', () => {
   const url = 'https://api.github.com/repos/nodejs/node/releases?per_page=10';
-  const shaped = shapeHttpError(
-    403,
-    Buffer.from(JSON.stringify({ message: 'API rate limit exceeded for 203.0.113.9.' })),
-    url,
-    200,
-  );
-  // The query may or may not survive: the credential-spelling rule requires dropping the
-  // whole query string, which moves this pin. Host and path are what must stay.
-  assert.match(shaped.message, /^HTTP 403 for https:\/\/api\.github\.com\/repos\/nodejs\/node\/releases(\?per_page=10)?: /);
-  assert.match(shaped.message, /API rate limit exceeded/);
-  assert.equal(shaped.httpStatus, 403);
-  assert.equal(shaped.url, url);
-  assert.ok(shaped.body.length <= 200, 'body snippet is bounded');
+  const body = JSON.stringify({ message: 'API rate limit exceeded for 203.0.113.9.' });
+  const shaped = shapeHttpError(403, Buffer.from(body), url, 200);
+  assert.equal(shaped.message, 'HTTP 403 for https://api.github.com/repos/nodejs/node/releases',
+    'the status and the redacted URL are the whole notice');
+  assert.equal(shaped.message.includes('API rate limit exceeded'), false,
+    'the upstream body reached the notice: ' + shaped.message);
+  assert.equal(shaped.message.includes('203.0.113.9'), false,
+    'an upstream value reached the notice: ' + shaped.message);
+  assert.doesNotMatch(shaped.message, /no response body/, 'the notice carries no body placeholder');
+  assert.equal(shaped.httpStatus, 403, 'the status names the failure');
+  assert.equal(shaped.url, url, 'the raw request stays on the error for the caller');
 });
 
-test('shapeHttpError bounds a huge body and keeps the status', () => {
-  const shaped = shapeHttpError(429, Buffer.from('x'.repeat(5000)), 'https://example.com/big', 40);
-  assert.match(shaped.message, /^HTTP 429 for https:\/\/example\.com\/big: x{40}$/);
-  assert.equal(shaped.body.length, 40);
+// error_snippet_max_chars is kept and re-purposed: it bounds the shaped error text, which is the
+// redacted request URL. A URL longer than the bound is truncated there, the status stays legible,
+// and the upstream body, however large, never appears.
+test('shapeHttpError bounds the shaped error text and keeps the status', () => {
+  const long = 'https://example.com/' + 'very-long-path-segment/'.repeat(40);
+  const shaped = shapeHttpError(429, Buffer.from('x'.repeat(5000)), long, 40);
+  assert.equal(shaped.httpStatus, 429);
+  const prefix = 'HTTP 429 for ';
+  assert.equal(shaped.message.startsWith(prefix), true, 'the status still names the failure: ' + shaped.message);
+  const shown = shaped.message.slice(prefix.length);
+  assert.ok(shown.length <= 40, 'the shaped error text exceeds the configured bound: ' + shown.length);
+  assert.equal(shown, redactUrl(long).slice(0, shown.length), 'the bound truncates the redacted URL');
+  assert.equal(shaped.message.includes(long), false, 'the unbounded URL survived the notice: ' + shaped.message);
+  assert.equal(shaped.message.includes('x'.repeat(40)), false, 'the upstream body reached the notice');
+});
+
+// The rule removes the upstream text, not the diagnosis: the shaped HTTP error still names the
+// status and the redacted request, and the transport error still names the request and curl's own
+// cause line. A notice that said only "failed" would pass the no-echo half and lose the run's only
+// account of a degraded source.
+test('a notice still names the failure: status, redacted URL and transport cause', () => {
+  const secret = 'SENTINEL' + 'KEYVALUE';
+  const http = shapeHttpError(503, Buffer.from('Service Unavailable'),
+    'https://svc.example/api?key=' + secret, 200);
+  assert.equal(http.message, 'HTTP 503 for https://svc.example/api',
+    'the status and the redacted URL are the notice: ' + http.message);
+  assert.equal(http.message.includes(secret), false, 'the query credential reached the notice: ' + http.message);
+
+  const failure = {
+    status: 7,
+    stdout: Buffer.from('\n000'),
+    stderr: Buffer.from("curl: (7) Failed to connect to svc.example port 443 after 0 ms: Couldn't connect to server\n"),
+  };
+  const transport = shapeTransportError(failure, 'https://u:pw@svc.example/api?token=' + secret, 200);
+  assert.match(transport.message,
+    /^request failed for https:\/\/svc\.example\/api: curl: \(7\) Failed to connect to svc\.example port 443/,
+    "the transport notice names the request and curl's own cause: " + transport.message);
+  assert.equal(transport.message.includes(secret), false, 'the query credential reached the notice: ' + transport.message);
+  assert.equal(transport.exitStatus, 7, "curl's process exit status is labelled as such");
 });
 
 test('shapeTransportError reads the real execFileSync failure shape as a transport failure', () => {
@@ -277,15 +314,18 @@ test('shapeTransportError still quotes curl when it did write a cause line', () 
   assert.doesNotMatch(shaped.message, /Authorization|Bearer|ghp_/, 'the argv fallback stays out');
 });
 
-// Regression test: both shapers interpolated the raw URL, so a credentialised feed
-// target -- userinfo or a secret query parameter -- was published verbatim in the
-// notice and therefore in the digest.
-test('shapeHttpError redacts userinfo and the query string it quotes', () => {
+// Regression test: both shapers interpolated the raw URL, so a credentialised feed target --
+// userinfo or a secret query parameter -- was published verbatim in the notice and therefore in
+// the digest. The whole query is dropped, the userinfo with it, and the scheme, host and path
+// stay: the notice still names the request it reports.
+test('shapeHttpError redacts the userinfo and the whole query, keeping host and path', () => {
   const shaped = shapeHttpError(500, Buffer.from('boom'), 'https://u:p4ssw0rd@h.example/x?token=SECRETVAL', 200);
   assert.equal(shaped.message.includes('p4ssw0rd'), false, 'the password must not reach the notice');
   assert.equal(shaped.message.includes('SECRETVAL'), false, 'the query value must not reach the notice');
+  assert.equal(shaped.message.includes('boom'), false, 'the upstream body must not reach the notice');
   assert.doesNotMatch(shaped.message, /u:p4ssw0rd@/, 'userinfo must not reach the notice');
-  assert.match(shaped.message, /^HTTP 500 for https:\/\/h\.example\/x\/?: boom$/, 'the host and path survive');
+  assert.doesNotMatch(shaped.message, /\?/, 'the whole query string is dropped');
+  assert.match(shaped.message, /^HTTP 500 for https:\/\/h\.example\/x\/?$/, 'the host and path survive');
 });
 
 test('shapeTransportError redacts userinfo and the query string it quotes', () => {
@@ -357,47 +397,55 @@ test('redactUrl drops the whole query string and the userinfo for every credenti
 // TR-85 regression test: the secret set was built from the decoded query value only, so a
 // server that echoed the request's own percent-encoded spelling - the form curl actually put on
 // the request line, and the common server-log spelling - republished the credential in a
-// trivially decodable form. Every spelling the request could have sent is removed.
-test('a request credential is removed in its raw, encoded and decoded spellings', () => {
+// trivially decodable form. Every spelling the request could have sent is removed. The notice no
+// longer quotes an answer at all, so the scrubber is driven at its own seam as well as through
+// the shaped notice, which must carry the redacted request and nothing else.
+test('a request credential is scrubbed in its raw, encoded and decoded spellings', () => {
   const secret = 'oper' + '+OPERATORSECRET42';
   const url = 'https://feed.example/x?token=' + secret;
+  const secrets = requestSecrets(url, {});
   const bodies = [
     'token=' + secret,
     'token=' + encodeURIComponent(secret),
     'token=oper%2BOPERATORSECRET42',
   ];
   for (const body of bodies) {
+    const scrubbed = redactSecrets(body, secrets);
+    assert.equal(scrubbed.includes(secret), false, 'the raw spelling survived: ' + scrubbed);
+    assert.equal(scrubbed.includes('oper%2BOPERATORSECRET42'), false,
+      'the encoded spelling survived: ' + scrubbed);
     const shaped = shapeHttpError(500, Buffer.from(body), url, 400);
-    assert.equal(shaped.message.includes(secret), false, 'the raw spelling survived: ' + shaped.message);
-    assert.equal(shaped.message.includes('oper%2BOPERATORSECRET42'), false,
-      'the encoded spelling survived: ' + shaped.message);
+    assert.equal(shaped.message.includes(body), false, 'the answer reached the notice: ' + shaped.message);
   }
   // URLSearchParams decodes '+' as a space, so the spelling a server logs after decoding it and
   // the encoded form of that decoded value are both spellings of the request's own value.
   const spaced = 'https://feed.example/x?token=oper+plus';
+  const spacedSecrets = requestSecrets(spaced, {});
   for (const body of ['token=oper+plus', 'token=oper%20plus', 'token=oper plus']) {
-    const shaped = shapeHttpError(500, Buffer.from(body), spaced, 400);
-    assert.equal(/oper[+% ]?plus/.test(shaped.message), false,
-      'a spelling of the request value survived: ' + shaped.message);
+    const scrubbed = redactSecrets(body, spacedSecrets);
+    assert.equal(/oper[+% ]?plus/.test(scrubbed), false,
+      'a spelling of the request value survived: ' + scrubbed);
   }
   // TR-102: a server that echoes the value with a whitespace control inside it - a reflowed log
   // line, a body that wraps the token - defeats an exact match, because the collector normalises
   // the control to a space before the notice is published. A value at or above the floor is also
   // matched with optional whitespace between its characters, so neither half is readable.
-  const split = 'https://feed.example/x?token=' + secret;
+  const splitSecrets = requestSecrets('https://feed.example/x?token=' + secret, {});
   for (const body of ['token=oper+ OPERATORSECRET42', 'token=oper +OPERATORSECRET42',
     'token=o p e r + O P E R A T O R S E C R E T 4 2']) {
-    const shaped = shapeHttpError(500, Buffer.from(body), split, 400);
-    assert.equal(/oper|OPERATORSECRET42|plus/i.test(shaped.message), false,
-      'a whitespace-split spelling of the request value survived: ' + shaped.message);
+    const scrubbed = redactSecrets(body, splitSecrets);
+    assert.equal(/oper|OPERATORSECRET42|plus/i.test(scrubbed), false,
+      'a whitespace-split spelling of the request value survived: ' + scrubbed);
   }
   // The floor is what keeps the loose form from matching across unrelated text: a value below it
   // is matched only as its own token, so a short credential never rewrites the characters of a
-  // sentence that merely scatters them.
+  // sentence that merely scatters them. The notice carries none of the prose either.
   const shortUrl = 'https://feed.example/x?token=abc';
-  const prose = shapeHttpError(500, Buffer.from('the a b c sequence and xabcde survive'), shortUrl, 400);
-  assert.match(prose.message, /the a b c sequence and xabcde survive/,
-    'a short value never matches across unrelated text: ' + prose.message);
+  const prose = 'the a b c sequence and xabcde survive';
+  assert.equal(redactSecrets(prose, requestSecrets(shortUrl, {})), prose,
+    'a short value matched across unrelated text: ' + prose);
+  assert.equal(shapeHttpError(500, Buffer.from(prose), shortUrl, 400).message,
+    'HTTP 500 for https://feed.example/x', 'the notice is the status and the URL');
 });
 
 // TR-82 regression test: a candidate URL is the one text field the marker neutraliser did not
@@ -494,15 +542,14 @@ test('a curl that cannot be started is reported by cause, not as a generic failu
   rmSync(d, { recursive: true, force: true });
 });
 
-// Regression test: redactUrl cleaned the request the notice prints, but the notice also
-// quotes a bounded snippet of the server's own body, and the redactor that shaped it knew
-// only Bearer, authorization:-prefixed, gh*_ and github_pat_ shapes. An upstream that
-// echoes the request in its error page - "auth=Basic <base64 of user:password>" and the
-// query token again in the body - put the operator's feed credential in the pool, on
-// stdout and in the published digest. The request's own values must be removed from the
-// snippet it echoes, and the Basic shape must be recognised. The literals below are
-// assembled from fragments so this file never carries a credential-shaped string.
-test('shapeHttpError removes the request credential a server body echoes back', () => {
+// Regression test: an upstream that echoes the request in its error page - "auth=Basic
+// <base64 of user:password>" and the query token again in the body - once put the operator's
+// feed credential in the pool, on stdout and in the published digest, and the fix scrubbed the
+// copied snippet. The notice now quotes no answer text, so no spelling of the credential can
+// reach it, and the scrubber still removes the echo at its own seam as defence in depth. The
+// literals below are assembled from fragments so this file never carries a credential-shaped
+// string.
+test('shapeHttpError carries none of the body a server echoes the credential back in', () => {
   const user = 'feed' + 'user';
   const password = 's3cret' + '-PASSVALUE';
   const token = 'echo' + '-TOKENVALUE1234';
@@ -512,59 +559,67 @@ test('shapeHttpError removes the request credential a server body echoes back', 
     'the fixture really encodes the request credential');
   const body = 'denied: echo token=' + token + ' auth=Basic ' + basic;
   const shaped = shapeHttpError(500, Buffer.from(body), url, 200);
-  assert.match(shaped.message, /^HTTP 500 for http:\/\/feed\.example\/echo: /,
-    'the notice still names the request it reports');
+  assert.equal(shaped.message, 'HTTP 500 for http://feed.example/echo',
+    'the notice names the status and the redacted request only: ' + shaped.message);
   assert.equal(shaped.message.includes(token), false, 'the echoed token must not survive: ' + shaped.message);
   assert.equal(shaped.message.includes(basic), false, 'the Basic value must not survive: ' + shaped.message);
   assert.equal(shaped.message.includes(password), false, 'the password must not survive: ' + shaped.message);
+  assert.equal(shaped.message.includes('denied:'), false, 'no fragment of the answer reaches the notice: ' + shaped.message);
+  // The scrubber still removes the echo, so the guarantee does not rest on the notice rewrite.
+  const scrubbed = redactSecrets(body, requestSecrets(url, {}));
+  for (const value of [token, basic, password]) {
+    assert.equal(scrubbed.includes(value), false,
+      'the echo survived the scrubber: ' + value + ' in ' + scrubbed);
+  }
 });
 
 // Regression test: the value redaction removed every query value of three characters or more and
 // every whitespace-separated part of a credential-named header, with no word boundary and no
 // credential-shaped test, so a notice whose own wording happened to carry one read "the
 // [redacted] feed could not be parsed". The floor is what keeps a notice's own wording and the
-// scheme word that merely names the credential. It was then dropped from every URL-carried value
-// to catch a short credential, which reaped the collector's own prose: a production pool published
-// 'resets 2026-[redacted]-15T18:18:21.000Z' and 'listing capped at [redacted] entries' where the
-// previous run carried both, because the configured page sizes counted as credentials. The floor
-// applies once more to every query value whose name is not credential-shaped, while a
-// credential-named value and the userinfo are still removed whatever their length. Both directions
-// are pinned here.
-test('a notice keeps its own wording while the request credential is still removed', () => {
+// scheme word that merely names the credential, while a credential-named value and the userinfo
+// are still removed whatever their length. The shaped notice quotes no answer text now, so the
+// floor is pinned at the scrubber -- which also cleans the transport cause and the candidate
+// pass -- and the composed notice is pinned to the redacted request.
+test('the scrubber keeps a notice wording while the request credential is still removed', () => {
   const secret = 'echo' + '-TOKENVALUE1234';
-  const benign = shapeHttpError(500,
-    Buffer.from('the atom feed expects the token as Bearer; no query value is accepted'),
-    'https://feeds.example/rss?format=full', 200, { Authorization: 'Bearer ' + secret });
-  assert.match(benign.message, /the atom feed expects/, "a notice's own wording stays: " + benign.message);
-  assert.match(benign.message, /as Bearer;/, 'the scheme word stays: ' + benign.message);
-  assert.doesNotMatch(benign.message, /\[redacted\]/, 'a benign wording is not redacted: ' + benign.message);
+  const headers = { Authorization: 'Bearer ' + secret };
+  const wording = 'the atom feed expects the token as Bearer; no query value is accepted';
+  const benign = redactSecrets(wording, requestSecrets('https://feeds.example/rss?format=full', headers));
+  assert.match(benign, /the atom feed expects/, "a notice's own wording stays: " + benign);
+  assert.match(benign, /as Bearer;/, 'the scheme word stays: ' + benign);
+  assert.doesNotMatch(benign, /\[redacted\]/, 'a benign wording is not redacted: ' + benign);
   // 'format' is not a credential-shaped name, so its value keeps the floor: 'atom' is four
   // characters and is not collected, and the notice's own word survives even though the request
   // carried that same spelling in its URL.
-  const shortName = shapeHttpError(500,
-    Buffer.from('the atom feed expects the token as Bearer; no query value is accepted'),
-    'https://feeds.example/rss?format=atom', 200, { Authorization: 'Bearer ' + secret });
-  assert.match(shortName.message, /the atom feed expects/,
-    'a short non-credential query value does not reap the notice wording: ' + shortName.message);
-  assert.doesNotMatch(shortName.message, /\[redacted\]/,
-    'and nothing else in that notice is reaped either: ' + shortName.message);
+  const shortName = redactSecrets(wording, requestSecrets('https://feeds.example/rss?format=atom', headers));
+  assert.match(shortName, /the atom feed expects/,
+    'a short non-credential query value does not reap the notice wording: ' + shortName);
+  assert.doesNotMatch(shortName, /\[redacted\]/,
+    'and nothing else in that notice is reaped either: ' + shortName);
   // The other half of the decision: a credential-named query token is a credential position
   // whatever it spells, so a seven-character one goes, and the two-character userinfo password
   // with it, while a harmless word of free text stays readable.
   const token = 'ABC1234';
-  const credentialName = shapeHttpError(500,
-    Buffer.from('upstream said: token=' + token + ' and the password pw was rejected; '
-      + 'the atom feed is otherwise fine'),
+  const upstream = 'upstream said: token=' + token + ' and the password pw was rejected; '
+    + 'the atom feed is otherwise fine';
+  const credentialName = redactSecrets(upstream,
+    requestSecrets('https://feeduser:pw@feeds.example/rss?token=' + token, {}));
+  assert.equal(credentialName.includes(token), false,
+    'a short credential-named token is still removed: ' + credentialName);
+  assert.doesNotMatch(credentialName, /(^|[^A-Za-z])pw([^A-Za-z]|$)/,
+    'a short userinfo password is still removed: ' + credentialName);
+  assert.match(credentialName, /the atom feed is otherwise fine/,
+    'a harmless word that is not the request value stays: ' + credentialName);
+  // The composed notice with that same answer carries the status and the redacted URL only.
+  const shaped = shapeHttpError(500, Buffer.from(upstream),
     'https://feeduser:pw@feeds.example/rss?token=' + token, 200);
-  assert.equal(credentialName.message.includes(token), false,
-    'a short credential-named token is still removed: ' + credentialName.message);
-  assert.doesNotMatch(credentialName.message, /(^|[^A-Za-z])pw([^A-Za-z]|$)/,
-    'a short userinfo password is still removed: ' + credentialName.message);
-  assert.match(credentialName.message, /the atom feed is otherwise fine/,
-    'a harmless word that is not the request value stays: ' + credentialName.message);
+  assert.equal(shaped.message, 'HTTP 500 for https://feeds.example/rss',
+    'the notice is the status and the redacted URL: ' + shaped.message);
+  assert.equal(shaped.message.includes('otherwise fine'), false, 'the answer text reached the notice');
   const echoed = shapeHttpError(500,
     Buffer.from('denied: token=' + secret + ' for the atom feed'),
-    'https://feeds.example/rss?format=atom', 200, { Authorization: 'Bearer ' + secret });
+    'https://feeds.example/rss?format=atom', 200, headers);
   assert.equal(echoed.message.includes(secret), false,
     'the request credential is still removed: ' + echoed.message);
 });
@@ -614,31 +669,36 @@ test('the neutraliser still rewrites a standalone status flag at a token boundar
 // userinfo password - was never collected and reached the notice, the pool and the Coverage note
 // verbatim. A value the request sends in its userinfo or its query is not an ordinary word that
 // happens to look like a credential: it is removed whatever its length. The floor still keeps a
-// short word in free text that is not the request's own value.
-test('a short credential the request sent is removed from the notice that echoes it', () => {
+// short word in free text that is not the request's own value, and the notice now quotes no answer
+// text for any of it to hide in.
+test('a short credential the request sent is still scrubbed while the notice quotes no answer', () => {
   const password = 'pw';
   const token = 'ABC1234';
   const url = 'https://feeduser:' + password + '@feeds.example/echo?token=' + token;
   const body = 'upstream said: token=' + token + ' and the password ' + password
     + ' was rejected; the atom feed is otherwise fine';
+  const scrubbed = redactSecrets(body, requestSecrets(url, {}));
+  assert.equal(scrubbed.includes(token), false,
+    'the short query token must not survive: ' + scrubbed);
+  assert.doesNotMatch(scrubbed, /(^|[^A-Za-z])pw([^A-Za-z]|$)/,
+    'the userinfo password must not survive: ' + scrubbed);
+  assert.match(scrubbed, /the atom feed is otherwise fine/,
+    "a harmless short word that is not the request's own value stays: " + scrubbed);
   const shaped = shapeHttpError(500, Buffer.from(body), url, 400);
-  assert.match(shaped.message, /^HTTP 500 for https:\/\/feeds\.example\/echo\/?: /,
+  assert.equal(shaped.message, 'HTTP 500 for https://feeds.example/echo',
     'the notice still names the request it reports: ' + shaped.message);
-  assert.equal(shaped.message.includes(token), false,
-    'the short query token must not reach the notice: ' + shaped.message);
-  assert.doesNotMatch(shaped.message, /(^|[^A-Za-z])pw([^A-Za-z]|$)/,
-    'the userinfo password must not reach the notice: ' + shaped.message);
-  assert.match(shaped.message, /the atom feed is otherwise fine/,
-    "a harmless short word that is not the request's own value stays: " + shaped.message);
+  assert.equal(shaped.message.includes('upstream said'), false, 'the answer text reached the notice');
 });
 
 // TR-109 regression test: the batch-8 parameter test required the credential stem to begin
 // where a word begins, so every fused spelling (apikey, apiKey, accesstoken, refreshtoken,
 // clientsecret, privatekey, subscriptionkey, bearer, jwt) matched nothing, and the value under
 // it was collected by neither rule because it also failed the length floor. The name is
-// lower-cased and stripped of every non-alphanumeric before the stem test, and the stem is a
-// substring of that form, so a fused spelling is the same parameter as its hyphenated one.
-test('a fused credential parameter name protects a short value', () => {
+// lower-cased and stripped of every non-alphanumeric before the stem test, and the stem is
+// tested on that form, so a fused spelling is the same parameter as its hyphenated one. The
+// collection and the scrub are pinned at their seam, and the composed notice is the redacted
+// request.
+test('a fused credential parameter name protects its value at the scrubber and in the notice', () => {
   const fused = [
     ['apikey', '1234'],
     ['apiKey', '9911'],
@@ -651,18 +711,30 @@ test('a fused credential parameter name protects a short value', () => {
   ];
   for (const [name, value] of fused) {
     const url = 'https://feeds.example/rss.xml?' + name + '=' + value;
+    const secrets = requestSecrets(url, {});
+    assert.equal(secrets.includes(value), true,
+      'the fused spelling ' + name + ' is not a credential position: ' + JSON.stringify(secrets));
+    const scrubbed = redactSecrets('upstream rejected /rss.xml?' + name + '=' + value, secrets);
+    assert.equal(scrubbed.includes(value), false,
+      'the fused spelling ' + name + ' leaked its value: ' + scrubbed);
     const shaped = shapeHttpError(500,
       Buffer.from('upstream rejected /rss.xml?' + name + '=' + value), url, 200);
     assert.equal(shaped.message.includes(value), false,
-      'the fused spelling ' + name + ' leaked its value: ' + shaped.message);
+      'the fused spelling ' + name + ' leaked its value into the notice: ' + shaped.message);
+    assert.equal(shaped.message.includes('upstream rejected'), false,
+      'the answer text reached the notice: ' + shaped.message);
   }
   // The hyphenated, underscored, mixed-case and prefixed spellings keep matching too.
   for (const name of ['api_key', 'private-key', 'X-Amz-Signature', 'AWSAccessKeyId']) {
     const value = 'SENTINELVALUE42';
     const url = 'https://feeds.example/rss.xml?' + name + '=' + value;
+    const secrets = requestSecrets(url, {});
+    assert.equal(secrets.includes(value), true, name + ' is not a credential position');
+    const scrubbed = redactSecrets('echo ' + value, secrets);
+    assert.equal(scrubbed.includes(value), false, name + ' leaked its value: ' + scrubbed);
     const shaped = shapeHttpError(500, Buffer.from('echo ' + value), url, 200);
     assert.equal(shaped.message.includes(value), false,
-      name + ' leaked its value: ' + shaped.message);
+      name + ' leaked its value into the notice: ' + shaped.message);
   }
 });
 
@@ -684,14 +756,19 @@ test('an ordinary query parameter value is not collected, however long it is', (
 // TR-111 regression test: a credential-named parameter whose value is an ordinary short word
 // reaped that word from every published field, so a notice reading 'Python on Windows' became
 // 'Python [redacted] Windows'. A credential-named value is collected from three characters up;
-// the userinfo stays a credential position whatever its length.
+// the userinfo stays a credential position whatever its length. The notice quotes no answer text
+// now, so the floor is pinned at the scrubber and the composed notice is the redacted request.
 test('a credential-named value below three characters is not collected', () => {
   assert.deepEqual(requestSecrets('https://feeds.example/rss.xml?code=on', {}), [],
     'a two-character credential-named value is not collected');
-  const shaped = shapeHttpError(500, Buffer.from('Python on Windows is supported'),
+  const wording = 'Python on Windows is supported';
+  assert.equal(redactSecrets(wording, requestSecrets('https://feeds.example/rss.xml?code=on', {})), wording,
+    'the scrubbed wording keeps every word');
+  const shaped = shapeHttpError(500, Buffer.from(wording),
     'https://feeds.example/rss.xml?code=on', 200);
-  assert.equal(shaped.message, 'HTTP 500 for https://feeds.example/rss.xml: Python on Windows is supported',
-    'the notice keeps its own wording: ' + shaped.message);
+  assert.equal(shaped.message, 'HTTP 500 for https://feeds.example/rss.xml',
+    'the notice is the status and the redacted request: ' + shaped.message);
+  assert.equal(shaped.message.includes(wording), false, 'the answer text reached the notice');
   // Three characters is the floor the other side of the same boundary.
   assert.equal(requestSecrets('https://feeds.example/rss.xml?code=new', {}).includes('new'), true,
     'a three-character credential-named value is collected');
@@ -702,15 +779,21 @@ test('a credential-named value below three characters is not collected', () => {
 
 // TR-112 regression test: the markdown link seam was applied by the same neutraliser candidate
 // prose uses, so a legitimate upstream Markdown link in a release body was defaced in the pool
-// ('[the migration guide] (https://example.com/migrate)'). The seam belongs to the notice path,
-// which is the published Coverage note; candidate prose keeps the link it was written with.
-test('a legitimate markdown link survives candidate prose while a notice ends the link grammar', () => {
+// ('[the migration guide] (https://example.com/migrate)'). The seam belongs to the notice push,
+// which is the published Coverage note: candidate prose keeps the link it was written with, and
+// a notice that reaches the push carrying link syntax -- a thrown transport message, say -- has
+// its grammar ended there. The shaped HTTP notice quotes no upstream text, so it cannot carry the
+// link at all.
+test('a legitimate markdown link survives candidate prose while a notice carries none', () => {
   const link = 'Fixes a crash. See [the migration guide](https://example.com/migrate) and [docs](https://example.com/d).';
   assert.equal(plainText(link, 400), link, 'candidate prose keeps its markdown link byte-identical');
   assert.equal(neutraliseMarkers(link), link, 'the candidate neutraliser leaves the seam alone');
+  assert.equal(neutraliseLinkSeams('[the migration guide](https://example.com/migrate)'),
+    '[the migration guide] (https://example.com/migrate)',
+    'the notice push ends the link grammar while the label and destination stay legible');
   const shaped = shapeHttpError(500, Buffer.from(link), 'https://feeds.example/rss.xml', 400);
+  assert.equal(shaped.message, 'HTTP 500 for https://feeds.example/rss.xml',
+    'the notice carries no upstream text at all: ' + shaped.message);
   assert.doesNotMatch(shaped.message, /\]\(/, 'the notice carries no live link seam: ' + shaped.message);
-  assert.match(shaped.message, /\[the migration guide\] \(https:\/\/example\.com\/migrate\)/,
-    'the notice keeps the label and the destination legible: ' + shaped.message);
 });
 

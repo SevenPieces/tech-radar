@@ -207,7 +207,10 @@ test('collectGithub turns a per-repository 403 into a notice naming the reposito
   const { candidates, notices } = await collectGithub(rows, ctxWith(net));
   assert.deepEqual(candidates, []);
   assert.equal(notices.length, 2, 'the repository notice and the budget notice: ' + JSON.stringify(notices));
-  assert.match(notices[0], /^github nodejs\/node: HTTP 403 for .*rate limit exceeded/);
+  assert.equal(notices[0], 'github nodejs/node: HTTP 403 for https://api.github.com/repos/nodejs/node/releases',
+    'the notice names the status and the redacted request: ' + notices[0]);
+  assert.equal(notices[0].includes('rate limit exceeded'), false,
+    'the upstream body reached the notice: ' + notices[0]);
   assert.match(notices[1], /^github: rate limit reached /, 'the refusal settles the budget');
 }));
 
@@ -317,8 +320,9 @@ test('a probe that fails makes one notice and no repository request', () => anon
   assert.deepEqual(candidates, []);
   assert.deepEqual(calls, [PROBE], 'there is no fallback to the per-row loop');
   assert.equal(notices.length, 1);
-  assert.match(notices[0], /^github: rate limit could not be checked \(HTTP 403 for https:\/\/api\.github\.com\/rate_limit: /);
-  assert.match(notices[0], /4 repositories not checked$/);
+  assert.equal(notices[0],
+    'github: rate limit could not be checked (HTTP 403 for https://api.github.com/rate_limit); 4 repositories not checked',
+    'the notice names the status and the redacted request and quotes no answer text: ' + notices[0]);
 }));
 
 // An organisation row stands for up to github_org_repos repositories, so counting it as one

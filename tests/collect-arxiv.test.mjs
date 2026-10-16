@@ -50,8 +50,10 @@ test('collectArxiv turns an HTTP 404 into a notice instead of a silent skip', as
   const { candidates, notices } = await collectArxiv(rows, missing);
   assert.deepEqual(candidates, []);
   assert.equal(notices.length, 1);
-  assert.match(notices[0], /^arxiv cs\.CV: HTTP 404 for /);
-  assert.match(notices[0], /Not Found/);
+  assert.match(notices[0], /^arxiv cs\.CV: HTTP 404 for https:\/\/export\.arxiv\.org\/api\/query$/,
+    'the notice names the status and the redacted request: ' + notices[0]);
+  assert.equal(notices[0].includes('Not Found'), false,
+    'the upstream body reached the notice: ' + notices[0]);
 });
 
 // Regression test: a listing that hits arxiv_max_results is not a complete one, and

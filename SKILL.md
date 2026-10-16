@@ -144,16 +144,19 @@ research from what you have and say so in the digest; do not silently thin it. A
 be re-probed before the next run, because `fetchable` in `config/sources.md` is a record of a past probe rather
 than a guarantee.
 
-**Know a notice's redaction boundary.** A URL in a notice keeps its scheme, host and path and loses its userinfo and
-its whole query string, so a secret embedded in a path survives redaction and reaches the notice and the candidate's
-published `source`. The text a notice quotes is scrubbed by value, and there a parameter name does tell a credential
-from a benign one: the request's userinfo password is removed whatever its length while a username of under eight
-characters is not, and the value of a parameter whose name is
-credential-shaped (a name carrying a stem such as `token`, `key`, `secret` or `auth`, however it is spelled) from
-three characters up. Nothing else the request put in its URL is removed — a value under a benign parameter name is
-kept however long it is, so the notice keeps its own wording — and a server's echo in a spelling none of that covers
-is still published. That is a known boundary rather than an oversight: the path is what keeps the notice diagnosable,
-so read a notice as a diagnostic, not as proof that no secret is in it.
+**Know a notice's boundary.** A notice describes the degradation it records — the source, the status and the
+cause — and never quotes the upstream answer's text: an HTTP failure is reported as
+`HTTP <status> for <redacted url>` with no excerpt of the response body, and a skipped advisory identifier or
+an unreadable release version is described, never reproduced. The URL a notice names keeps its scheme, host and
+path and loses its userinfo and its whole query string, so a secret embedded in a path survives that rule and
+reaches the notice and the candidate's published `source`; the path is what keeps the notice diagnosable, so read
+a notice as a diagnostic of a degraded source, not as proof that no secret is in it. The scrubbing of the
+request's own values stays as defence in depth for the collector's own wording and curl's diagnostic line: at the
+single point every notice is pushed, the request's userinfo password is removed whatever its length while a
+username of under eight characters is not, the value of a parameter whose name is credential-shaped (a name
+carrying a stem such as `token`, `key`, `secret` or `auth`, however it is spelled) from three characters up, a
+credential header goes whole, and the credential shapes the collector recognises go too — nothing else the request
+put in its URL is removed.
 
 **The GitHub budget is the one notice with a documented remedy.** The collector discovers the live limit at run
 time by probing `/rate_limit`, which GitHub documents as not consuming the core budget, so the probe is **free**

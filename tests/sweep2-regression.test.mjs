@@ -148,17 +148,19 @@ test('TR-111 a one or two character credential-named value reaps nothing while u
   // the notice's prose.
   const shaped = shapeHttpError(500, Buffer.from('Python on Windows appeared twice'),
     'https://feeds.example/rss.xml?code=on', 200);
-  assert.match(shaped.message, /Python on Windows/,
-    'a credential-named value reaped the notice prose: ' + shaped.message);
+  assert.equal(shaped.message, 'HTTP 500 for https://feeds.example/rss.xml',
+    'the notice is the status and the redacted request: ' + shaped.message);
+  assert.equal(shaped.message.includes('Python on Windows'), false,
+    'the upstream answer reached the notice: ' + shaped.message);
 });
 
 // TR-112 (second-sweep F-5): the markdown-link seam lived inside neutraliseMarkers, which is
 // also the candidate prose transform, so a legitimate upstream link in a release body or a feed
-// title was defaced in the pool ("[label] (url)"). The seam belongs to the notice sanitiser: a
-// candidate title must carry the link upstream wrote, while every notice still carries no link
-// syntax a Markdown reader could draw a live anchor from. Both notice spellings are covered -
-// an identifier interpolated straight into the notice and the snippet of a body the transport
-// shaped - so a fix that only spares the candidate path fails the second half.
+// title was defaced in the pool ("[label] (url)"). The seam belongs to the notice push: a
+// candidate title must carry the link upstream wrote, while a notice carries no link syntax a
+// Markdown reader could draw a live anchor from. The notice rule now keeps every upstream value
+// out of the notice, the identifier included, so both notice spellings below are pinned to the
+// collector's own wording while the candidate half still fails a fix that defaces the pool.
 test('TR-112 a legitimate upstream markdown link survives a candidate title while a notice carries none', async () => {
   const link = '[the migration guide](https://example.com/migrate)';
   assert.equal(plainText(link, 200), link,
@@ -178,8 +180,8 @@ test('TR-112 a legitimate upstream markdown link survives a candidate title whil
   assert.match(candidates[0].title, /\]\(https:\/\/example\.com\/migrate\)/,
     'a legitimate upstream link was defaced in a candidate title: ' + candidates[0].title);
 
-  // The notice direction, path one: an identifier the upstream chose, interpolated into the
-  // notice the Coverage note publishes.
+  // The notice direction, path one: an identifier the upstream chose, once interpolated into the
+  // notice the Coverage note publishes and now quoted nowhere.
   const advisoryCtx = {
     since: '2026-09-16T00:00:00Z', until: '2026-09-23T00:00:00Z', timeout: 5000,
     settings: ADVISORY_SETTINGS,
@@ -197,11 +199,13 @@ test('TR-112 a legitimate upstream markdown link survives a candidate title whil
   assert.equal(notices.length, 1, 'the rejected identifier is reported: ' + notices.join(' | '));
   assert.doesNotMatch(notices[0], /\]\(/,
     'a notice still carries markdown link syntax: ' + notices[0]);
+  assert.equal(notices[0].includes('evil.example'), false,
+    'the upstream identifier reached the notice: ' + notices[0]);
   assert.doesNotMatch(renderMarkdown(notices[0]), /<a\b/,
     'the notice renders a live anchor: ' + renderMarkdown(notices[0]));
 
-  // The notice direction, path two: the snippet of a 5xx body the transport shaped, which now
-  // reaches the notice with its punctuation intact and must still be neutralised at the push.
+  // The notice direction, path two: the shaped 5xx error, which used to carry a body snippet into
+  // the notice and now carries the status and the redacted request only.
   const errorCtx = {
     ...feedCtx,
     net: {
@@ -214,6 +218,11 @@ test('TR-112 a legitimate upstream markdown link survives a candidate title whil
     [{ kind: 'rss', target: 'https://feeds.example/releases.xml', domain: 'ai-llm', note: '' }], errorCtx);
   assert.deepEqual(failed, [], 'the failing feed contributes no candidate');
   assert.equal(errorNotices.length, 1, 'the failing feed is reported: ' + errorNotices.join(' | '));
+  assert.equal(errorNotices[0],
+    'rss https://feeds.example/releases.xml: HTTP 500 for https://feeds.example/releases.xml',
+    'the notice is the status and the redacted request: ' + errorNotices[0]);
+  assert.equal(errorNotices[0].includes('the log'), false,
+    'the upstream body reached the notice: ' + errorNotices[0]);
   assert.doesNotMatch(errorNotices[0], /\]\(/,
     'a notice built from a server body still carries link syntax: ' + errorNotices[0]);
   assert.doesNotMatch(renderMarkdown(errorNotices[0]), /<a\b/,

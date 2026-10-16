@@ -302,8 +302,9 @@ function toIso(value) {
 
 // A 403 or 429 whose answer names the rate limit is the server saying the allowance is spent.
 // A repository that is merely forbidden answers with its own message, so the text has to name
-// the limit to count; the shaped HTTP error carries the bounded, tag-stripped snippet in both
-// its message and its body.
+// the limit to count. The shaped HTTP error's message names the status and the redacted URL and
+// quotes no answer text, so the bounded, tag-stripped snippet on its internal body field is what
+// this classification reads; that field is never interpolated into a notice.
 function isRateLimitRefusal(err) {
   const status = Number(err?.httpStatus);
   if (status !== 403 && status !== 429) return false;
@@ -579,17 +580,6 @@ export function nvdStamp(iso) {
 // rather than trusted, encoded or not.
 const CVE_ID = /^CVE-\d{4}-\d{4,}$/;
 
-// What a skipped identifier is called in the notice. The id is upstream text of arbitrary
-// length and content, so it crosses the same normalisation the transport's body snippet does
-// before it can be quoted: plainText strips a tag-shaped span, drops the control bytes and
-// neutralises the vocabulary the renderer trusts, and the push adds the markdown link seam. The
-// notice therefore carries no live <a href>, no <img src> and no link syntax the Coverage note
-// would render, while JSON.stringify keeps what was rejected legible to the reader.
-function unnamedAdvisory(id) {
-  const text = plainText(String(id ?? ''), 400);
-  return JSON.stringify(text.length > 120 ? `${text.slice(0, 120)}...` : text);
-}
-
 // Every reader answers one question: when was the version we are about to report
 // actually released? Never a "last modified" timestamp -- registry bookkeeping
 // moves for reasons that have nothing to do with a release (metadata edits,
@@ -735,13 +725,11 @@ export async function collectRegistries(rows, ctx) {
       const { version, at } = spec.read(json);
       const publishedAt = toIso(at);
       // A registry release whose release time cannot be established is a notice, not an
-      // undated "release" that passes every window.
+      // undated "release" that passes every window. The version is upstream text and a notice
+      // quotes none of it, so the notice names the source, the kind and the cause, and not the
+      // version it could not date.
       if (!publishedAt) {
-        // The version is upstream text and a notice is published verbatim into the Coverage note,
-        // so it crosses the same normalisation the transport's body snippet does (TR-119): the
-        // notice cannot become a carrier for a tag-shaped version.
-        const versionText = plainText(String(version ?? ''), ctx.settings.title_max_chars);
-        pushNotice(notices, `${row.kind} ${row.target}: no release time for ${versionText || 'the latest version'}; candidate skipped`);
+        pushNotice(notices, `${row.kind} ${row.target}: no release time for the latest version; candidate skipped`);
         continue;
       }
       if (ctx.since && publishedAt < ctx.since) continue;
@@ -822,7 +810,10 @@ export async function collectAdvisories(rows, ctx) {
           // reported.
           const id = String(cve.id ?? '');
           if (!CVE_ID.test(id)) {
-            pushNotice(notices, `${row.kind}: skipped an advisory whose identifier is not a CVE id: ${unnamedAdvisory(id)}`, secrets);
+            // The identifier is upstream text and a notice quotes none of it: the notice still
+            // names the source and the cause a reader needs -- an advisory was skipped because
+            // its identifier is not a CVE id -- without republishing the rejected value.
+            pushNotice(notices, `${row.kind}: skipped an advisory whose identifier is not a CVE id`, secrets);
             continue;
           }
           candidates.push({

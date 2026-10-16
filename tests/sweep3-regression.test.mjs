@@ -3,9 +3,10 @@
 // regressions the third adversarial sweep recorded against fdfb7ea, and the notice-push residual
 // its tag-shaped-value fix left behind. Each case pins both directions of its rule: what must
 // still be protected, and what must not be damaged. The cases drive the seams the sweep named -
-// requestSecretSets/requestSecrets/redactSecrets, the collector's candidate pass, the two notice
-// sites that interpolate an upstream value, and the single push every notice crosses - not a
-// private helper, so a fix that only moves the symptom does not satisfy them.
+// requestSecretSets/requestSecrets/redactSecrets, the collector's candidate pass, the notice
+// sites that interpolate an upstream value -- which the notice rule now strips of that value
+// entirely -- and the single push every notice crosses, not a private helper, so a fix that only
+// moves the symptom does not satisfy them.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { collectAdvisories, collectAll, collectGithub, collectRegistries } from '../scripts/collect.mjs';
@@ -246,27 +247,35 @@ test('TR-119 tag-shaped upstream values reach no notice verbatim', async () => {
       'the rejected identifier is reported: ' + advisories.notices.join(' | '));
     assert.equal(advisories.notices[0].includes(tag), false,
       'an advisory identifier reached the notice verbatim: ' + advisories.notices[0]);
+    assert.equal(advisories.notices[0], 'nvd: skipped an advisory whose identifier is not a CVE id',
+      'the notice is the collector wording alone: ' + advisories.notices[0]);
     noLiveTag(advisories.notices[0]);
     const registries = await collectRegistries(NPM_ROW, registryContext(tag));
     assert.equal(registries.notices.length, 1,
       'the skipped version is reported: ' + registries.notices.join(' | '));
     assert.equal(registries.notices[0].includes(tag), false,
       'a registry version reached the notice verbatim: ' + registries.notices[0]);
+    assert.equal(registries.notices[0],
+      'npm left-pad: no release time for the latest version; candidate skipped',
+      'the notice is the collector wording alone: ' + registries.notices[0]);
     noLiveTag(registries.notices[0]);
   }
 });
 
-test('TR-119 a legitimate upstream message still reads in the notice', async () => {
+test('TR-119 the notice names the source and the cause without quoting the upstream value', async () => {
   const advisories = await collectAdvisories(NVD_ROW, advisoryContext('not-a-cve-id'));
   assert.equal(advisories.notices.length, 1);
-  assert.match(advisories.notices[0], /skipped an advisory whose identifier is not a CVE id/,
+  assert.equal(advisories.notices[0], 'nvd: skipped an advisory whose identifier is not a CVE id',
     'the notice keeps its own wording: ' + advisories.notices[0]);
-  assert.match(advisories.notices[0], /not-a-cve-id/,
-    'the rejected identifier stays legible: ' + advisories.notices[0]);
+  assert.equal(advisories.notices[0].includes('not-a-cve-id'), false,
+    'the rejected identifier reached the notice: ' + advisories.notices[0]);
   const registries = await collectRegistries(NPM_ROW, registryContext('1.2.3'));
   assert.equal(registries.notices.length, 1);
-  assert.match(registries.notices[0], /no release time for 1\.2\.3; candidate skipped/,
-    'a legitimate version still reads in the notice: ' + registries.notices[0]);
+  assert.equal(registries.notices[0],
+    'npm left-pad: no release time for the latest version; candidate skipped',
+    'the notice names the source and the cause: ' + registries.notices[0]);
+  assert.equal(registries.notices[0].includes('1.2.3'), false,
+    'the upstream version reached the notice: ' + registries.notices[0]);
 });
 
 // TR-122 regression test: the tag shape is the one upstream spelling a notice cannot carry. A

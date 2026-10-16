@@ -201,7 +201,9 @@ test('a crate whose newest version is absent from versions[] gets no borrowed da
   const { candidates, notices } = await collectRegistries(regRow('crates', 'ghost', 'languages-runtimes'), withNet(body));
   assert.deepEqual(candidates, [], 'no candidate rather than one dated from another version');
   assert.equal(notices.length, 1);
-  assert.match(notices[0], /^crates ghost: no release time for 2\.0\.0/);
+  assert.equal(notices[0], 'crates ghost: no release time for the latest version; candidate skipped',
+    'the notice names the source and the cause, not the upstream version: ' + notices[0]);
+  assert.equal(notices[0].includes('2.0.0'), false, 'the upstream version reached the notice: ' + notices[0]);
 });
 
 test('an npm release with no publish time for its latest version is skipped with a notice', async () => {
@@ -212,7 +214,9 @@ test('an npm release with no publish time for its latest version is skipped with
   const { candidates, notices } = await collectRegistries(regRow('npm', 'ghost', 'languages-runtimes'), withNet(body));
   assert.deepEqual(candidates, [], 'the modified time is not a release time');
   assert.equal(notices.length, 1);
-  assert.match(notices[0], /^npm ghost: no release time for 9\.9\.9/);
+  assert.equal(notices[0], 'npm ghost: no release time for the latest version; candidate skipped',
+    'the notice names the source and the cause, not the upstream version: ' + notices[0]);
+  assert.equal(notices[0].includes('9.9.9'), false, 'the upstream version reached the notice: ' + notices[0]);
 });
 
 test('a PyPI release with no files has no release time and is skipped with a notice', async () => {
@@ -221,7 +225,9 @@ test('a PyPI release with no files has no release time and is skipped with a not
   );
   assert.deepEqual(candidates, []);
   assert.equal(notices.length, 1);
-  assert.match(notices[0], /^pypi ghost: no release time for 3\.0\.0/);
+  assert.equal(notices[0], 'pypi ghost: no release time for the latest version; candidate skipped',
+    'the notice names the source and the cause, not the upstream version: ' + notices[0]);
+  assert.equal(notices[0].includes('3.0.0'), false, 'the upstream version reached the notice: ' + notices[0]);
 });
 
 // Regression test: the registry and advisory collectors push a JSON parse error straight into
@@ -420,17 +426,20 @@ test('a crafted or absent NVD identifier never becomes a citation', async () => 
     'each unusable identifier is reported, not dropped silently: ' + notices.join(' | '));
   for (const notice of notices) {
     assert.match(notice, /identifier/i, 'the notice names what it skipped: ' + notice);
+    assert.equal(notice.includes('evil.example'), false, 'a rejected identifier reached the notice: ' + notice);
+    assert.equal(notice.includes('vendor-claim'), false, 'a rejected identifier reached the notice: ' + notice);
+    assert.doesNotMatch(notice, /CVE-2026-0001/, 'a rejected identifier reached the notice: ' + notice);
   }
 });
 
 // TR-107 regression test: a notice is published text and the digest ships as Markdown, so the
 // Coverage note is read through a Markdown renderer whose link rule draws a live anchor out of
 // '[label](destination)'. The identifier a rejected advisory carries is upstream text of
-// arbitrary shape - the row below is skipped precisely because it is not a CVE id - so an id
-// that spells '[x](https://evil.example/pwn)' was quoted into the notice verbatim and the
-// published coverage note carried an anchor pointing wherever the upstream value chose. The
-// link syntax is neutralised in the same single place the marker vocabulary is, while an
-// ordinary bracketed word and the punctuation of a legitimate server message survive.
+// arbitrary shape - the row below is skipped precisely because it is not a CVE id - and it was
+// once quoted into the notice verbatim, so an id that spelled '[x](https://evil.example/pwn)'
+// put an anchor pointing wherever the upstream value chose into the published note. The notice
+// now quotes no identifier at all, so no anchor can be drawn from one, and the link seam the
+// push applies stays as defence in depth for any notice that reaches it carrying link syntax.
 const MARKDOWN_LINK = /\[([^\]\n]*)\]\(((?:[^()\s]|\([^()\s]*\))*)\)/g;
 // The one rendering rule this test pins: the notice text through a Markdown reader. A live
 // anchor is exactly what the rule draws, and its address is the upstream value's own.
@@ -453,17 +462,21 @@ test('a rejected NVD identifier that spells a markdown link draws no anchor in t
   assert.deepEqual(candidates, [], 'neither identifier is a CVE id, so neither row ships');
   assert.equal(notices.length, 2, 'each unusable identifier is reported: ' + notices.join(' | '));
 
-  // What the coverage note publishes, read the way a Markdown reader reads it.
+  // What the coverage note publishes, read the way a Markdown reader reads it. The notice names
+  // the source and the cause and quotes neither identifier, so no anchor can be drawn from one.
   const rendered = notices.map(renderMarkdown).join('\n');
   assert.doesNotMatch(rendered, /<a\b/, 'a notice rendered a live anchor: ' + rendered);
-  assert.match(notices[0], /identifier/i, 'the notice still names what it skipped: ' + notices[0]);
+  for (const notice of notices) {
+    assert.match(notice, /identifier is not a CVE id/, 'the notice still names what it skipped: ' + notice);
+  }
+  assert.equal(notices[0].includes('evil.example'), false,
+    'the rejected identifier reached the notice: ' + notices[0]);
+  assert.equal(notices[1].includes('draft'), false,
+    'the rejected identifier reached the notice: ' + notices[1]);
+  assert.doesNotMatch(notices[1], /\[draft\] CVE/, 'the rejected identifier reached the notice: ' + notices[1]);
 
-  // An ordinary bracketed word spells no link, so it survives exactly as upstream wrote it.
-  assert.match(notices[1], /\[draft\] CVE/, 'a bracketed word that spells no link survives: ' + notices[1]);
-  assert.doesNotMatch(renderMarkdown(notices[1]), /<a\b/,
-    'a bracketed word draws no anchor: ' + notices[1]);
-
-  // A legitimate server message keeps its punctuation through the same single sanitiser.
+  // A shaped 5xx notice is the status and the redacted request; the server's own message, and
+  // the punctuation and link syntax in it, never reach the Coverage note.
   const stub = {
     ...ctx,
     net: {
@@ -477,8 +490,11 @@ test('a rejected NVD identifier that spells a markdown link draws no anchor in t
   const { notices: shaped } = await collectRegistries(
     [{ kind: 'npm', target: 'serde', domain: 'ai-llm' }], stub);
   assert.equal(shaped.length, 1, 'the failed row produced one notice');
-  assert.match(shaped[0], /the feed is otherwise fine \(retry later\); see \[1\] of the log/,
-    'a legitimate server message keeps its punctuation: ' + shaped[0]);
+  assert.equal(shaped[0], 'npm serde: HTTP 500 for https://feeds.example/rss',
+    'the notice is the status and the redacted request: ' + shaped[0]);
+  assert.equal(shaped[0].includes('otherwise fine'), false,
+    'the upstream answer reached the notice: ' + shaped[0]);
+  assert.doesNotMatch(shaped[0], /\]\(/, 'the notice carries no link syntax: ' + shaped[0]);
   assert.doesNotMatch(renderMarkdown(shaped[0]), /<a\b/,
     'a parenthesised remark is not a link: ' + shaped[0]);
 });

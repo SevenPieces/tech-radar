@@ -367,17 +367,27 @@ function requirePositive(value, what) {
 // and nothing may be inferred from a field that means something else.
 
 // An HTTP status we obtained ourselves, from a transfer that completed (curl exit
-// 0). Pure and offline-testable. The body snippet is bounded and tag-stripped so a
-// notice cannot become an unbounded server dump.
+// 0). Pure and offline-testable. The answer's text is never quoted into the message: a
+// notice describes the degradation -- the status and the request's redacted URL -- so
+// nothing a server answered can reach the Coverage note the notice is published in. The
+// bounded, tag-stripped snippet is still built, and stays on the error as its internal
+// body field, because the caller's refusal predicate is the one thing that has to read
+// the answer; it is a classification input and never notice text.
 export function shapeHttpError(status, body, url, limit, headers) {
+  const bound = requirePositive(limit, 'the error snippet limit in characters');
   const source = Buffer.isBuffer(body) ? body : Buffer.from(String(body ?? ''));
-  // The snippet is notice text, and a notice is published verbatim into the Coverage note, so
-  // the markdown link seam belongs here with the rest of the notice normalisation.
   const snippet = redactSecrets(
-    neutraliseLinkSeams(plainText(decodeBuffer(source), requirePositive(limit, 'the error snippet limit in characters'))),
+    neutraliseLinkSeams(plainText(decodeBuffer(source), bound)),
     requestSecrets(url, headers),
   );
-  const shaped = new Error(`HTTP ${status} for ${redactUrl(url)}: ${snippet || 'no response body'}`);
+  // The cap bounds the shaped text, and the status is what must never be lost with it: the
+  // redacted URL takes the room the cap leaves, so a notice still reads 'HTTP <status> for'
+  // even when a long URL has to be cut. The URL's scheme, host and path are what stays
+  // diagnosable.
+  const prefix = `HTTP ${status} for `;
+  const shown = redactUrl(url);
+  const room = Math.max(0, bound - prefix.length);
+  const shaped = new Error(prefix + (shown.length > room ? shown.slice(0, room) : shown));
   shaped.url = url;
   shaped.httpStatus = Number(status);
   shaped.body = snippet;

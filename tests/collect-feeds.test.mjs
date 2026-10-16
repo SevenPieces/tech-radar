@@ -92,8 +92,12 @@ test('collectFeeds turns an HTTP 403 into a notice instead of a silent skip', as
   const { candidates, notices } = await collectFeeds(rows, denied);
   assert.deepEqual(candidates, []);
   assert.equal(notices.length, 1);
-  assert.match(notices[0], /^rss https:\/\/blog\.example\/feed\.xml: HTTP 403 for /);
-  assert.match(notices[0], /API rate limit exceeded/);
+  assert.match(notices[0], /^rss https:\/\/blog\.example\/feed\.xml: HTTP 403 for https:\/\/blog\.example\/feed\.xml$/,
+    'the notice names the status and the redacted request: ' + notices[0]);
+  assert.equal(notices[0].includes('API rate limit exceeded'), false,
+    'the upstream body reached the notice: ' + notices[0]);
+  assert.equal(notices[0].includes('203.0.113.9'), false,
+    'an upstream value reached the notice: ' + notices[0]);
 });
 
 // Regression test: collectFeeds handed a configuration-supplied target straight to curl,
@@ -297,9 +301,12 @@ test('no notice carries a credential another row of the same host sent', async (
         'a credential a row sent reached a notice: ' + token + ' in ' + notice);
     }
   }
-  // The boundary is not bought with silence: each notice still names the request it reports.
-  assert.match(notices[0], /feeds\.example\/row-0\.xml/);
-  assert.match(notices[1], /feeds\.example\/row-1\.xml/);
+  // The boundary is not bought with silence: each notice is the status and the redacted request,
+  // with no answer text at all.
+  assert.equal(notices[0], 'rss https://feeds.example/row-0.xml: HTTP 500 for https://feeds.example/row-0.xml',
+    'the notice is the status and the redacted request: ' + notices[0]);
+  assert.equal(notices[1], 'rss https://feeds.example/row-1.xml: HTTP 500 for https://feeds.example/row-1.xml',
+    'the notice is the status and the redacted request: ' + notices[1]);
 });
 
 // TR-102 regression test: the value match is exact, so a server that echoes the request's own
@@ -327,7 +334,8 @@ test('a credential a server splits with whitespace is still removed from the not
   const notice = notices[0];
   assert.equal(notice.includes('SPLIT'), false, 'the first half of the credential survived: ' + notice);
   assert.equal(notice.includes('ALPHA/BETA'), false, 'the second half of the credential survived: ' + notice);
-  assert.match(notice, /feeds\.example/, 'the notice still names the feed it reports: ' + notice);
+  assert.equal(notice, 'rss https://feeds.example/echo.xml: HTTP 500 for https://feeds.example/echo.xml',
+    'the notice is the status and the redacted request: ' + notice);
 });
 
 // TR-106 regression test: the redaction ran over the notices only, so a source that answers 200
@@ -393,13 +401,26 @@ test('a feed item keeps its markdown link in the pool while a notice carries non
   };
   const { notices } = await collectFeeds(rows, failing);
   assert.equal(notices.length, 1, 'the failed row produced one notice: ' + JSON.stringify(notices));
-  assert.doesNotMatch(notices[0], /\]\(/, 'the notice ends the link grammar: ' + notices[0]);
-  assert.match(notices[0], /\[the migration guide\] \(https:\/\/example\.com\/migrate\)/,
-    'the notice keeps the label and destination legible: ' + notices[0]);
+  assert.equal(notices[0], 'rss https://blog.example/feed.xml: HTTP 500 for https://blog.example/feed.xml',
+    'the notice is the status and the redacted request: ' + notices[0]);
+  assert.equal(notices[0].includes('migration guide'), false,
+    'the upstream body reached the notice: ' + notices[0]);
+  assert.doesNotMatch(notices[0], /\]\(/, 'the notice carries no link grammar: ' + notices[0]);
+  // The push still defuses link syntax in a notice that reaches it carrying one -- a fetch
+  // implementation may throw any message, and the Coverage note publishes whatever it says.
+  const thrown = {
+    ...ctx,
+    net: { fetchText: async () => { throw new Error('see [the log](https://evil.example/pwn)'); } },
+  };
+  const { notices: thrownNotices } = await collectFeeds(rows, thrown);
+  assert.equal(thrownNotices.length, 1, 'the failure is reported: ' + JSON.stringify(thrownNotices));
+  assert.doesNotMatch(thrownNotices[0], /\]\(/, 'a carried link is defused at the push: ' + thrownNotices[0]);
+  assert.doesNotMatch(thrownNotices[0], /<a\b/, 'the notice draws no live anchor: ' + thrownNotices[0]);
 });
 
 // TR-109 at the collector: the six fused spellings the second sweep published verbatim, driven
-// through the real collector path with a body that echoes the query pair back.
+// through the real collector path. The notice quotes no answer text now, so each composed notice
+// is pinned to the status and the redacted request.
 test('the six fused credential names keep their value out of a notice', async () => {
   const fused = [
     ['apikey', '1234'],
@@ -429,5 +450,7 @@ test('the six fused credential names keep their value out of a notice', async ()
   for (let i = 0; i < fused.length; i++) {
     assert.equal(notices[i].includes(fused[i][1]), false,
       fused[i][0] + ' leaked its value into the notice: ' + notices[i]);
+    assert.equal(notices[i], 'rss https://feeds.example/rss.xml: HTTP 500 for https://feeds.example/rss.xml',
+      'the notice is the status and the redacted request: ' + notices[i]);
   }
 });

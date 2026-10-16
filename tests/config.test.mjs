@@ -230,6 +230,21 @@ test('config/settings.md declares all twenty-nine keys the code reads', () => {
   assert.deepEqual(blank, [], 'settings keys with an empty value: ' + blank.join(', '));
 });
 
+// The rule takes the upstream answer's text out of every notice. error_snippet_max_chars is kept
+// and re-purposed: it bounds the shaped error text, which is the redacted request URL. The note
+// must say that and must not promise a quoted server body -- the old wording named the longest
+// server text quoted in the notice, which is exactly what the rule forbids.
+test('the error-snippet setting is documented as a bound on the notice text, never a body quote', () => {
+  const row = readFileSync(CONFIG_DIR + 'settings.md', 'utf8')
+    .split('\n').find((line) => line.startsWith('| error_snippet_max_chars'));
+  assert.ok(row, 'the setting row is present');
+  const note = row.split('|').slice(3).join('|');
+  assert.doesNotMatch(note, /server text quoted|quoted in the notice/i,
+    'the note still promises a quoted server body: ' + note);
+  assert.match(note, /body/i, 'the note names the body it refuses: ' + note);
+  assert.match(note, /never[^|]*quote/i, 'the note states the upstream body is never quoted: ' + note);
+});
+
 // Regression test: the 18-character chip cap was a literal in scripts/lib/mdtable.mjs and
 // a second literal in scripts/render-html.mjs, existed in no config file, and could drift
 // between the two copies. R3 says every count and cap is configuration, so the cap is a
