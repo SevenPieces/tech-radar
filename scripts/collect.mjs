@@ -107,16 +107,34 @@ function windowCapError(raw) {
   return `window_cap_weeks is out of range in config/settings.md: ${JSON.stringify(raw)}`
     + ` (a positive integer of at most ${MAX_WINDOW_WEEKS} weeks is required)`;
 }
-// The cap and the shaped-error bound are one guarantee, not two settings: the source a notice
-// names takes at most half the cap, so the room left for the shaped error text is
-// ceil(cap / 2) - 2 (the ': ' separator), and it has to carry the whole of what
-// error_snippet_max_chars produces or the cause is cut away. The least cap that does so is
-// 2 * snippet + 3, and that is the number the refusal states. Both settings are named, because
-// either one of them can be the one that is wrong.
+// The cap and the shaped-error bound are one guarantee, not two settings. A notice is the source
+// it names -- the label included, because the label is what the source starts with -- the
+// two-character ': ' separator, and the shaped error text. The separator is charged first, so it
+// shortens neither half; what the cap has left is split, and the source takes the larger half of
+// that split (the label sits inside the source's half, and the label is never the part a long
+// target crowds out), while the shaped error text takes the smaller. The shaped text's half is
+// what the bound has to carry, or the request, the status and the cause are cut away.
+//
+// The least cap that carries a snippet bound of N is therefore 2 * N + 2 -- one character less
+// than the label-blind number the relation used to state, because the last character the old
+// arithmetic reserved for the source is the one the shaped text needs to name its request -- and
+// never less than the absolute floor, so the refusal below cannot name a cap its own range check
+// refuses. Both settings are named, because either one of them can be the one that is wrong.
+const NOTICE_SEPARATOR_CHARS = 2;
+function noticeSourceRoom(cap) {
+  return Math.ceil((cap - NOTICE_SEPARATOR_CHARS) / 2);
+}
+function noticeShapedRoom(cap) {
+  return cap - NOTICE_SEPARATOR_CHARS - noticeSourceRoom(cap);
+}
+function leastNoticeCap(snippet) {
+  return Math.max(MIN_NOTICE_CHARS, 2 * snippet + 2);
+}
 function noticeCapRoomError(cap, snippet, room) {
   return 'notice_max_chars leaves no room for error_snippet_max_chars in config/settings.md: '
-    + `a ${cap}-character notice leaves ${room} characters for the shaped error text, and `
-    + `error_snippet_max_chars is ${snippet} (notice_max_chars must be at least ${2 * snippet + 3})`;
+    + `a ${cap}-character notice leaves ${room} characters for the shaped error text once the `
+    + `source's half and the ': ' separator are taken, and error_snippet_max_chars is ${snippet} `
+    + `(notice_max_chars must be at least ${leastNoticeCap(snippet)})`;
 }
 // The check itself, shared by validateSettings (the CLI path, where a mistyped value is a
 // configuration error that names the setting and exits 2) and collectAll (a public seam a caller
@@ -129,7 +147,7 @@ function requireNoticeCapRoom(cap, settings) {
   if (raw === undefined || raw === null) return;
   const snippet = Number(raw);
   if (!Number.isFinite(snippet) || snippet <= 0) return;
-  const room = Math.ceil(cap / 2) - 2;
+  const room = noticeShapedRoom(cap);
   if (snippet > room) throw configError(noticeCapRoomError(cap, snippet, room));
 }
 function noticeLimit(settings) {
@@ -154,38 +172,52 @@ function requireNoticeLimit(value) {
   return value;
 }
 
-// The source a notice names is bounded, because the assembled notice is capped afterwards: a
-// watchlist target or an organisation row's name may be any length, and an unbounded source
-// used to fill the cap and cut the status and the cause away. Half the cap is the source's room
-// -- label included -- so the rest of the notice is left to the cause, which the shaped error
-// already bounds, and 'HTTP <status> for' and the reason after it survive even a very long
-// target.
-function noticeSource(label, name, limit) {
-  const room = Math.max(0, Math.floor(requireNoticeLimit(limit) / 2) - String(label).length - 1);
-  const text = String(name ?? '');
-  return `${label} ${text.length > room ? text.slice(0, room) : text}`;
-}
-function sanitizeNotice(text, limit) {
-  // The tag shape is the one class a notice cannot carry: a notice is published verbatim in the
-  // Coverage note, and a Markdown reader draws a live anchor or fetches a remote image from
-  // upstream markup that reached the text. It is neutralised here, at the one push every notice
-  // crosses, whatever built the notice -- a transport shaper, a caller's own wording, or a thrown
-  // message that quotes a server answer -- because the per-site normalisation above is a property
-  // of two callers rather than of the boundary. The '<' opens the tag, so replacing exactly it
-  // ends the markup while the rest of the span stays legible, and only a span the shape rule
-  // reads is touched: a legitimate server message that says 'a < b' or 'see <id>' is returned
-  // byte-identical. The encoded spelling of the same opener is the second half of the class: a
-  // notice is never decoded, so '&lt;a href=...&gt;' was published as the anchor it spells.
-  // neutraliseEntityTags refuses that spelling before the literal rule runs, and both rules are
-  // the ones the candidate normaliser draws too, so the two boundaries cannot drift apart
-  // (TR-122, TR-123).
+// The rewriting every notice crosses at the single push, in one place because two boundaries need
+// it: the push applies it to the assembled notice, and noticeSource applies it to the source
+// before bounding it. Bounding the source first and rewriting it afterwards handed the rewriting's
+// own output back to the notice: a target that spells a markdown link seam -- '](' -- is one
+// character longer per seam once the seam is ended, so the source took that room from the shaped
+// error text and the cause was cut. The rewriting is idempotent, so a source that has already
+// crossed it is returned byte-identical by the push's own pass.
+//
+// The tag shape is the one class a notice cannot carry: a notice is published verbatim in the
+// Coverage note, and a Markdown reader draws a live anchor or fetches a remote image from
+// upstream markup that reached the text. It is neutralised here, at the one push every notice
+// crosses, whatever built the notice -- a transport shaper, a caller's own wording, or a thrown
+// message that quotes a server answer -- because the per-site normalisation above is a property
+// of two callers rather than of the boundary. The '<' opens the tag, so replacing exactly it
+// ends the markup while the rest of the span stays legible, and only a span the shape rule
+// reads is touched: a legitimate server message that says 'a < b' or 'see <id>' is returned
+// byte-identical. The encoded spelling of the same opener is the second half of the class: a
+// notice is never decoded, so '&lt;a href=...&gt;' was published as the anchor it spells.
+// neutraliseEntityTags refuses that spelling before the literal rule runs, and both rules are
+// the ones the candidate normaliser draws too, so the two boundaries cannot drift apart
+// (TR-122, TR-123).
+function neutraliseNoticeText(text) {
   const spaced = neutraliseTagSpans(neutraliseEntityTags(
     String(text).replace(NOTICE_CONTROLS, (ch) => (/\s/.test(ch) ? ' ' : '')),
   ));
   // The markdown link seam belongs to this path and not to the neutraliser a candidate field
   // uses: a notice is published verbatim in the Coverage note, while a release body's links are
   // ordinary Markdown that the pool has to keep.
-  return neutraliseLinkSeams(neutraliseMarkers(spaced)).slice(0, requireNoticeLimit(limit));
+  return neutraliseLinkSeams(neutraliseMarkers(spaced));
+}
+
+// The source a notice names is bounded, because the assembled notice is capped afterwards: a
+// watchlist target or an organisation row's name may be any length, and an unbounded source
+// used to fill the cap and cut the status and the cause away. The source's room is the larger half
+// of what the cap has after the ': ' separator, and the label -- which sits inside that room, not
+// outside it -- is charged against it with its separating space, so the room the shaped error text
+// was granted is what the check reserved whatever label the notice carries (TR-162). The name is
+// bounded after the notice rewriting, so no spelling the rewriting lengthens can take the room
+// back, and the source that filling the room produces is the source the push publishes.
+function noticeSource(label, name, limit) {
+  const room = Math.max(0, noticeSourceRoom(requireNoticeLimit(limit)) - String(label).length - 1);
+  const text = neutraliseNoticeText(String(name ?? ''));
+  return `${label} ${text.length > room ? text.slice(0, room) : text}`;
+}
+function sanitizeNotice(text, limit) {
+  return neutraliseNoticeText(text).slice(0, requireNoticeLimit(limit));
 }
 function pushNotice(notices, text, secrets, limit) {
   notices.push(sanitizeNotice(redactSecrets(text, secrets), limit));
@@ -519,6 +551,15 @@ function skippedListingPhrase(n) {
     ? `skipped ${n} listing entry name, which is not a repository name`
     : `skipped ${n} listing entry names, which are not repository names`;
 }
+// What one listing's own bound did to it, when it dropped accepted entries. The bound is
+// configuration and the counts are arithmetic, so the notice carries no upstream text; both counts
+// are named, because a lone cap tells an operator how much of the listing was kept but not how much
+// of it was never seen (TR-164). It is the arXiv cap's counterpart in this file, which reports the
+// same class of loss for a capped listing instead of looking complete.
+function truncatedListingPhrase(cap, dropped) {
+  return `listing capped at ${cap} repositories; ${dropped} more `
+    + (dropped === 1 ? 'repository was' : 'repositories were') + ' not requested';
+}
 // The shape a repository name has: exactly one slash, an owner that is a GitHub login, and a
 // repository name of the characters GitHub allows in one. A listing's name is answer text that
 // would otherwise reach the request URL and the run-wide redaction sets, so it is used only when
@@ -670,10 +711,21 @@ export async function collectGithub(rows, ctx) {
         // read only to rank the accepted entries; it never reaches a notice.
         accepted.push({ name: repo.full_name, ordinal: n + 1, updated: Date.parse(repo.updated_at) });
       }
-      for (const entry of takeMostRecent(accepted, perOrg)) {
+      const retained = takeMostRecent(accepted, perOrg);
+      for (const entry of retained) {
         targets.push({
           target: entry.name, domain: row.domain, discovered: true, org: row.target, ordinal: entry.ordinal,
         });
+      }
+      // The bound drops every accepted entry past the configured count, and without a word about it
+      // the run publishes the same output for a listing that held exactly that count and for one
+      // that held many more; the repository that lost its slot is the one the run never asks about,
+      // and it may be the one an un-updated security patch sits in. The drop is reported as the
+      // capped arXiv listing reports its own cap -- one notice naming the count that was kept and
+      // the count that was not requested (TR-164).
+      const dropped = accepted.length - retained.length;
+      if (dropped > 0) {
+        pushNotice(notices, `${noticeSource('github', row.target, limit)}: ${truncatedListingPhrase(perOrg, dropped)}`, secretsFor(url), limit);
       }
       if (refused > 0) {
         pushNotice(notices, `${listingSource('github', row.target, firstRefused, limit)}: ${skippedListingPhrase(refused)}`, secretsFor(url), limit);
@@ -1271,17 +1323,18 @@ export function noticeWarning(count) {
 }
 
 // The one line an operator sees for a degraded run. A transport failure ends in the fixed
-// cause the shaper read from curl's exit code -- or, when curl never started, in the spawn
-// code -- so the line repeats that reason: a broken dependency should not require reading the
-// pool to be seen. The vocabulary is the shaper's, never curl's own line, so this line cannot
-// carry the redirect host or the proxy name into an operator's terminal either. It is a repeat
+// cause the shaper read from curl's exit code, from the signal that ended the tool, or -- when
+// curl never started -- from the spawn code, so the line repeats that reason: a broken dependency
+// should not require reading the pool to be seen. The vocabulary is the shaper's, never curl's
+// own line, so this line cannot carry the redirect host or the proxy name into an operator's
+// terminal either. It is a repeat
 // and not a promise: a notice that ends in an HTTP status or a JSON-parse failure carries no
 // transport reason, and the line then keeps the plain count.
 //
 // The mapped causes are published as '<phrase> (curl exit N)', so the suffix belongs to their
 // alternatives: matching only the bare phrase left every mapped cause unmatched, which dropped
 // the reason for six of the nine causes the shaper can build (LV-2).
-const TRANSPORT_TAIL = /(?:could not resolve the host|failed to connect|timed out|TLS handshake failed|empty reply|partial transfer) \(curl exit \d+\)$|curl exited with status \d+$|curl could not be started \([^)]+\)$|curl was terminated(?: \([^)]+\))? at the \d+ MiB capture ceiling$|curl failed$/;
+const TRANSPORT_TAIL = /(?:could not resolve the host|failed to connect|timed out|TLS handshake failed|empty reply|partial transfer) \(curl exit \d+\)$|curl exited with status \d+$|curl could not be started \([^)]+\)$|curl was terminated(?: \([^)]+\))?(?: at the \d+ MiB capture ceiling)?$|curl failed$/;
 export function operatorWarning(notices) {
   const line = noticeWarning(notices.length);
   for (const notice of notices) {

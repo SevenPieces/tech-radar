@@ -20,6 +20,13 @@ import { render } from '../scripts/render-html.mjs';
 const CONFIG_DIR = fileURLToPath(new URL('../config/', import.meta.url));
 const SHIPPED_SETTINGS = readSettings(join(CONFIG_DIR, 'settings.md'));
 const RUN_SETTINGS = { ...SHIPPED_SETTINGS, github_rate_limit_reserve: 2 };
+// The cap and the snippet bound are one guarantee, not two settings: the two-character ': '
+// separator is charged first, then the source takes the larger half of what is left and the
+// shaped error text the smaller, so the least cap that carries a shipped snippet bound of N is
+// 2N + 2. The boundary is derived from the shipped setting here rather than restated, so it
+// moves with the setting and with the relation the code enforces.
+const SHIPPED_SNIPPET_BOUND = Number(SHIPPED_SETTINGS.error_snippet_max_chars);
+const LEAST_ACCEPTED_CAP = 2 * SHIPPED_SNIPPET_BOUND + 2;
 const WINDOW = { since: '2026-09-16T00:00:00Z', until: '2026-09-23T00:00:00Z' };
 const PROBE = 'https://api.github.com/rate_limit';
 const RESET = 1790177128;
@@ -287,7 +294,7 @@ test('TR-141 the non-conforming entry names of one listing are reported in one a
 // ---------------------------------------------------------------------------------------
 
 test('TR-142 a notice cap too small for the shipped snippet bound is a named configuration error', async () => {
-  for (const cap of [200, 300, 402]) {
+  for (const cap of [200, 300, LEAST_ACCEPTED_CAP - 1]) {
     const r = await runCli(['| rss | file:///etc/passwd | ai-llm | a refused row |'], {
       mutateSettings: replaceRow(CAP_ROW, cap),
       args: ['--since', '2026-09-16T00:00:00Z'],
@@ -301,21 +308,27 @@ test('TR-142 a notice cap too small for the shipped snippet bound is a named con
 });
 
 test('TR-142 the cap that carries the shipped snippet bound is accepted at the exact boundary', async () => {
+  // One character below the derived boundary is the lowest cap the cross-check can refuse, and
+  // the boundary itself is the least cap it accepts: the pair pins the boundary exactly.
   const refused = await runCli(['| rss | file:///etc/passwd | ai-llm | a refused row |'], {
-    mutateSettings: replaceRow(CAP_ROW, 402),
+    mutateSettings: replaceRow(CAP_ROW, LEAST_ACCEPTED_CAP - 1),
     args: ['--since', '2026-09-16T00:00:00Z'],
   });
-  assert.equal(refused.code, 2, '402 is refused: ' + refused.stderr);
+  assert.equal(refused.code, 2,
+    (LEAST_ACCEPTED_CAP - 1) + ' is refused: ' + refused.stderr);
+  assert.match(refused.stderr, /notice_max_chars/, 'the refusal does not name the cap: ' + refused.stderr);
+  assert.match(refused.stderr, /error_snippet_max_chars/,
+    'the refusal does not name the snippet bound: ' + refused.stderr);
   const accepted = await runCli(['| rss | file:///etc/passwd | ai-llm | a refused row |'], {
-    mutateSettings: replaceRow(CAP_ROW, 403),
+    mutateSettings: replaceRow(CAP_ROW, LEAST_ACCEPTED_CAP),
     args: ['--since', '2026-09-16T00:00:00Z'],
   });
   assert.notEqual(accepted.code, 2,
-    'the cap that does carry the status and the cause is refused: ' + accepted.stderr);
+    LEAST_ACCEPTED_CAP + ' is the least accepted cap and is refused: ' + accepted.stderr);
 });
 
 test('TR-142 the minimum accepted cap keeps the status and the cause the snippet bound shaped', async () => {
-  const cap = 403;
+  const cap = LEAST_ACCEPTED_CAP;
   const longTarget = 'http://127.0.0.1:1/' + 'y'.repeat(400);
   const npmTarget = 'z'.repeat(400);
   const net = {

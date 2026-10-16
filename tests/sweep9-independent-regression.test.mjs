@@ -105,9 +105,18 @@ test('TR-158 a listing with far more conforming entries than the setting yields 
     'a longer answer grew the published notice count (' + small.pool.notices.length + ' -> '
     + large.pool.notices.length + '); one listing answer must not decide the volume of the run\'s output. '
     + 'large: ' + JSON.stringify(large.pool.notices.slice(0, 5)));
-  assert.ok(large.pool.notices.length <= bound,
-    'the answer decided how many failure notices the run emits (' + large.pool.notices.length
-    + ' at github_org_repos ' + bound + '): ' + JSON.stringify(large.pool.notices.slice(0, 5)));
+  // A listing that dropped accepted entries also publishes exactly one truncation notice, on top
+  // of the failure notices its retained targets produce. That extra notice is a deliberate,
+  // reported coverage loss, so the bound is the configured number of targets plus it -- and the
+  // report is asserted first, so the extra notice is never traded for silence.
+  const truncation = large.pool.notices.filter((n) => /listing capped at/.test(n));
+  assert.equal(truncation.length, 1,
+    'the oversized listing did not report its truncation exactly once: '
+    + JSON.stringify(large.pool.notices));
+  assert.ok(large.pool.notices.length <= bound + truncation.length,
+    'the answer decided how many notices the run emits (' + large.pool.notices.length
+    + ' at github_org_repos ' + bound + ', one of which must be its own truncation report): '
+    + JSON.stringify(large.pool.notices.slice(0, 5)));
 });
 
 test('TR-158 the number of targets taken from one listing is the configured repositories-per-organisation value', async () => {

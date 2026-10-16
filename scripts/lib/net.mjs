@@ -453,16 +453,20 @@ const CAPTURE_CEILING_BYTES = 64 * 1024 * 1024;
 const CAPTURE_CEILING_MIB = CAPTURE_CEILING_BYTES / (1024 * 1024);
 const CAPTURE_CEILING_CODES = new Set(['ENOBUFS', 'ERR_CHILD_PROCESS_STDIO_MAXBUFFER']);
 
-// curl's process exit status when it ran, or the spawn's error code when the binary could not be
-// started at all. Never the child-process message, which quotes the whole argv, and never curl's
-// stderr, which quotes the redirect host and the proxy name.
+// The three cases a child-process failure can be, and the field each one is read from: the run's
+// own exit status when curl ran and returned one, the name of the signal the system ended it with
+// when it was killed, and the spawn's error code when the binary could not be started at all.
+// Never the child-process message, which quotes the whole argv, and never curl's stderr, which
+// quotes the redirect host and the proxy name.
 //
 // The capture ceiling is not a missing binary: when the answer crosses the buffer Node terminates
 // the child and reports ENOBUFS, whose status is null for exactly that reason. Read as a spawn
 // code, that published 'curl could not be started (ENOBUFS)' -- a false diagnosis of a curl that
 // ran and answered, and one that named no ceiling anywhere. The ceiling gets its own cause, and it
 // reports what actually became of the tool: the signal that ended it, and the bound it crossed
-// (TR-160).
+// (TR-160). A kill that is not the ceiling reads the same signal from the same field, so a child
+// the system ended is never published as one that could not be started, nor as the bare failure
+// literal that names neither (TR-163).
 function transportCause(err) {
   if (Number.isInteger(err?.status)) {
     const phrase = CURL_EXIT_CAUSES.get(err.status);
@@ -473,6 +477,12 @@ function transportCause(err) {
   if (CAPTURE_CEILING_CODES.has(err?.code)) {
     const ended = typeof err?.signal === 'string' && err.signal !== '' ? ` (${err.signal})` : '';
     return `curl was terminated${ended} at the ${CAPTURE_CEILING_MIB} MiB capture ceiling`;
+  }
+  // A killed child reports no exit status and no spawn code, so both branches below would read it
+  // as a tool that never started; the signal is the cause, and it is named as the one that ended
+  // the tool. A genuine spawn failure carries a code and no signal, and keeps its own wording.
+  if (typeof err?.signal === 'string' && err.signal !== '') {
+    return `curl was terminated (${err.signal})`;
   }
   if (typeof err?.code === 'string' && err.code !== '') {
     return `curl could not be started (${err.code})`;
@@ -515,9 +525,12 @@ export function shapeTransportError(err, url, limit, headers, omitUrl = false) {
   const shaped = new Error(text);
   shaped.cause = cause;
   // No process exit status means curl never ran: the caller can tell a broken dependency from a
-  // source that answered. The capture ceiling is the exception it used to swallow -- curl ran, and
-  // only its answer overflowed -- so a terminated-by-ceiling child is not a missing dependency.
-  shaped.noDiagnostic = !Number.isInteger(err?.status) && !CAPTURE_CEILING_CODES.has(err?.code);
+  // source that answered. Two exceptions do not mean that, and neither may be read as one: a
+  // terminated-by-ceiling child ran and only its answer overflowed, and a killed child ran and was
+  // ended by a signal.
+  shaped.noDiagnostic = !Number.isInteger(err?.status)
+    && !CAPTURE_CEILING_CODES.has(err?.code)
+    && !(typeof err?.signal === 'string' && err.signal !== '');
   shaped.url = url;
   shaped.httpStatus = null; // a transport failure has no HTTP status
   shaped.exitStatus = Number.isInteger(err?.status) ? err.status : null;
