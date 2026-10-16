@@ -15,6 +15,7 @@ import { fileURLToPath } from 'node:url';
 import { collectAll, main } from '../scripts/collect.mjs';
 import { shapeHttpError, shapeTransportError } from '../scripts/lib/net.mjs';
 import { readSettings } from '../scripts/lib/mdtable.mjs';
+import { curlAvailable } from './lib/commands.mjs';
 
 const CONFIG_DIR = fileURLToPath(new URL('../config/', import.meta.url));
 const SHIPPED_SETTINGS = readSettings(join(CONFIG_DIR, 'settings.md'));
@@ -417,7 +418,19 @@ test('TR-154 at the lowest accepted snippet bound the cause reaches the run\'s n
 // The published path, with no net seam: a configuration whose snippet bound is the smallest value
 // the reader accepts, and a real failed request against a closed local port. The notice the
 // operator is handed must still name the transport cause.
-test('TR-154 the published notice of a real failed request keeps the cause at a small accepted bound', async () => {
+//
+// This case runs curl, and the cause it asserts on is the one curl's own exit code maps to
+// ('failed to connect (curl exit 7)'). On a machine with no curl there is no transport to test: the
+// spawn itself fails, and the collector's notice names the missing binary honestly
+// ('curl could not be started (ENOENT)'). The assertion would then fail on a statement about a
+// different environment, so the case skips with its reason named - exactly as the real-transport
+// case in tests/net.test.mjs and the operator-line case in tests/collect-core.test.mjs do. Where
+// curl starts, the whole case runs unskipped and its expectation is unchanged.
+test('TR-154 the published notice of a real failed request keeps the cause at a small accepted bound', async (t) => {
+  if (!curlAvailable()) {
+    t.skip('curl is not on PATH, so the real transport cannot be attempted and the notice carries the missing-binary cause');
+    return;
+  }
   const config = tempConfig({ error_snippet_max_chars: SMALLEST_BOUND }, [
     '| kind | target | domain | note |',
     '|---|---|---|---|',
