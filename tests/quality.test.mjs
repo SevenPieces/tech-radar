@@ -7,7 +7,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { execFileSync, spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
-import { parseItems, parseArgs, check, main, scopedMinItems, registeredOutlet, FEATURED_STANDIN } from '../scripts/check-quality.mjs';
+import { parseItems, parseArgs, check, main, scopedMinItems, plannedDomains, registeredOutlet, FEATURED_STANDIN } from '../scripts/check-quality.mjs';
 import { readConfig } from '../scripts/lib/mdtable.mjs';
 
 const scratch = () => mkdtempSync(join(tmpdir(), 'tech-radar-gate-'));
@@ -340,6 +340,73 @@ function realDigest(coveredKeys, itemCount) {
 }
 
 const CORE_KEYS = REAL.domains.filter((d) => d.tier === 'core').map((d) => d.key);
+const REAL_KEYS = REAL.domains.map((d) => d.key);
+const REAL_CATALOGUE = REAL.domains.length;
+const scopedN = (n) => Object.fromEntries(REAL_KEYS.slice(0, n).map((k) => [k, { since: '2026-09-16T00:00:00Z', until: '2026-09-23T00:00:00Z' }]));
+const scopedWhole = { ...realPlan(REAL_KEYS), perDomain: scopedN(REAL_CATALOGUE) };
+const scoped14 = { ...realPlan(REAL_KEYS), perDomain: scopedN(14) };
+// A minimal digest, built only to drive the floor: its coverage note repeats the plan label and it
+// carries `items` items under one catalogue heading on the first covered domain.
+function floorDigest(items, domainIndex = 0) {
+  const d = REAL.domains[domainIndex];
+  const lines = [
+    '# Tech Radar \u2014 2026-09-23',
+    '_Covering ' + REAL_LABEL + ' \u00b7 ' + REAL_CATALOGUE + ' domains scanned \u00b7 ' + items + ' items_',
+    '',
+    FEATURED_STANDIN,
+    '',
+    '## Core domains',
+    '### ' + d.domain + ' \u00b7 ' + d.label_zh,
+  ];
+  for (let i = 0; i < items; i += 1) {
+    lines.push('- **Story ' + i + '** \u2014 Why it matters. [src:arXiv 2026-09-20](https://arxiv.org/abs/' + i + ') [prov:primary] #new');
+  }
+  lines.push('', '## Coverage note', REAL_LABEL);
+  return lines.join('\n');
+}
+
+// Closing sweep F31-8 (Med, a gate hole reproduced with the shipped CLI): the floor counted the
+// KEYS of plan.perDomain and never checked them against the catalogue, and the core-heading and
+// quiet-line rules were keyed on the same set. A hand-written plan whose perDomain names no
+// catalogue domain ("ghost-domain") therefore reported covered = 1, which is the single-domain
+// probe branch, so a ONE-item digest released the floor and both scoped rules with it while the
+// Coverage note went on claiming 43 domains scanned: 'QUALITY: PASS', exit 0. The covered set is
+// now the catalogue intersection and an unrecognised key is named by the gate.
+test('F31-8 a plan key that is not a catalogue domain does not release the floor', () => {
+  const forged = { ...realPlan(REAL_KEYS), perDomain: { 'ghost-domain': { since: '2026-09-16T00:00:00Z', until: '2026-09-23T00:00:00Z' } } };
+  assert.deepEqual(plannedDomains(REAL, forged), [], 'an unrecognised key counted as a covered domain');
+  assert.equal(scopedMinItems(REAL.settings, REAL_CATALOGUE, forged.perDomain, REAL_KEYS), 30,
+    'the forged plan released the floor');
+  const failures = check(floorDigest(1), REAL, forged).failures;
+  assert.ok(failures.some((x) => /plan perDomain names "ghost-domain"/.test(x)),
+    'the gate did not name the unrecognised key: ' + JSON.stringify(failures));
+  assert.ok(failures.some((x) => /^1 items is below total_min_items 30$/.test(x)),
+    'the floor was released: ' + JSON.stringify(failures));
+  assert.ok(failures.some((x) => /core domain .* has no section heading/.test(x)),
+    'the core-heading rule was released: ' + JSON.stringify(failures));
+});
+
+test('F31-8 a ghost key beside a real one is named and does not raise the floor', () => {
+  const realEntry = { since: '2026-09-16T00:00:00Z', until: '2026-09-23T00:00:00Z' };
+  const mixed = { ...realPlan(REAL_KEYS), perDomain: { [REAL_KEYS[0]]: realEntry, 'ghost-domain': realEntry } };
+  assert.deepEqual(plannedDomains(REAL, mixed), [REAL_KEYS[0]]);
+  // The one real domain is the single-domain probe branch, so the floor is one and not the three a
+  // two-key count would have asked for; the ghost key is still named.
+  assert.equal(scopedMinItems(REAL.settings, REAL_CATALOGUE, mixed.perDomain, REAL_KEYS), 1,
+    'the ghost key raised the floor');
+  assert.equal(check(floorDigest(1), REAL, mixed).failures.filter((x) => /not a catalogue domain/.test(x)).length, 1);
+});
+
+test('F31-8 a genuine scoped plan is still scored from its own catalogue domains', () => {
+  // The floor behaviour Batch 58 documents is unchanged: 14 of 43 domains is a floor of 15, a
+  // single domain is a probe with a floor of one, and the whole catalogue keeps total_min_items.
+  assert.equal(scopedMinItems(REAL.settings, REAL_CATALOGUE, scoped14.perDomain, REAL_KEYS), 15);
+  assert.equal(scopedMinItems(REAL.settings, REAL_CATALOGUE, scopedN(1), REAL_KEYS), 1);
+  assert.equal(scopedMinItems(REAL.settings, REAL_CATALOGUE, scopedWhole.perDomain, REAL_KEYS), 30);
+  const failures = check(floorDigest(2), REAL, scoped14).failures;
+  assert.ok(failures.some((x) => /^2 items is below the scoped floor of 15 for a run covering 14 of 43 domains$/.test(x)),
+    'the genuine scoped floor message moved: ' + JSON.stringify(failures));
+});
 
 test('the scoped floor scales with the covered share and never bars a narrow run', () => {
   const s = { total_min_items: 30 };

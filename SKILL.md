@@ -217,10 +217,11 @@ many core domains came back quiet.** The floor is `total_min_items` scaled to th
 covers — `ceil(total_min_items × covered domains ÷ catalogue domains)`, clamped to between one and
 `total_min_items`, and for a multi-domain run also at least one item per covered domain plus one (the rule and
 its message are stated in full under **The completeness floor scales to the run's scope** below). On the shipped
-settings and catalogue (`total_min_items 30`, 43 domains) an unscoped whole-catalogue run must reach **thirty**,
-a `--domain`-scoped run covering fourteen of those domains must reach **fifteen** (ceil(30 × 14 ÷ 43)), and a
-single-domain run must reach **one** — so the same 29-item digest passes the floor on a fourteen-domain run and
-fails it on a whole-catalogue one. The per-domain ceilings are ceilings and never targets, so when quiet domains
+settings and catalogue (`total_min_items 30`, 43 domains) an unscoped whole-catalogue run must reach **thirty**
+(43 × 30 ÷ 43), a `--domain`-scoped run covering fourteen of those domains must reach **fifteen** — the scaled
+share alone is ceil(30 × 14 ÷ 43) = 10, and it is the one-per-covered-domain-plus-one clause that carries it to 15
+— and a single-domain run must reach **one** — so the same 29-item digest passes the floor on a fourteen-domain run
+and fails it on a whole-catalogue one. The per-domain ceilings are ceilings and never targets, so when quiet domains
 thin the total, take more from the domains that do have material — up to `core_max_items` each and
 `watch_notable_max` across the watch domains — until the digest clears the floor; only then does the ceiling
 bind. An allocation of two or three items per core, in particular, is a normal week only while the core domains
@@ -357,11 +358,16 @@ both the section and the line fails. `never` treats a featured section as a warn
 the stand-in line is there, not that the choice was a good one.
 
 **The completeness floor scales to the run's scope while the ceiling stays global.** The floor is `total_min_items`
-scaled by the share of the catalogue the run covers, rounded up, clamped to at least one and at most
-`total_min_items`, and for a multi-domain run also at least one item per covered domain plus one as far as
-`total_min_items` allows: a single-domain run is a probe with a floor of one, a scoped run is not failed for the
+scaled by the share of the catalogue the run covers, rounded up, and for a multi-domain run also at least one item
+per covered domain plus one — the greater of the scaled share and `covered + 1`, clamped to at least one and at
+most `total_min_items`: a single-domain run is a probe with a floor of one, a scoped run is not failed for the
 domains it never took on, an unscoped or whole-catalogue run keeps the configured floor, and near the top of the
-range the clamp is what holds the floor at `total_min_items`. `total_max_items` never scales. The two cases read
+range the clamp is what holds the floor at `total_min_items`. The per-covered-domain clause is what keeps the floor
+proportional at the top of the range, where the scaled share alone would. On the shipped settings the scaled share
+never exceeds the clamp — `ceil(30 × N ÷ 43)` is at most 30 for every N — so it never sets the floor on its own: a
+multi-domain run's floor is `covered + 1` until that clause reaches the clamp, and from there the clamp holds it at
+`total_min_items`. An unrecognised `plan.perDomain` key is counted by neither: the gate names it and scores the
+floor and the scoped rules from the catalogue domains the plan actually covers. `total_max_items` never scales. The two cases read
 differently in the output — `below the scoped floor of N for a run covering X of Y domains` when the run has a
 scope, and the original `below total_min_items N` when it does not — so the message tells you which floor you
 missed. **A failing gate means the digest does not ship** — re-cut the items, the caps, the quiet line or the

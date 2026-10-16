@@ -222,6 +222,21 @@ function malformedItemLines(md) {
   return out;
 }
 
+// The domains a plan actually covers. A plan is hand-written JSON by construction -
+// update-state.mjs is the only writer of one and refuses an unknown --domain key - so a
+// perDomain entry naming a domain the catalogue does not carry is not a covered domain:
+// it covers nothing, which is what the scope judgment and the floor below both read.
+// Sweep F31-8: the floor used to count the KEYS of perDomain, so a plan carrying
+// {"ghost-domain": {...}} alone reported covered = 1 - which is the single-domain probe
+// branch, so a ONE-item digest released the floor and, through the same key set, the
+// core-heading and quiet-line rules with it, at exit 0.
+export function plannedDomains(config, plan) {
+  const catalogue = new Set(config.domains.map((d) => d.key));
+  const perDomain = plan?.perDomain;
+  if (!perDomain || typeof perDomain !== 'object' || Array.isArray(perDomain)) return [];
+  return Object.keys(perDomain).filter((key) => catalogue.has(key));
+}
+
 // The floor for a run. The ceiling is global because it is about readability, while
 // the floor is about completeness, so it scales with the share of the catalogue a
 // scoped run covers: total_min_items scaled by that share, rounded up, never below
@@ -231,9 +246,18 @@ function malformedItemLines(md) {
 // scope whose clamp binds sits at total_min_items. A single-domain run is a probe and
 // is not forced to pad; a run covering the whole catalogue, or none, keeps the
 // configured floor unchanged.
-export function scopedMinItems(settings, catalogueSize, perDomain) {
+// The covered count comes from plannedDomains when the caller can hand over the
+// catalogue, so an unrecognised key can never stand in for a domain; without one the
+// three-argument form counts keys exactly as it always did, for the module-level
+// callers that measure the arithmetic itself.
+export function scopedMinItems(settings, catalogueSize, perDomain, catalogue) {
   const total = Number(settings.total_min_items);
-  const covered = perDomain && typeof perDomain === 'object' ? Object.keys(perDomain).length : 0;
+  const keys = perDomain && typeof perDomain === 'object' && !Array.isArray(perDomain)
+    ? Object.keys(perDomain)
+    : [];
+  const covered = Array.isArray(catalogue)
+    ? keys.filter((key) => catalogue.includes(key)).length
+    : keys.length;
   if (covered === 0 || covered >= catalogueSize) return total;
   if (covered === 1) return 1;
   const scaled = Math.ceil((total * covered) / catalogueSize);
@@ -424,8 +448,23 @@ export function check(md, config, plan, opts = {}) {
     failures.push(`watch domains contributed ${watchItems} items, over watch_notable_max ${s.watch_notable_max}`);
   }
   const catalogueSize = config.domains.length;
-  const floor = scopedMinItems(s, catalogueSize, plan.perDomain);
-  const coveredCount = plan.perDomain && typeof plan.perDomain === 'object' ? Object.keys(plan.perDomain).length : 0;
+  // The domain set every plan-keyed rule reads: the plan's own keys, with any key the
+  // catalogue does not carry named and dropped (sweep F31-8). A hand-written plan is the
+  // only way such a key arrives - update-state.mjs refuses an unknown --domain - and the
+  // gate used to score the floor from the raw key count and the scoped rules from the
+  // same key set, so one unrecognised key released the floor AND the core-heading and
+  // quiet-line rules with it while the Coverage note went on claiming the full catalogue.
+  const plannedKeys = Object.keys(plan.perDomain && typeof plan.perDomain === 'object' && !Array.isArray(plan.perDomain)
+    ? plan.perDomain : {});
+  const catalogueKeys = config.domains.map((d) => d.key);
+  for (const key of plannedKeys) {
+    if (!catalogueKeys.includes(key)) {
+      failures.push(`plan perDomain names "${key}", which is not a catalogue domain: it covers nothing, and the run's completeness floor and scoped rules are scored without it`);
+    }
+  }
+  const planned = plannedDomains(config, plan);
+  const floor = scopedMinItems(s, catalogueSize, plan.perDomain, catalogueKeys);
+  const coveredCount = planned.length;
   if (items.length < floor) {
     failures.push(coveredCount > 0 && coveredCount < catalogueSize
       ? `${items.length} items is below the scoped floor of ${floor} for a run covering ${coveredCount} of ${catalogueSize} domains`
@@ -450,8 +489,9 @@ export function check(md, config, plan, opts = {}) {
   // so it can never vanish silently. A plan that names the domains a run covered
   // (a focus or catch-up run) requires only those. An empty perDomain object is
   // not a claim of "nothing covered": it is a plan that would otherwise fail open,
-  // so it is treated as unscoped and every core domain is required.
-  const planned = plan.perDomain && typeof plan.perDomain === 'object' ? Object.keys(plan.perDomain) : [];
+  // so it is treated as unscoped and every core domain is required. The same holds
+  // for a plan whose every key is unrecognised: it names no domain of this catalogue,
+  // so it is unscoped rather than a scope of ghosts (sweep F31-8).
   const scoped = planned.length > 0;
   // One predicate for both rules: a domain the plan names is covered, whatever its entry
   // holds, so a malformed entry cannot read as "not covered" and disable a rule.

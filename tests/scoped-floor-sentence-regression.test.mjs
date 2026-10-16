@@ -3,9 +3,14 @@
 // new sentence in SKILL.md section 5 stated the completeness floor as an unconditional constraint -
 // 'a digest must meet total_min_items however many core domains came back quiet' - which is not the
 // gate's rule for a scoped run. check-quality.mjs scores the floor with
-// scopedMinItems(settings, catalogueSize, plan.perDomain), so a --domain-scoped run covering 14 of
-// the 43 shipped domains has a floor of 15, one covering two domains a floor of 3, and a
-// single-domain run a floor of 1. Measured (the sweep's own probe): 29 items with a 14-domain plan
+// scopedMinItems(settings, catalogueSize, plan.perDomain, catalogueKeys), so a --domain-scoped run
+// covering 14 of the 43 shipped domains has a floor of 15, one covering two domains a floor of 3, and
+// a single-domain run a floor of 1. The 14-of-43 floor is 15 because of the one-per-covered-domain
+// clause, not because of the scaled share: ceil(30 x 14 / 43) is 10 (closing sweep F31-9 measured
+// that on the shipped settings the scaled share is at most the clamp for every N, for 2 <= N <= 29 the
+// floor is exactly N + 1, and from N = 30 the clamp holds it at 30, so the corrected sentence names
+// the clause that carries its number).
+// Measured (the sweep's own probe): 29 items with a 14-domain plan
 // produces NO floor failure, while the same 29 items against a whole-catalogue plan fails with
 // '29 items is below total_min_items 30'.
 //
@@ -68,13 +73,44 @@ test('F30-4 the shipped catalogue and settings are the ones the sentence arithme
   assert.equal(Object.keys(scopedTo14.perDomain).length, 14);
 });
 
-test('F30-4 the gate floor is the scope-scaled number the sentence states', () => {
-  assert.equal(scopedMinItems(config.settings, CATALOGUE, wholeCatalogue.perDomain), 30,
+const CATALOGUE_KEYS = config.domains.map((d) => d.key);
+const floorOf = (n) => scopedMinItems(config.settings, CATALOGUE,
+  Object.fromEntries(CATALOGUE_KEYS.slice(0, n).map((k) => [k, { ...WINDOW }])), CATALOGUE_KEYS);
+
+test('F30-4 the gate floor is the number the sentence states', () => {
+  assert.equal(scopedMinItems(config.settings, CATALOGUE, wholeCatalogue.perDomain, CATALOGUE_KEYS), 30,
     'the whole-catalogue floor is not total_min_items');
-  assert.equal(scopedMinItems(config.settings, CATALOGUE, scopedTo14.perDomain), 15,
-    'the 14-of-43 floor is not fifteen (ceil(30 x 14 / 43))');
-  assert.equal(scopedMinItems(config.settings, CATALOGUE, { [config.domains[0].key]: { ...WINDOW } }), 1,
+  assert.equal(scopedMinItems(config.settings, CATALOGUE, scopedTo14.perDomain, CATALOGUE_KEYS), 15,
+    'the 14-of-43 floor is not fifteen');
+  assert.equal(scopedMinItems(config.settings, CATALOGUE, { [config.domains[0].key]: { ...WINDOW } }, CATALOGUE_KEYS), 1,
     'a single-domain run is not a probe with a floor of one');
+  // Closing sweep F31-9 corrected this test's own expectation. The old assertion message read
+  // 'the 14-of-43 floor is not fifteen (ceil(30 x 14 / 43))', and that parenthetical is false
+  // arithmetic: Math.ceil(30 * 14 / 43) is 10. Fifteen is the covered+1 clause
+  // (Math.max(scaled, covered + 1) at check-quality.mjs), which is what the corrected sentence
+  // says. The floor value itself is unchanged and still measured above.
+  assert.equal(Math.ceil((30 * 14) / CATALOGUE), 10, 'the scaled share of a 14-domain run moved');
+  assert.equal(floorOf(14), 15, 'the 14-of-43 floor is not the covered+1 clause');
+});
+
+test('F31-9 the scaled share never binds on the shipped settings and the clamp bounds it', () => {
+  // The corrected sentence claims two things about the shipped arithmetic, both measured here:
+  // the scaled share never exceeds the clamp for any N, and for a multi-domain run it is the
+  // covered+1 clause (or the clamp) that sets the floor. This is the inequality the false
+  // parenthetical hid.
+  for (let n = 1; n <= CATALOGUE; n += 1) {
+    const scaled = Math.ceil((30 * n) / CATALOGUE);
+    assert.ok(scaled <= 30, 'the scaled share exceeds the clamp at N = ' + n + ': ' + scaled);
+    assert.ok(scaled <= n + 1 || scaled >= 30,
+      'the scaled share is strictly above covered+1 and below the clamp at N = ' + n + ': ' + scaled);
+    if (n >= 2 && n <= 29) {
+      assert.equal(floorOf(n), n + 1, 'the floor at N = ' + n + ' is not the covered+1 clause');
+    }
+  }
+  // From N = 30 the clamp is what holds the floor: covered + 1 is 31 there and the clamp is 30.
+  assert.equal(floorOf(29), 30, 'the covered+1 clause does not reach the clamp at N = 29');
+  assert.equal(floorOf(30), 30, 'the clamp does not hold the floor at N = 30');
+  assert.equal(floorOf(42), 30, 'the clamp does not hold the floor at N = 42');
 });
 
 test('F30-4 29 items pass the floor on a fourteen-domain run and fail it on the whole catalogue', () => {
@@ -103,6 +139,8 @@ test('F30-4 SKILL.md states the scoped rule and its arithmetic rather than the f
     'the corrected sentence is not in SKILL.md');
   assert.match(skill, /`ceil\(total_min_items × covered domains ÷ catalogue domains\)`/,
     'the sentence does not carry the arithmetic');
-  assert.match(skill, /covering fourteen of those domains must reach \*\*fifteen\*\* \(ceil\(30 × 14 ÷ 43\)\)/,
+  assert.match(skill, /covering fourteen of those domains must reach \*\*fifteen\*\* — the scaled\nshare alone is ceil\(30 × 14 ÷ 43\) = 10, and it is the one-per-covered-domain-plus-one clause that carries it to 15/,
     'the sentence does not carry the worked example the gate reproduces');
+  assert.ok(!/must reach \*\*fifteen\*\* \(ceil\(30 × 14 ÷ 43\)\)/.test(skill),
+    'the false parenthetical (ceil(30 × 14 ÷ 43) stated as fifteen) is still in SKILL.md');
 });
