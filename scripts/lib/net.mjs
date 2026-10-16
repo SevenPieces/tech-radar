@@ -570,17 +570,39 @@ function redactAuthorizationShapes(text) {
   const source = String(text);
   let out = '';
   let at = 0;
-  // Every keyword matcher is scanned from the resume point and the EARLIEST match is read, so the
-  // three spellings share one left-to-right pass and a value the previous match consumed is still
-  // never read twice. The spelling order in AUTHORIZATION_KEYWORDS breaks a tie, and only the
-  // three matchers can tie at one index when one name carries two of the spellings at once.
+  // THE THREE SPELLINGS ARE ADVANCED, NOT RESTARTED (Batch 82; final verification F35-C). Every
+  // matcher used to be re-run from the resume point on every iteration, and the EARLIEST of the
+  // three answers was read. A matcher with no match left in the remainder scans that whole remainder
+  // before it answers null, and this pass iterates once per credential-header line, so a spelling the
+  // text never carries made the pass quadratic in the number of header lines: the verification
+  // measured 8,000 declined header rows at 3,040.8 ms, against 1.7 ms before the resume-point repair
+  // (Batch 74) let the pass reach the end of the text, and the same measurement on accepted header
+  // rows is quadratic at both of those revisions. Each matcher now carries its own cursor and its own
+  // answer. The answer is the first match at or after the cursor, kept until the resume point moves
+  // past it; once a scan from a position has answered null, that matcher has no match anywhere after
+  // that position -- the property is monotone and the cursor only ever moves forward -- so the null
+  // is remembered and the remainder is never scanned for that spelling again. The earliest of the
+  // three kept answers is read, which is the same match the three fresh scans' earliest match was,
+  // and the spelling order in AUTHORIZATION_KEYWORDS still breaks a tie: only the three matchers can
+  // tie at one index when one name carries two of the spellings at once. The state belongs to this
+  // call, and the shared matchers' lastIndex is written only immediately before the exec that reads
+  // it, exactly as it was.
+  const scans = AUTHORIZATION_KEYWORDS.map((re) => ({ re, match: null, exhausted: false }));
   const earliestAfter = (index, from) => {
     let best = null;
-    for (const re of AUTHORIZATION_KEYWORDS) {
-      re.lastIndex = from;
-      const m = re.exec(source);
-      if (m === null) continue;
-      if (best === null || m.index < best.index) best = m;
+    for (const scan of scans) {
+      // A kept answer the resume point has passed is dropped, and the matcher is asked again FROM the
+      // resume point: the fresh scan's first match at or after 'from' is the same one it would have
+      // answered before, because a match the resume point skipped cannot be the first one after it.
+      if (scan.match !== null && scan.match.index < from) scan.match = null;
+      if (scan.match === null) {
+        if (scan.exhausted) continue;
+        scan.re.lastIndex = from;
+        const m = scan.re.exec(source);
+        if (m === null) { scan.exhausted = true; continue; }
+        scan.match = m;
+      }
+      if (best === null || scan.match.index < best.index) best = scan.match;
     }
     // A keyword the previous match already consumed (a value that names a header of its own) is not
     // read twice: the run's end is the resume point, and a skip advances past the match the reader
