@@ -557,12 +557,22 @@ function redactAuthorizationShapes(text) {
     // value: a credential behind a refused value went out with the refusal on both entry points
     // (closing sweep F33-5), and the scanner is the module's own shape test, so ordinary words and
     // an HTTP status stay byte for byte.
+    //
+    // THE RESUME POINT IS THE END OF THE MATCH, whether or not the scan changed a byte of it
+    // (Batch 74; closing sweep F34-6). The branch used to publish the match only when the scan
+    // changed it and to fall through with the resume point unmoved when it did not. The loop asks
+    // its next question as earliestAfter(match.index, at), and earliestAfter answers with a match
+    // whose index is strictly greater than the index it is given -- so with 'at' still standing at
+    // the match just read, no later keyword could be returned, the loop ended, and ONE declined
+    // header line ('authorization: see the notes') silenced this rule for the rest of the text: a
+    // credential header on any later line was published byte for byte on both entry points, for 11
+    // of the 11 keyword spellings, while the curated shape list, the Bearer rule and the Basic rule
+    // (separate rules) still fired. A declined header is still a header that was read, so the pass
+    // advances past it: its own text is published unchanged and the resume point moves to its end,
+    // as it does in the three branches above.
     const kept = consumeCredentialShapedTokens(source.slice(match.index, value.end));
-    if (kept !== source.slice(match.index, value.end)) {
-      out += source.slice(at, match.index) + kept;
-      at = value.end;
-      continue;
-    }
+    out += source.slice(at, match.index) + kept;
+    at = value.end;
   }
   return out + source.slice(at);
 }
