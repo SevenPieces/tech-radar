@@ -10,6 +10,17 @@
 // copy of this layout is read by the rule that copy states for itself; and when git can answer
 // the walk also drops every other path the repository ignores -- a run's own pools, digests and
 // scratch trees are machine artifacts, so a guard over the published skill must not read them.
+//
+// The fallback -- the answer this walk gives when git cannot be asked, which is every installed
+// skill, since an installed tree has no .git -- has to agree with that answer for the layout it
+// judges, or an installed skill breaks its own suite over its own run artifact. It therefore
+// applies the run-artifact half of the same rule itself: the pool, the plan, the items and the
+// research files the run writes under output_dir, the merged state and its siblings, the locks
+// and temp files that guard them, and the OS cruft the repository ignores. The set is stated
+// here rather than read from .gitignore because the fallback exists precisely for the tree where
+// git cannot be asked -- the file states the rule for the repository, and this is the rule's
+// machine-artifact half, kept in step with .gitignore by the repository's own suite, which runs
+// with git available and would see any run artifact git keeps but this file drops.
 import { lstatSync, readdirSync, statSync } from 'node:fs';
 import { spawnSync } from 'node:child_process';
 import { dirname, join, relative } from 'node:path';
@@ -32,6 +43,22 @@ function designOf(rel) {
   const parts = rel.split('/');
   const at = parts.indexOf('docs');
   return at === -1 ? null : parts.slice(0, at + 1).join('/') + '/design.md';
+}
+
+// The run artifacts .gitignore names, in the same three shapes it names them: the four fixed
+// names a run writes beside its output, the state file and the deliverables beside it, and the
+// lock and temp spellings any of them can take. A path matching one of these is machine state
+// rather than published material whether or not git is available to say so.
+const RUN_ARTIFACT_NAMES = new Set([
+  '.plan.json', '.pool.json', '.items.json', '.research.json', 'tech-radar-state.json',
+  '.DS_Store', 'Thumbs.db',
+]);
+const RUN_ARTIFACT_SUFFIXES = ['.lock', '.tmp'];
+function isRunArtifact(rel) {
+  const base = rel.split('/').pop();
+  if (RUN_ARTIFACT_NAMES.has(base)) return true;
+  if (RUN_ARTIFACT_SUFFIXES.some((suffix) => base.endsWith(suffix))) return true;
+  return /^tech-radar-.*\.(md|html)$/.test(base);
 }
 
 function isWorkingDoc(rel) {
@@ -108,7 +135,13 @@ export function shippedFiles(root = SKILL_ROOT) {
   };
   walk(root);
   // The stated publication rule always applies; git's answer then removes anything else
-  // the repository ignores, so the guards judge the shipping set and nothing else.
+  // the repository ignores, so the guards judge the shipping set and nothing else. A tree git
+  // cannot be asked about -- an installed skill, which is the tree the guards also run in --
+  // gets the run-artifact half of the same rule from this file instead, so the two answers agree
+  // about the artifacts the skill writes for itself. A file that is not one of those still
+  // reaches the guards, whatever path it sits in.
   const ignored = gitIgnored(root, walked);
-  return (ignored ? walked.filter((rel) => !ignored.has(rel)) : walked).sort();
+  return (ignored
+    ? walked.filter((rel) => !ignored.has(rel))
+    : walked.filter((rel) => !isRunArtifact(rel))).sort();
 }
