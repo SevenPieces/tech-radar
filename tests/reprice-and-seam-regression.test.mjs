@@ -137,3 +137,28 @@ test('F27-7 / G2-4 an entity-encoded link seam is ended like the literal one', (
       'the published notice still draws a link: ' + JSON.stringify(published));
   }
 });
+
+// F27-5, the residual, closed by Batch 52 and stated here because this is the file that filed
+// F27-5: the first closure took the published bytes from the whole-line redaction, and the
+// assembly still COMPOSED two things after that pass -- the ': ' separator and, for a detail with
+// no readable message, the module's own reason. A value that spelled either one therefore took
+// the assembly's structure rather than a credential: '?token=x%3A%20' collects 'x: ', the whole
+// line 'x: ' was removed with the seam, and the empty-detail rebuild put the source and the
+// separator back, so the run's own re-redaction removed them again and the notice grew by a
+// marker per pass. The separator and the reason are now the assembly's own structure, protected
+// by the same scaffold the shaper's status and cause are, and a value that is only the separator
+// is removed nowhere.
+test('F27-5 residual the assembly keeps its own separator and reason through the run pass', () => {
+  const separator = ': ';
+  const source = 'rss https://b.example/';
+  const detail = 'HTTP 500 for https://b.example/';
+  for (const cap of [128, 402]) {
+    const notice = assembleNotice(source, detail, [separator], cap);
+    assert.ok(notice.includes(separator),
+      'the published notice carries no separator at cap ' + cap + ': ' + JSON.stringify(notice));
+    assert.equal(redactSecrets(notice, [separator]), notice,
+      'the run redaction rewrote the published notice at cap ' + cap + ': ' + JSON.stringify(notice));
+    assert.equal(assembleNotice('rss', '', ['failure'], cap).includes('a failure with no message'), true,
+      'the module reason was reaped at cap ' + cap);
+  }
+});

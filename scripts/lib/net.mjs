@@ -749,6 +749,25 @@ function removeMarkerBearingValues(text, sorted) {
   return out;
 }
 
+// The separator the notice assembly writes between a source and its detail. It is stated HERE, and
+// collect.mjs imports it, because the redaction has to know the notice's own structure to leave it
+// alone: a value that spells no byte beyond this separator can carry no credential the notice does
+// not already publish structurally -- every notice carries that exact two-character sequence
+// between its source and its detail, and a bare ':' stands in every URL it names -- while removing
+// it can only destroy the documented 'source: detail' shape. That was the F27-5 residual: a
+// collected ': ' (the operator's own userinfo password, or a two-character query value) reaped the
+// assembly's separator, so a re-redacted notice grew by eight characters -- the ten-character
+// marker against the two characters removed -- and could exceed the cap it was priced at, and the
+// removal moved the transport cause off the position the scaffold protects it in. A value that
+// EXTENDS beyond the separator (': x', 'x: ', 'ab: cd') is a credential that merely straddles it
+// and is still removed, together with the separator it spans, which is the whole-notice removal
+// TR-168 closed (Batch 52).
+export const NOTICE_SEPARATOR = ': ';
+function isSeparatorOnlyValue(value) {
+  const v = String(value ?? '');
+  return v !== '' && NOTICE_SEPARATOR.includes(v);
+}
+
 // One pass over the input produces the published text. Every removal the pass makes is one
 // sentinel, and the marker is put in its place only when the whole pass has ended, so no removal
 // can read back a marker this pass wrote; and a marker an earlier pass wrote is a span this pass
@@ -773,6 +792,10 @@ export function redactSecrets(text, secrets) {
     // whose last character is not a word character carries no lookahead, so ' ' matched every
     // standalone space in the text and rewrote it with a ten-character marker (F28-1).
     if (value.trim() === '') continue;
+    // A value that spells only the notice's own separator is not removed either, for the reason
+    // stated beside NOTICE_SEPARATOR: it can carry no credential, and removing it reaps the
+    // assembly's structure (F27-5 residual, Batch 52).
+    if (isSeparatorOnlyValue(value)) continue;
     values.add(value);
     const respelled = urlSpelling(value);
     if (respelled !== null) values.add(withoutSentinel(respelled));
@@ -1027,6 +1050,7 @@ const CAPTURE_CEILING_CODES = new Set(['ENOBUFS', 'ERR_CHILD_PROCESS_STDIO_MAXBU
 // scaffold's own wildcard stands (the cause body, the request slot) is NOT exempt: the removals
 // run over the text, and the assertion beneath the protectScaffold call refuses to publish a
 // masked span a rule deleted.
+export const NO_DETAIL_REASON = 'a failure with no message';
 const SCAFFOLD_MASK = '\uE000';
 const SCAFFOLD_MASK_RE = /\uE000/g;
 // The private-use character the previous design masked with is normalised out of both the text and
@@ -1060,6 +1084,13 @@ const CAUSE_SCAFFOLD = [
   'curl was terminated',
   'curl could not be started',
   'curl failed',
+  // The assembly's own reason for a detail that carries no readable message. It is the module's
+  // own words and it stands where the shaper's cause stands -- at the head of the detail, after
+  // the notice's ': ' seam -- so it is protected the same way and for the same reason: a value a
+  // request carried can spell one of its words, and the notice is the run's only diagnosis
+  // (Batch 52; the string is the assembly's, stated here because this is the module that protects
+  // it, and collect.mjs imports it rather than restating it).
+  escapeScaffoldPhrase(NO_DETAIL_REASON),
 ].join('|');
 // A mapped cause is published with its curl exit code beside it ('failed to connect (curl exit 7)'),
 // so the suffix is part of the same scaffold.

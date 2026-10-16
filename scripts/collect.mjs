@@ -16,7 +16,7 @@ import {
   fetchText, hostOf, isDiscoveryOnly, splitItems, field, atomLink, plainText, redactUrl,
   neutraliseMarkers, neutraliseLinkSeams, noticePreservingRewrites, neutraliseUrl, redactSecrets,
   requestSecrets, requestSecretSets, neutraliseTagSpans, neutraliseEntityTags, repriceShapedError,
-  normalizeInternalChars,
+  normalizeInternalChars, NOTICE_SEPARATOR, NO_DETAIL_REASON,
 } from './lib/net.mjs';
 
 // The collector must work from any working directory, so the default configuration
@@ -135,7 +135,8 @@ function windowCapError(raw) {
 // longer than the bound, and a bound under the HTTP prefix leaves the status and its dangling
 // 'for ' (TR-154) -- and the check still does not bound a notice on its own, because a notice is
 // assembled from more parts than these two and a part no caller bounded still crosses the push.
-const NOTICE_SEPARATOR = ': ';
+// NOTICE_SEPARATOR is stated in net.mjs and imported: the redaction has to know the notice's own
+// structure to leave it alone, and one spelling of it keeps the two modules from drifting apart.
 const NOTICE_SEPARATOR_CHARS = NOTICE_SEPARATOR.length;
 function noticeSourceRoom(cap) {
   return Math.ceil((cap - NOTICE_SEPARATOR_CHARS) / 2);
@@ -418,16 +419,17 @@ function detailMessageOf(detail) {
   }
 }
 
-// A notice whose detail is empty carries no reason: it is the bare source and separator F26-1
-// forbids, and a caller's object with no readable message is the one way to reach it. The words are
-// the module's own -- no byte of the object is read, so nothing a forged shape carries can reach the
-// notice here -- and the fallback keeps the cap like every other path.
-const NO_DETAIL_REASON = 'a failure with no message';
-function withReason(notice, head, tail, cap) {
-  if (tail !== '') return notice;
-  return (head.slice(0, Math.max(0, cap - NOTICE_SEPARATOR_CHARS - NO_DETAIL_REASON.length))
-    + NOTICE_SEPARATOR + NO_DETAIL_REASON).slice(0, cap);
-}
+// A notice whose detail carries no readable message -- a caller's object with none, a forged shape
+// with none -- is published with the module's own reason, and that reason is part of the SEED the
+// whole-line redaction runs on rather than a text composed into the notice afterwards. The words
+// are the module's own (no byte of the object is read, so nothing a forged shape carries can reach
+// the notice through them), and they are protected by the scaffold the way the shaper's status and
+// transport cause are. Composing them after the pass was the F27-5 residual: the rebuild took the
+// source and the separator from the head's OWN pass, so a value the whole-line pass had removed
+// together with the seam ('x: ', ': ') was put back by the assembly, and re-redacting the published
+// notice removed it again -- the notice grew by a marker per pass and could exceed the cap it was
+// priced at (Batch 52). NOTICE_SEPARATOR and NO_DETAIL_REASON are stated in net.mjs, which is the
+// module that protects them; both are imported above.
 
 // Whether 'text' stands in 'line' as one contiguous run. The rebuild below is accepted only while
 // it does, so the assembly can never publish a byte string the whole-line redaction did not
@@ -518,7 +520,11 @@ export function assembleNotice(source, detail, secrets, limit) {
   // A collector hands either the shaped Error itself (so the rebuild below can run) or its own
   // phrase; the text is the message in the first case and the string in the second -- String(err)
   // would publish Node's 'Error: ' prefix, which is not what the caller wrote.
-  const tail0 = detailMessageOf(detail);
+  // The reason is decided before the pass, not composed after it: a detail with no readable
+  // message publishes the module's own reason, which is then part of the text the redaction and the
+  // notice rewriting cross like every other byte.
+  const measured = detailMessageOf(detail);
+  const tail0 = measured === '' ? NO_DETAIL_REASON : measured;
   // The whole line crosses the run's own redaction and the notice rewriting as ONE text, and it is
   // the only text the assembly may publish from: a value that spans the ': ' seam, a rule that
   // reads across it ('authorization: value', an unterminated tag opener reaching the detail's '>')
@@ -527,7 +533,7 @@ export function assembleNotice(source, detail, secrets, limit) {
   const whole = neutraliseNoticeText(redactSecrets(head0 + NOTICE_SEPARATOR + tail0, secrets));
   const head = neutraliseNoticeText(redactSecrets(head0, secrets));
   const tail = neutraliseNoticeText(redactSecrets(tail0, secrets));
-  if (whole.length <= cap) return join(withReason(whole, head, tail, cap));
+  if (whole.length <= cap) return join(whole);
   const labelRoom = Math.min(noticeLabelRoom(head0), cap);
   const repriced = repricedDetailWithin(whole, detail, secrets, cap, labelRoom);
   if (repriced !== null) {

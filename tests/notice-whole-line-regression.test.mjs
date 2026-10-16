@@ -15,7 +15,7 @@ import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { assembleNotice, collectAll, neutraliseNoticeText } from '../scripts/collect.mjs';
-import { redactSecrets, requestSecrets } from '../scripts/lib/net.mjs';
+import { redactSecrets, requestSecrets, shapeTransportError } from '../scripts/lib/net.mjs';
 import { readSettings } from '../scripts/lib/mdtable.mjs';
 
 const CONFIG_DIR = fileURLToPath(new URL('../config/', import.meta.url));
@@ -170,4 +170,137 @@ test('the whole-line redaction is what bounds a notice, at every accepted cap', 
       }
     }
   }
+});
+
+// ---------------------------------------------------------------------------------------
+// Batch 52 / the F27-5 residual: the notice's own structure is immune.
+//
+// The assembly's ': ' separator and the reason it writes for a detail with no readable message
+// are the module's own bytes, and a value that happens to spell them must not remove them. The
+// residual had two halves. A collected ': ' (the operator's own two-character userinfo password,
+// or a two-character query value) reaped the separator wherever the source ended at a non-word
+// character -- 'rss https://b.example/[redacted]request failed for ...', the documented
+// 'source: detail' shape destroyed and the transport cause moved off the position the scaffold
+// protects it in -- and an EMPTY detail was rebuilt from the head's own pass after the whole-line
+// pass had run, so a value the whole-line pass had removed together with the seam ('x: ', ': ')
+// was put back and removed again by the run's own re-redaction: 128 of 10,584 cases in the
+// sweep's p3-compose matrix (12,651 of 300,000 randomized ones) grew by a marker per pass.
+// A value that EXTENDS beyond the separator (': x', 'x: ', 'ab: cd') is a credential that merely
+// straddles it and is still removed with it, which the test above pins.
+// ---------------------------------------------------------------------------------------
+
+// The pieces and the value pool of the sweep's p3-compose probe, verbatim.
+const COMPOSE_PIECES = ['', ':', ': ', 'ab', 'cd', 'x', '<a href=x', 'y>', '](', '(', ')',
+  '[redacte', 'd]', 'authorization', 'Bearer ', 'Basic dXNlcjpw', pad(70, 's'),
+  'the response was not JSON (', pad(200, 'q'), ')', '\uFFFF'];
+const COMPOSE_VALUES = ['ab: cd', ': ', 'x: ', ': x', 'abcdefgh', 'Bearer abcdefghij',
+  '[redacted]', 'redacted]'];
+
+test('F27-5 residual: every notice the p3-compose matrix builds is a fixed point inside its cap', () => {
+  let checked = 0;
+  for (const cap of [128, 129, 402, 1000]) {
+    for (const source of COMPOSE_PIECES) {
+      for (const detail of COMPOSE_PIECES) {
+        for (const secrets of [[], [COMPOSE_VALUES[0]], [COMPOSE_VALUES[1]], [COMPOSE_VALUES[4]],
+          [COMPOSE_VALUES[5]], COMPOSE_VALUES]) {
+          checked += 1;
+          const notice = assembleNotice(source, detail, secrets, cap);
+          const where = cap + '/' + JSON.stringify(source) + '/' + JSON.stringify(detail)
+            + '/' + JSON.stringify(secrets);
+          assert.ok(notice.length <= cap,
+            'the notice is ' + notice.length + ' characters at ' + where);
+          const again = redactSecrets(notice, secrets);
+          assert.equal(again, notice,
+            'the notice is not a fixed point of the run redaction at ' + where + ': '
+            + JSON.stringify(notice) + ' -> ' + JSON.stringify(again));
+          const republishedThis = republished(notice, secrets, cap);
+          assert.equal(republishedThis, notice,
+            'the run republished a different notice at ' + where + ': '
+            + JSON.stringify(notice) + ' -> ' + JSON.stringify(republishedThis));
+          assert.ok(republishedThis.length <= cap,
+            're-redacting the notice exceeded its cap at ' + where);
+        }
+      }
+    }
+  }
+  assert.ok(checked >= 5000, 'the matrix ran ' + checked + ' cases');
+});
+
+test('F27-5 residual: a value that spells only the separator removes nothing', () => {
+  // The separator itself, and the one character it is built from, are the notice's own structure:
+  // a value that carries no byte beyond them can carry no credential the notice does not already
+  // publish structurally, and removing it destroys the documented shape.
+  for (const value of [': ', ':']) {
+    assert.equal(redactSecrets('a: b', [value]), 'a: b',
+      'the value ' + JSON.stringify(value) + ' reaped the separator in prose');
+    assert.equal(redactSecrets('rss https://b.example/: request failed for https://b.example/: failed to connect (curl exit 7)', [value]),
+      'rss https://b.example/: request failed for https://b.example/: failed to connect (curl exit 7)',
+      'the value ' + JSON.stringify(value) + ' reaped a notice separator');
+  }
+  // The exemption is the separator ALONE. A value that extends beyond it is a credential that
+  // straddles the seam, and it is still removed -- with the separator it spans.
+  assert.equal(assembleNotice('ab', 'cd', ['ab: cd'], 128), '[redacted]',
+    'a value spanning the seam was published');
+  assert.equal(redactSecrets('x: y', ['x: ']), '[redacted]y',
+    'a value extending left of the seam was published');
+});
+
+test('F27-5 residual: the run keeps the notice shape when a row carries the separator itself', async () => {
+  // The operator's own two-character userinfo password is collected whatever its length, so it
+  // enters the run union for EVERY notice. At the parent the separator of every notice whose
+  // source ended at a non-word character was reaped; the source, the status and the request then
+  // ran together with no separator at all.
+  const target = 'https://b.example/';
+  const long = 'https://b.example/' + pad(40, 'a') + '/';
+  const settings = settingsAt(128, 63);
+  const rows = [
+    { kind: 'rss', target: 'https://u:%3A%20@feeds.example/feed.xml', domain: 'ai-llm', note: '' },
+    { kind: 'rss', target: long, domain: 'ai-llm', note: '' },
+    { kind: 'rss', target: 'https://feeds.example/c.xml?token=connect', domain: 'ai-llm', note: '' },
+  ];
+  const net = {
+    fetchText: async (url, timeout, headers, ua, limit, omitUrl) => {
+      if (url.includes('b.example')) {
+        throw shapeTransportError({ status: 7 }, url, limit, headers ?? {}, Boolean(omitUrl));
+      }
+      return '<rss><channel><item><title>the releases page</title>'
+        + '<link>https://feeds.example/1</link><pubDate>Sun, 20 Sep 2026 12:00:00 GMT</pubDate>'
+        + '<description>the archived releases</description></item></channel></rss>';
+    },
+  };
+  const secrets = requestSecrets('https://u:%3A%20@feeds.example/feed.xml', {});
+  assert.ok(secrets.includes(': '), 'the fixture no longer collects the two-character password');
+  const pool = await collectAll({ settings, watchlist: rows }, { ...WINDOW, net });
+  assert.ok(pool.notices.length > 0, 'the run published no notice');
+  let transported = 0;
+  for (const notice of pool.notices) {
+    assert.ok(notice.length <= 128, 'the notice is ' + notice.length + ' characters: ' + JSON.stringify(notice));
+    assert.ok(notice.includes(': '),
+      'the run published a notice with no separator: ' + JSON.stringify(notice));
+    if (notice.includes('failed to connect')) {
+      transported += 1;
+      assert.ok(notice.includes('failed to connect (curl exit 7)'),
+        'the transport cause lost a word: ' + JSON.stringify(notice));
+      assert.ok(notice.startsWith('rss '), 'the notice lost its source: ' + JSON.stringify(notice));
+    }
+  }
+  assert.ok(transported > 0, 'the transport notice is missing from ' + JSON.stringify(pool.notices));
+  assert.equal(target, 'https://b.example/', 'the fixture target changed');
+});
+
+test('F27-5 residual: the assembly\u2019s own reason survives a value that spells its words', () => {
+  const reason = 'a failure with no message';
+  // The reason is the module's own text and stands where the shaper's cause stands: at the head of
+  // the detail, after the notice's ': ' seam.
+  assert.equal(assembleNotice('rss', { httpStatus: null, cause: 'x' }, ['failure', 'message'], 128),
+    'rss: ' + reason, 'the assembly lost its own reason');
+  assert.equal(assembleNotice('rss', '', ['a failure', 'with no'], 128), 'rss: ' + reason,
+    'the assembly lost its own reason for an empty detail');
+  assert.equal(redactSecrets('rss: ' + reason, ['failure']), 'rss: ' + reason,
+    'the run redaction reaped the assembly reason');
+  // The protection is POSITIONAL, exactly as the cause phrases' is: the same words in a source's
+  // own prose are not the assembly's reason and a value that spells one of them still goes.
+  assert.equal(redactSecrets('the tool said a failure with no message twice', ['failure']),
+    'the tool said a [redacted] with no message twice',
+    'the reason protection leaked into ordinary prose');
 });
