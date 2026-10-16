@@ -217,6 +217,59 @@ test('a gitignored path is skipped while a shipped file is still scanned', (t) =
   }
 });
 
+
+// Closing sweep F31-10 (Med, test integrity; reproduced by the sweep): the walker asked
+// 'git -C <tree> check-ignore' whenever git answered at all, and 'git -C' answers from the
+// NEAREST ENCLOSING work tree. A tree that is not itself a repository root - a frozen
+// git-archive export unpacked inside another repository, which is exactly how every
+// verification pass runs - was therefore answered by the OUTER repository, whose ignore
+// rules (and whose docs/ entry) have nothing to do with this tree: the walk returned ZERO
+// paths while both guards above still reported green, so the whole suite's no-credential
+// claim rested on a scan of nothing. The walk now uses git's answer only when git's own
+// work-tree root IS the tree it is walking, and falls back to the stated rule otherwise.
+test('the shipping scan is not inert when git resolves to an outer repository', (t) => {
+  const outer = mkdtempSync(join(tmpdir(), 'tech-radar-outer-'));
+  const leak = 'Task ' + '7 ' + 'ran the probes\n';
+  const secret = 'ghp_' + 'fakefakefakefake' + '\n';
+  try {
+    const skill = join(outer, 'skill');
+    mkdirSync(join(skill, 'config'), { recursive: true });
+    mkdirSync(join(skill, 'docs'), { recursive: true });
+    writeFileSync(join(skill, '.gitignore'), 'docs/*\n!docs/design.md\n');
+    writeFileSync(join(skill, 'config', 'settings.md'), leak + secret);
+    writeFileSync(join(skill, 'docs', 'design.md'), '# the specification\n');
+    writeFileSync(join(outer, '.gitignore'), 'skill/\n');
+    const made = spawnSync('git', ['-C', outer, 'init', '-q'], { encoding: 'utf8' });
+    if (made.error || made.status !== 0) {
+      t.skip('git is not available, so the outer-repository case cannot be built');
+      return;
+    }
+    // The premise: git's answer for this tree comes from the outer repository and says the
+    // whole tree is ignored - the state the frozen export is in when a verification pass
+    // unpacks it inside a checkout.
+    const viaOuter = spawnSync('git', ['-C', skill, 'check-ignore', '-q', 'config/settings.md'], { encoding: 'utf8' });
+    if (viaOuter.error || (viaOuter.status !== 0 && viaOuter.status !== 1)) {
+      t.skip('git cannot answer for the fixture tree');
+      return;
+    }
+    assert.equal(viaOuter.status, 0, 'the outer repository ignores the whole fixture tree');
+    // The walker must not turn that into 'nothing ships': the guard has to judge the files
+    // the reader receives, and the leak planted in a shipped file must still be caught.
+    const files = shippedFiles(skill);
+    assert.ok(files.length > 0, 'the walker returned no paths while git resolved to an outer repository');
+    assert.equal(files.includes('config/settings.md'), true,
+      'a shipped file was dropped because an outer repository ignores it: ' + JSON.stringify(files));
+    assert.equal(files.includes('docs/design.md'), true, 'the design document still ships');
+    assert.equal(files.includes('docs/working-notes.md'), false);
+    assert.deepEqual(scan(skill, PROCESS, 'names'), ['config/settings.md names a build task number'],
+      'a silently inert scan: the planted leak was not reported');
+    assert.deepEqual(scan(skill, SECRET, 'carries'), ['config/settings.md carries a GitHub token'],
+      'a silently inert scan: the planted credential shape was not reported');
+  } finally {
+    rmSync(outer, { recursive: true, force: true });
+  }
+});
+
 // .gitignore covered only the two documented lock spellings, so the lock of a state file
 // with any other name was trackable and a stray `git add -A` could publish it. The rule is
 // general now; this asks the repository about a name the shipped list never mentions.

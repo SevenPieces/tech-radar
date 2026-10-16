@@ -94,10 +94,40 @@ function entryKind(path) {
   return 'other';
 }
 
+// The prefix of the repository whose root IS this tree, or null when git resolves to
+// something else. 'git -C <dir>' answers from the nearest enclosing work tree, and a tree
+// that is not itself a repository root - an installed skill under another checkout, a
+// frozen git-archive export unpacked inside a repository - is answered by THAT repository:
+// its paths are relative to a different root. Closing sweep F31-10: a frozen export placed
+// inside another repo, where the export's own docs/ is ignored, got an empty answer from
+// check-ignore and the walk returned ZERO paths, so the publication guards scanned nothing
+// and hygiene.test.mjs went on reporting green. '${prefix}rel' is the path a path relative
+// to this tree has in that repository, which is what the walker then matches against.
+function gitTreePrefix(root) {
+  const res = spawnSync('git', ['-C', root, 'rev-parse', '--show-toplevel', '--show-prefix'], {
+    encoding: 'utf8', maxBuffer: 1024 * 1024,
+  });
+  if (res.error || res.status !== 0) return null;
+  const [top, prefix = ''] = String(res.stdout ?? '').split('\n');
+  if (!top || comparePaths(top, root) !== 0) return null;
+  return prefix.endsWith('/') || prefix === '' ? prefix : prefix + '/';
+}
+
+// Two paths are the same directory when they resolve to one, whether or not a trailing
+// slash or a '.' segment is spelled. Only the textual forms git and Node hand back are
+// compared here; an unresolved symlink still compares equal to itself.
+function comparePaths(a, b) {
+  const clean = (p) => String(p).replace(/[/\\]+$/, '').split(/[/\\]+/).filter((s) => s && s !== '.').join('/');
+  return clean(a) === clean(b) ? 0 : 1;
+}
+
 // True when the path is one the repository ignores. Answers null when git cannot be asked
-// (no binary, or the tree is not a repository), which is not the same as "not ignored":
-// the caller then keeps the stated rule alone.
+// (no binary, the tree is not a repository, or git resolves to another repository), which
+// is not the same as "not ignored": the caller then keeps the stated rule alone.
 function gitIgnored(root, rels) {
+  if (rels.length === 0) return new Set();
+  const prefix = gitTreePrefix(root);
+  if (prefix === null) return null;
   if (rels.length === 0) return new Set();
   const res = spawnSync('git', ['-C', root, 'check-ignore', '-z', '--stdin'], {
     input: rels.join('\0'), encoding: 'utf8', maxBuffer: 64 * 1024 * 1024,
@@ -105,7 +135,10 @@ function gitIgnored(root, rels) {
   // Exit 0 lists the ignored paths, exit 1 is git's answer that none of them is ignored.
   // Every other status -- including a spawn that never happened -- leaves no answer.
   if (res.error || (res.status !== 0 && res.status !== 1)) return null;
-  return new Set(String(res.stdout ?? '').split('\0').filter(Boolean));
+  // git's answer is prefixed with this tree's place in the repository it answered from, so
+  // the set is comparable with the walk's own paths; at the repository root the prefix is
+  // empty and the answer is unchanged.
+  return new Set(String(res.stdout ?? '').split('\0').filter(Boolean).map((p) => p.slice(prefix.length)));
 }
 
 export function shippedFiles(root = SKILL_ROOT) {
