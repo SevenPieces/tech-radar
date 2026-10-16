@@ -204,6 +204,22 @@ const CREDENTIAL_TOKENS = [
   'st', 'state', 'status', 'sid', 'sso', 'mac', 'hash', 'uuid', 'authorization',
 ];
 
+// The session, anti-CSRF and crypto-material spellings the server actually uses, which neither the
+// stem list nor the token list above reaches: 'PHPSESSID' does not end in 'session' and neither does
+// 'sessid', 'ssoid' ends in 'id', and '_csrf', 'xsrf', 'mfa', 'pwdhash' and 'webhook' carry no stem
+// at all. They are credential positions the way the family above is (F28-6 / sweep F28-2): the value
+// authenticates a session, guards a request, or is the keyed material itself.
+//
+// 'identity' and 'salt' are deliberately NOT here, and that is the whole of the judgement this list
+// makes. 'identity' is an ordinary noun a descriptive parameter uses ('?identity=employee'); what
+// stands under it is the subject a request is about as often as a token. A salt is a public per-key
+// value by construction and is useless without the hash it sits beside, so it is not a credential
+// either. Taking either would put an ordinary configured word into the removal set, which is the
+// over-redaction direction TR-110 and TR-116 exist to keep out.
+const CREDENTIAL_FUSED = [
+  'phpsessid', 'sessid', 'ssoid', 'csrf', 'xsrf', 'mfa', 'pwdhash', 'webhook',
+];
+
 // A code-carrying parameter is matched by its whole name only: 'code' alone (?code=...) and a name
 // that spells it as its own token (code_verifier, auth_code) are the explicit code-carrying names
 // this rule keeps, while 'code' is not a suffix stem -- the ambiguous spelling that made
@@ -230,9 +246,47 @@ function isCredentialName(name) {
   if (normalized === '') return false;
   for (const token of nameTokens(name)) {
     if (token === CREDENTIAL_CODE_TOKEN) return true;
-    if (CREDENTIAL_STEMS.includes(token) || CREDENTIAL_TOKENS.includes(token)) return true;
+    if (CREDENTIAL_STEMS.includes(token) || CREDENTIAL_FUSED.includes(token)) return true;
+    if (CREDENTIAL_TOKENS.includes(token)) return true;
   }
-  return CREDENTIAL_STEMS.some((stem) => normalized.endsWith(stem));
+  return CREDENTIAL_STEMS.some((stem) => normalized.endsWith(stem))
+    || CREDENTIAL_FUSED.some((stem) => normalized.endsWith(stem));
+}
+
+// The SECOND of the two questions isCredentialName answers, and the one the candidate pass asks:
+// may a value under this name rewrite a published word in the pool? A name is credential-BEARING
+// when a genuinely credential-bearing spelling (a stem, or one of the session/CSRF fused spellings)
+// spells it. The token-only names of CREDENTIAL_TOKENS are NOT: 'state', 'status', 'st', 'sid',
+// 'sso', 'mac', 'hash', 'uuid' and 'authorization' are real words or fragments of them, and a
+// configured target whose ordinary parameter carries one of them - '?state=archived',
+// '?status=releases', '?uuid=identifier' - put the ordinary value 'archived' into the candidate
+// union, and the candidate pass then rewrote the published prose of an unrelated source
+// ('the archived releases' became 'the [redacted] releases'). That is a regression of exactly the
+// class TR-110 closed, and this is where the two questions come apart (sweep F28-1, Med).
+function isCredentialBearingName(name) {
+  const normalized = normalizedParamName(name);
+  if (normalized === '') return false;
+  for (const token of nameTokens(name)) {
+    if (token === CREDENTIAL_CODE_TOKEN) return true;
+    if (CREDENTIAL_STEMS.includes(token) || CREDENTIAL_FUSED.includes(token)) return true;
+  }
+  return CREDENTIAL_STEMS.some((stem) => normalized.endsWith(stem))
+    || CREDENTIAL_FUSED.some((stem) => normalized.endsWith(stem));
+}
+
+// A value that is itself credential-shaped: it carries a digit, a capital, or a character that is
+// not an alphanumeric or a space. This is the SECOND half of the candidate rule for a token-only
+// name, and it is what keeps both directions closed at once. An ordinary configured value under an
+// ordinary token name ('archived', 'releases', 'identifier', 'landscape') is a plain lower-case
+// word and rewrites no published prose; a value that IS a credential - a session id, a hex digest,
+// a base64 blob, a mixed-case token - is not a word any prose is built from, and it is collected
+// from three characters up in the notice set and from the free-text floor up in the candidate set
+// exactly as before. A name that is credential-bearing by its own spelling (the stems, and the
+// fused session spellings) needs no such test: 'password' is a credential position whatever its
+// value spells, and the High F27-1 closure rests on that.
+const CREDENTIAL_SHAPED_VALUE = /[0-9]|[A-Z]|[^A-Za-z0-9\s]/;
+function credentialShapedValue(value) {
+  return CREDENTIAL_SHAPED_VALUE.test(String(value ?? ''));
 }
 
 // The name as the server reads it: a percent-encoded spelling of a credential name is the same
@@ -244,11 +298,24 @@ function credentialParam(name) {
   try { return isCredentialName(decodeURIComponent(raw.replace(/\+/g, ' '))); } catch { return false; }
 }
 
+// The same question for the candidate pass: the name is credential-BEARING, so a value under it is
+// a credential whatever it spells and is collected for the candidate set unconditionally. Read from
+// the same decoded form, because a percent-encoded credential name is the same parameter to the
+// server.
+function candidateCredentialParam(name) {
+  const raw = String(name ?? '');
+  if (isCredentialBearingName(raw)) return true;
+  try { return isCredentialBearingName(decodeURIComponent(raw.replace(/\+/g, ' '))); } catch { return false; }
+}
+
 // How long a value is once the server has decoded it, which is the value the floor is about: a
 // two-character value spelled out as percent-encoded pairs is still a two-character value.
-function decodedLength(value) {
+function decodedValue(value) {
   const raw = String(value ?? '');
-  try { return decodeURIComponent(raw.replace(/\+/g, ' ')).length; } catch { return raw.length; }
+  try { return decodeURIComponent(raw.replace(/\+/g, ' ')); } catch { return raw; }
+}
+function decodedLength(value) {
+  return decodedValue(value).length;
 }
 
 // A Basic credential is the base64 of 'user:password', so it is recognised as one: the token
@@ -397,9 +464,19 @@ export function requestSecretSets(url, headers) {
   // MIN_CREDENTIAL_VALUE_CHARS up, the candidate set only from MIN_SECRET_CHARS up, so an ordinary
   // short word under a credential name ('new', 'beta', 'live') stays in the notice's removal set
   // while it cannot rewrite the prose a candidate carries.
-  const queryEligibility = (length) => ({
+  //
+  // The candidate half asks one question more, and it is the question the two rules differ on: a
+  // value crosses into the candidate set when the name is itself credential-bearing, or when the
+  // value is credential-shaped. A token-only name ('state', 'status', 'uuid', 'hash', ...) whose
+  // value is an ordinary configured word is NOT a candidate position, which is what keeps
+  // '?state=archived' from rewriting a feed's own 'the archived releases' (sweep F28-1); the value
+  // is still collected for the notice set from three characters up, and a token-named position whose
+  // value really is a credential is collected for both. The shape test reads the value the server
+  // holds, which is the decoded one at every call site below.
+  const queryEligibility = (name, value, length) => ({
     notice: length >= MIN_CREDENTIAL_VALUE_CHARS,
-    candidate: length >= MIN_SECRET_CHARS,
+    candidate: length >= MIN_SECRET_CHARS
+      && (candidateCredentialParam(name) || credentialShapedValue(value)),
   });
   const raw = String(url ?? '');
   try {
@@ -414,7 +491,7 @@ export function requestSecretSets(url, headers) {
       if (!credentialParam(name)) continue;
       // URLSearchParams reports the value already decoded, so its length is the floor's input;
       // decoding it a second time would shorten a value that literally spells an escape.
-      const eligible = queryEligibility(value.length);
+      const eligible = queryEligibility(name, value, value.length);
       if (!eligible.notice && !eligible.candidate) continue;
       addSpellings(value, eligible);
     }
@@ -426,7 +503,7 @@ export function requestSecretSets(url, headers) {
       if (eq === -1) continue;
       if (!credentialParam(pair.slice(0, eq))) continue;
       const rawValue = pair.slice(eq + 1);
-      const eligible = queryEligibility(decodedLength(rawValue));
+      const eligible = queryEligibility(pair.slice(0, eq), decodedValue(rawValue), decodedLength(rawValue));
       if (!eligible.notice && !eligible.candidate) continue;
       addSpellings(rawValue, eligible);
     }
@@ -450,7 +527,7 @@ export function requestSecretSets(url, headers) {
     }
     for (const m of raw.matchAll(/[?&]([^=&#\s]+)=([^&#\s]*)/g)) {
       if (!credentialParam(m[1])) continue;
-      const eligible = queryEligibility(decodedLength(m[2]));
+      const eligible = queryEligibility(m[1], decodedValue(m[2]), decodedLength(m[2]));
       if (!eligible.notice && !eligible.candidate) continue;
       addSpellings(m[2], eligible);
     }

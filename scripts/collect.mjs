@@ -1694,9 +1694,19 @@ export async function collectAll(config, opts) {
   // TR-110: the set is the credential positions only. Applying the whole union here reaped
   // ordinary words that merely happened to be a configured request value, so a shipped run
   // published a candidate summary of 'We sort the results in [redacted] order'; a value that is
-  // ordinary configuration is not a credential and never rewrites published prose. The
-  // per-source pass above stays as it is, and the redaction is skipped entirely when the run
-  // issued no credential at all (nothing can have been echoed).
+  // ordinary configuration is not a credential and never rewrites published prose.
+  //
+  // Batch 43 re-opened that class for a moment by reading the new whole-token names ('st', 'state',
+  // 'status', 'sid', 'sso', 'mac', 'hash', 'uuid', 'authorization') for this purpose too: an
+  // ordinary configured value under one of them ('?state=archived', '?status=releases') put an
+  // ordinary word into this union and the pass below rewrote a feed's published prose with it
+  // ('the archived releases' became 'the [redacted] releases'). The two questions are asked apart
+  // now (net.mjs isCredentialBearingName / credentialShapedValue): a value reaches this set when
+  // the name is genuinely credential-bearing, or when the value is itself credential-shaped, so a
+  // token-named position that really carries a credential is still removed here while an ordinary
+  // value under an ordinary token name - and under an ordinary compound of one, '?state-of-the-art='
+  // - never rewrites a published word. The per-source pass above stays as it is, and the redaction
+  // is skipped entirely when the run issued no credential at all (nothing can have been echoed).
   const redactedCandidates = credentialUnion.length === 0 ? candidates : candidates.map((candidate) => {
     const out = { ...candidate };
     for (const [field, value] of Object.entries(out)) {
