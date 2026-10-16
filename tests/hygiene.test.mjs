@@ -508,6 +508,43 @@ test('every TRACKED lock and temp of a fixed run-artifact name is kept by BOTH a
   }
 });
 
+// F37-2 (final verification; a Low residual of F36-1, RECORDED rather than closed). Batch 84's
+// trackedness read decides the LOCK and TEMP half of the machine-artifact rule; the fixed-name half is
+// still answered by the NAME alone, before git is consulted. So a repository that FORCE-ADDS a file
+// whose own name is a fixed run artifact or a digest -- the only way to track a name .gitignore
+// ignores -- ships a file the reader receives: git's answer keeps it, the no-git answer drops it on
+// the name, and no publication guard reads it. Measured on this fixture: 10 of 10 fixed names
+// disagree. That is the bound, and this case pins BOTH of its halves so a later round cannot close it
+// silently or regress it the other way: the repository answer carries the names (and the guard reads
+// the credential in them), and the no-git answer still drops them. The alternative direction -- keep
+// every fixed name wherever git cannot be asked, as the lock and temp half does -- was rejected
+// because it would hand an installed skill's own '.pool.json' and digests to the guards, which is the
+// failure the fallback exists to prevent. Reach: a repository, or an export inside one, that
+// force-adds one of these names. Batch 84's commit subject claimed every TRACKED run-artifact
+// spelling agrees; it covers the lock and temp spellings only.
+test('a TRACKED fixed run-artifact name is kept by the repository and dropped by the no-git answer (the recorded F37-2 bound)', (t) => {
+  const names = ['.pool.json', 'tech-radar-state.json', 'tech-radar-2026-10-15.md', 'tech-radar-2026-10-15.html'];
+  const files = { '.gitignore': readFileSync(join(SKILL_ROOT, '.gitignore')), 'config/settings.md': 'a shipped file\n' };
+  for (const name of names) files[name] = 'ghp_' + 'fakefakefakefake' + '\n';
+  const dir = walkerFixture(files, names);
+  if (dir === null) {
+    t.skip('git is not available, so the repository answer was not exercised');
+    return;
+  }
+  try {
+    const withGit = shippedFiles(dir);
+    assert.deepEqual(withGit, names.concat(['.gitignore', 'config/settings.md']).sort(),
+      'the repository answer does not carry the force-added fixed names, so the case under test was not built');
+    assert.deepEqual(scan(dir, SECRET, 'carries').sort(),
+      names.map((name) => name + ' carries a GitHub token').sort(),
+      'the repository answer carried a fixed name the publication guard did not read');
+    assert.deepEqual(noGitWalk(dir), ['.gitignore', 'config/settings.md'],
+      'the no-git answer no longer drops the fixed names, so the recorded bound no longer describes the walk');
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 // The trackedness read itself, and the clause that makes it load-bearing (Batch 84; closing sweep
 // F36-1). The sweep's own fixtures cannot distinguish this clause from its absence, because every
 // one of them is read through the PATH-without-git form of the fallback. A tree that sits INSIDE a

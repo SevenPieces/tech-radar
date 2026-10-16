@@ -70,6 +70,20 @@ const RUN_ARTIFACT_NAMES = new Set([
 // what it carries -- was still never handed to a publication guard. 10 of the sweep's 11 layouts
 // disagreed.
 //
+// THE BOUND THAT NAME VERDICT LEAVES (Batch 87; final verification F37-2, recorded rather than
+// closed). A name is the whole story only while trackedness is not asked about: a repository that
+// FORCE-ADDS a file whose own name is one of these -- 'git add -f .pool.json', or a digest -- ships a
+// file the reader receives. Git's answer keeps it (git never ignores what it carries) and this
+// fallback still drops it on the name alone, so no publication guard reads it. Measured on a fixture
+// that force-adds every fixed name: 10 of 10 TRACKED names disagree with the repository's answer.
+// The other direction is available and deliberately not taken: keeping every fixed name wherever git
+// cannot be asked -- the direction the lock and temp half below takes -- would hand an installed
+// skill's own '.pool.json', and its digests, to the guards, which is the failure this fallback exists
+// to prevent, and a pool carries whatever the feeds spelled. The bound is therefore recorded with its
+// reach (a repository, or an export inside one, that force-adds one of these names), and Batch 84's
+// commit subject -- 'every TRACKED run-artifact spelling agrees with the repository's answer' --
+// covers the lock and temp spellings only and overstates its subject for this class. tests/hygiene.
+// test.mjs pins the bound in both answers.
 // A LOCK'S NAME IS NOT A TRACKEDNESS QUESTION, so the fallback no longer answers one with a name.
 // The fallback's two verdicts are answered by two different things. A path whose OWN name is one of
 // the fixed artifacts the reader never receives -- the pool, the plan, the items, the research file,
@@ -90,7 +104,9 @@ const RUN_ARTIFACT_NAMES = new Set([
 //
 // The measured answers for the sweep's eleven TRACKED layouts (the lock and temp spelling of every
 // fixed name, a digest, and the --state-named control) are pinned by tests/hygiene.test.mjs: all
-// eleven agree with git's answer now, where ten disagreed before. The cost is the other half of the
+// eleven agree with git's answer now, where ten disagreed before. THEY ARE THE LOCK AND TEMP
+// SPELLINGS: the fixed-name class is the bound recorded above, not an agreement. The cost is the
+// other half of the
 // same reading, and it is recorded and pinned there too: a run artifact's own UNTRACKED lock or temp
 // -- which git ignores and drops -- is kept by the no-git answer, because no name can say whether a
 // repository carries it and the safe direction is to hand it to a guard.
