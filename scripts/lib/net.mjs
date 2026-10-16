@@ -6,6 +6,24 @@ import { execFileSync } from 'node:child_process';
 
 export const DEFAULT_UA = 'tech-radar/1.0';
 
+// The set a shaped text was priced against, kept OUT of the error object: the field used to be an
+// own enumerable property, so JSON.stringify, a stack dump or any future error logger would have
+// published the request's credential values in plaintext (F26-3). The WeakMap carries the same fact
+// to the same reader -- repriceShapedError -- without putting a credential where a serializer can
+// reach it. An error the shapers did not build has no entry and prices against the caller's set
+// alone, exactly as before.
+const PRICED_SECRETS = new WeakMap();
+function recordPricedSecrets(shaped, secrets) {
+  PRICED_SECRETS.set(shaped, [...secrets]);
+}
+function pricedSecretsOf(err) {
+  try {
+    return PRICED_SECRETS.get(err) ?? [];
+  } catch {
+    return [];
+  }
+}
+
 // curl -w appends this after the last byte of the response, so the final line of
 // the captured bytes is always the HTTP status and never part of the body. This
 // needs no option newer than -w, which every curl in the field has: the earlier
@@ -44,12 +62,58 @@ export function redactUrl(url) {
 // first space deleted the word 'Basic' and left the credential behind in full. The scheme's
 // own token has to be credential-shaped as well, so prose that merely says 'a Bearer token'
 // stays readable while a real value goes; MIN_SECRET_CHARS is that shape's floor.
+// The authorization shape removes the credential VALUE and nothing else. The earlier rule consumed
+// the scheme plus one further token unconditionally, so a watchlist target whose own path ends in
+// 'authorization' supplied the word, the ': ' separator supplied the colon, and the rule ate the
+// first words of whatever followed -- a transport cause lost its leading word and a pushed HTTP
+// status disappeared (S26-F5). It now looks at what stands after the colon: a recognised scheme (or
+// a first token that is itself credential-shaped) means the credential-bearing token is the one
+// after it, while an unrecognised first token is consumed alone and the token after it survives. A
+// token is credential-shaped when it carries a non-alphabetic marker -- a digit or one of the
+// +/=._- characters a base64, hex or JWT value is built from -- so the word '403' after 'HTTP' and
+// the word 'resolve' after 'could' are prose and stay readable.
+const AUTH_SCHEMES = new Set([
+  'basic', 'bearer', 'digest', 'token', 'apikey', 'key', 'signature', 'oauth', 'oauth2', 'jwt',
+  'negotiate', 'hawk', 'aws4-hmac-sha256', 'saml',
+]);
+const AUTH_TOKEN_CHARS = '[^\\s,;"\']+';
+function credentialShapedToken(token) {
+  return token.length >= MIN_SECRET_CHARS
+    && /[0-9]/.test(token)
+    && !/^[0-9]+$/.test(token);
+}
+// The plain shapes: each one is removed by replacing what it matched. The authorization rule is
+// NOT here -- it has to read what follows its own match to know whether the next token is the
+// credential, and a plain replacement would remove the keyword before that decision could be made.
+// It runs as its own rule, 'redactAuthorizationShapes', beside this list.
 const SECRET_SHAPES = [
   /\bBearer\s+[^\s,;"']{8,}/gi,
-  /\b(?:proxy-)?authorization\s*:\s*(?:\S+\s+)?\S+/gi,
   /\bgh[pousr]_[A-Za-z0-9]{6,}\b/g,
   /\bgithub_pat_[A-Za-z0-9_]{20,}\b/g,
 ];
+const AUTHORIZATION_SHAPE = /\b(?:proxy-)?authorization\s*:\s*[^\s,;"']+/gi;
+
+// The one shape in the list above that has to read what FOLLOWS its match: the authorization rule
+// consumes the token after the scheme it matched, and only when that token is the credential. The
+// replacer receives the end of the match and the text, reads the next token with the lookahead
+// above, and returns what the sentinel replaces. Both passes of the redaction call it, so the
+// single-token match the list makes and the two-token removal the credential calls for stay in one
+// place.
+const NEXT_AUTH_TOKEN = new RegExp('^\\s+(' + AUTH_TOKEN_CHARS + ')');
+function redactAuthorizationShapes(text) {
+  const source = String(text);
+  let out = '';
+  let at = 0;
+  for (const match of source.matchAll(AUTHORIZATION_SHAPE)) {
+    const first = match[0].slice(match[0].lastIndexOf(':') + 1).trim();
+    const next = NEXT_AUTH_TOKEN.exec(source.slice(match.index + match[0].length));
+    const consumeSecond = next !== null
+      && (AUTH_SCHEMES.has(first.toLowerCase()) || credentialShapedToken(next[1]));
+    out += source.slice(at, match.index) + REDACTION_SENTINEL;
+    at = consumeSecond ? match.index + match[0].length + next[0].length : match.index + match[0].length;
+  }
+  return out + source.slice(at);
+}
 
 // The floor for removing a value by exact match. It applies to the free text the shape list
 // above covers and to the words a header value splits into -- the runs of text that are ordinary
@@ -159,13 +223,65 @@ function decodedLength(value) {
 // this pass had missed would be removed by the pass that followed it -- a removal applied after
 // the cap was charged, and a lengthening (the 10-character marker against an 8-character token)
 // exactly where the fixed-point contract forbids one.
-function redactBasicCredentials(text) {
-  return String(text).replace(/\bBasic\s+([A-Za-z0-9+/]{8,}={0,2})/gi, (whole, token) => {
+// The token is read by trying every tokenisation of the run of base64 characters that follows
+// 'Basic ' and keeping the longest one that decodes to 'user:password'. The single greedy match
+// failed that test whenever one unpadded blob stood immediately against another -- the run held both
+// blobs and their joining text, the decode failed and NOTHING was removed -- so a foreign credential
+// echoed into an RSS title reached the published candidate pool (F26-2). Shortening the candidate
+// one character at a time finds the blob, and an ordinary word still decodes to nothing that carries
+// a colon, so no prose is reaped.
+function decodedBasicToken(text) {
+  // The text starts at the whitespace the 'Basic' keyword requires, and the run of base64
+  // characters ends at the first separator: the token is a prefix of it, which is why the loop
+  // below shortens the run instead of matching it whole.
+  const prefix = /^\s+([A-Za-z0-9+/]+={0,2})/.exec(' ' + String(text));
+  if (prefix === null) return null;
+  const run = prefix[1];
+  for (let length = run.length; length >= 8; length -= 1) {
+    const candidate = run.slice(0, length);
+    // Base64 never carries exactly one leftover character, so a run of length 1 (mod 4) is not a
+    // token: the decoder silently drops the extra character, and a candidate whose last character
+    // was really the first letter of the NEXT credential then decoded to a printable pair and was
+    // accepted -- which carried the rest of that credential through (F26-2).
+    if (length % 4 === 1) continue;
     let decoded = '';
-    try { decoded = Buffer.from(token, 'base64').toString('utf8'); } catch { return whole; }
-    if (!decoded.includes(':') || !/^[\x20-\x7e]+$/.test(decoded)) return whole;
-    return whole.slice(0, whole.length - token.length) + REDACTION_SENTINEL;
-  });
+    try { decoded = Buffer.from(candidate, 'base64').toString('utf8'); } catch { continue; }
+    // The decoded text has to be a credential pair: printable, and a non-empty user and password
+    // around the colon. 'Basic auth', 'Basic authentication' and every other ordinary word decode
+    // to text that carries no colon and are left alone.
+    if (!/^[\x20-\x7e]+$/.test(decoded) || !/^[^:=]+:[^:=]+$/.test(decoded)) continue;
+    return candidate;
+  }
+  return null;
+}
+function redactBasicCredentials(text) {
+  // The keyword and its whitespace are copied through and only the decoded credential pair is
+  // replaced, so an unrecognised word is returned exactly as it stood and no later rule sees a
+  // shape it did not have. The scan resumes AFTER the token it removed, so the next 'Basic' -- the
+  // one an unpadded blob was glued to -- is matched on the same sweep, which is what makes
+  // back-to-back blobs removable (F26-2).
+  const source = String(text);
+  let out = '';
+  let at = 0;
+  // The keyword is a word of its own, never the five letters at the tail of an unpadded base64 run:
+  // 'gBasic' is one token and its 'asic' is not an occurrence, while 'Basic' at the start of the
+  // text or after any non-word character is. A whole-word anchor at the FRONT is not enough --
+  // matching it and then consuming the whitespace let the scan match the tail of a blob and carry
+  // five characters of the next credential through (F26-2) -- so the preceding character is
+  // asserted with a lookbehind and the whitespace is read by hand. Every occurrence is then decided
+  // on its own token, with no cursor state to get wrong.
+  const pattern = /(?<![A-Za-z0-9_])Basic/gi;
+  for (const match of source.matchAll(pattern)) {
+    const after = source.slice(match.index + 'Basic'.length);
+    const space = /^\s+/.exec(after);
+    if (space === null) continue;
+    const tokenStart = match.index + 'Basic'.length + space[0].length;
+    const token = decodedBasicToken(after.slice(space[0].length));
+    if (token === null) continue;
+    out += source.slice(at, tokenStart) + REDACTION_SENTINEL;
+    at = tokenStart + token.length;
+  }
+  return out + source.slice(at);
 }
 
 // A 4xx/5xx body is quoted into a notice and can echo the request back -- "token=<value>
@@ -448,6 +564,7 @@ export function redactSecrets(text, secrets) {
     // values are removed longest first, and the marker-bearing values before the markers they
     // carry become the placeholder.
     for (const shape of SECRET_SHAPES) out = out.replace(shape, REDACTION_SENTINEL);
+    out = redactAuthorizationShapes(out);
     for (const value of sorted) {
       if (value.length >= MIN_SECRET_CHARS) {
         out = out.split(value).join(REDACTION_SENTINEL);
@@ -456,7 +573,6 @@ export function redactSecrets(text, secrets) {
         out = out.replace(boundedValue(value), REDACTION_SENTINEL);
       }
     }
-    for (const shape of SECRET_SHAPES) out = out.replace(shape, REDACTION_SENTINEL);
     return redactBasicCredentials(out);
   };
   for (let pass = 0; pass < 64; pass += 1) {
@@ -555,7 +671,7 @@ export function shapeHttpError(status, body, url, limit, headers, omitUrl = fals
   // must keep removing everything this text already removed, or a value the shaper took out of
   // the request comes back into the notice when the caller's set is not a superset.
   shaped.omitUrl = Boolean(omitUrl);
-  shaped.pricedSecrets = [...secrets];
+  recordPricedSecrets(shaped, secrets);
   return shaped;
 }
 
@@ -650,7 +766,7 @@ export function repriceShapedError(err, extraSecrets, snippetLimit) {
   // had removed from the request reappears in the rebuilt text whenever the caller's extra set is
   // not a superset of the request's own.
   const priced = new Set(extraSecrets ?? []);
-  for (const raw of err.pricedSecrets ?? []) {
+  for (const raw of pricedSecretsOf(err)) {
     const value = String(raw ?? '');
     if (value !== '') priced.add(value);
   }
@@ -756,7 +872,7 @@ export function shapeTransportError(err, url, limit, headers, omitUrl = false, e
   // them instead of inferring them, so a text shaped with no request keeps no request and a value
   // the shaper removed stays removed.
   shaped.omitUrl = Boolean(omitUrl);
-  shaped.pricedSecrets = [...secrets];
+  recordPricedSecrets(shaped, secrets);
   return shaped;
 }
 
