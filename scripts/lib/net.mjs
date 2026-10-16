@@ -164,7 +164,7 @@ function looksLikeValue(value) {
 const CREDENTIAL_STEMS = [
   'pass', 'pwd', 'pw', 'pswd', 'secret', 'token', 'auth', 'key', 'sig', 'signature', 'session',
   'credential', 'cookie', 'bearer', 'jwt', 'otp', 'pin', 'hmac', 'ticket', 'assertion', 'saml',
-  'samlresponse', 'nonce',
+  'samlresponse', 'nonce', 'digest',
 ];
 
 // A code-carrying parameter is matched by its whole name only: 'code' alone (?code=...) and a name
