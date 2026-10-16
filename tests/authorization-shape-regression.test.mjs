@@ -97,6 +97,13 @@ test('sweep F28-4 a URL-shaped header value gives up its userinfo credential', (
   // header and the text is returned byte for byte - here and on the credential-free path alike
   // (the row below is the half of the old expectation that stays true and is still pinned: the
   // whitespace-separated SECOND token of an unrecognised value survives).
+  // Closing sweep F32-1: the reader now crosses that whitespace gap when the atom beyond it is
+  // part of a header value's grammar, so the pinned row below is the NARROW half of what it used
+  // to say - it holds because 'token2' is not credential-shaped, and a credential-shaped second
+  // token would be consumed with the run (the row is pinned in
+  // tests/authorization-value-extent.test.mjs, beside the sweep's own leak row
+  // 'authorization: tok_9f3a2c7d1e5b SECRETTOKEN123' -> '[redacted]'). The expectation here is
+  // unchanged: it was true before the repair and it is true after it.
   assert.equal(redactSecrets('authorization: token1 token2', []), 'authorization: token1 token2',
     'a bare value that is not credential-shaped was consumed');
   assert.equal(redactSecrets('authorization: token1 token2', []),
