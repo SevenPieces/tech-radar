@@ -260,17 +260,20 @@ test('a degraded pool writes one stderr line and leaves stdout byte-identical', 
     const pool = JSON.parse(res.stdout);
     assert.equal(pool.notices.length, 1, 'the count in the line is the pool count');
     assert.equal(res.stdout, readFileSync(out, 'utf8'), 'stdout is unchanged: exactly the pool file');
-    // The exact line repeats the cause of the one transport failure that produced no
-    // diagnostic of its own. A failed connection on loopback is one curl reports itself, so
-    // the line is the bare warning; where curl cannot be started the notice names the missing
-    // binary and the line carries that cause instead, which is the other case's subject. The
-    // structure above -- one line, one notice, byte-identical stdout -- is asserted either way.
+    // The exact line repeats the transport reason the notice carries. A refused connection on
+    // loopback is curl exit 7, and the shaper publishes that mapped cause as
+    // 'failed to connect (curl exit 7)', which the line appends; the pattern matches the mapped
+    // cause with its exit suffix, so the reason is repeated for every cause the shaper can build
+    // and not only for the three fallbacks (LV-2). Where curl cannot be started the notice names
+    // the missing binary and the line carries that cause instead, which is another case's
+    // subject. The structure above -- one line, one notice, byte-identical stdout -- is asserted
+    // either way.
     if (!curlAvailable()) {
       t.skip('curl is not on PATH, so the failed transport carries the missing-binary cause');
       return;
     }
     assert.equal(lines[0],
-      "collect: 1 source notice (GitHub rate limit and others) — the digest's Coverage note must report them; Collector notices: 1");
+      "collect: 1 source notice (GitHub rate limit and others) — the digest's Coverage note must report them; Collector notices: 1 (failed to connect (curl exit 7))");
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }

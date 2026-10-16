@@ -141,11 +141,13 @@ test('TR-134 a proxy name from the environment reaches no notice, no pool field 
 });
 
 // ---------------------------------------------------------------------------------------
-// TR-135 -- the organisation-listing path still leaks a discovered repository name when the
-// name is transformed by the URL parser (a dot segment), spelled percent-encoded, or long
-// enough that a bound truncates it before the by-value redaction runs. For an org-discovered
-// target the notice names the organisation row and the repository's ordinal, and the
-// discovered name reaches neither the notice, nor any pool field, nor the rendered note.
+// TR-135 -- the organisation-listing path leaked a discovered repository name when the name
+// was transformed by the URL parser (a dot segment), spelled percent-encoded, or long enough
+// that a bound truncated it before the by-value redaction ran. TR-141 closes that path at its
+// source: a name that is not a repository name is never used for anything, so it is never a
+// request at all. These cases keep the original requirement -- the name reaches neither the
+// notice, nor a pool field, nor the rendered note -- and add the stronger one: the entry is
+// skipped with a notice naming the organisation row and its position.
 // ---------------------------------------------------------------------------------------
 
 const ORG_ROW = 'kubernetes';
@@ -174,8 +176,10 @@ const BENIGN_RELEASES = JSON.stringify([{
 
 async function orgListingPool(fullName) {
   const listing = JSON.stringify([{ full_name: 'kubernetes/kubernetes' }, { full_name: fullName }]);
+  const calls = [];
   const net = {
     fetchText: async (url) => {
+      calls.push(url);
       if (url === PROBE) return rateLimit(55);
       if (url.includes('/orgs/' + ORG_ROW + '/repos')) return listing;
       if (url.includes('/tags')) return '[]';
@@ -184,13 +188,14 @@ async function orgListingPool(fullName) {
       throw new Error('unexpected request: ' + url);
     },
   };
-  return collectAll(
+  const pool = await collectAll(
     {
       settings: RUN_SETTINGS,
       watchlist: [{ kind: 'github-org', target: ORG_ROW, domain: 'infra-cloud', note: '' }],
     },
     { ...WINDOW, net },
   );
+  return { pool, calls };
 }
 
 // A position is named by a listing word near the number, in either order, so the case pins the
@@ -198,24 +203,11 @@ async function orgListingPool(fullName) {
 const POSITION_BEFORE = /(?:repositor(?:y|ies)|repo|entry|ordinal|listing|item)\b[^0-9\n]{0,24}\b\d\b/i;
 const POSITION_AFTER = /\b\d\b[^0-9\n]{0,24}(?:repositor(?:y|ies)|repo|entry|listing|item)\b/i;
 
-// The cause is named: once the source label, the organisation row, the ordinal and the status
-// are accounted for, the notice still carries a word saying why the request degraded. A notice
-// that is only 'HTTP 500' after its source names no cause, which the rule forbids.
-function causeNamed(notice) {
-  const rest = String(notice)
-    .replace(/\bgithub\b/gi, ' ')
-    .replace(new RegExp('\\b' + ORG_ROW + '\\b', 'g'), ' ')
-    .replace(/\brepositor(?:y|ies)\b/gi, ' ')
-    .replace(/HTTP/g, ' ')
-    .replace(/\d+/g, ' ')
-    .replace(/[^A-Za-z]+/g, '');
-  return /[A-Za-z]{4}/.test(rest);
-}
-
 for (const [what, fullName, marker] of HOSTILE_NAMES) {
   test('TR-135 an organisation-listing repository name with ' + what
-    + ' never reaches a notice, a pool field or the rendered note', async () => {
-    const pool = await orgListingPool(fullName);
+    + ' is skipped before it becomes a request and reaches no notice, pool field or rendered note',
+  async () => {
+    const { pool, calls } = await orgListingPool(fullName);
 
     // The listing still contributes what it can, so the pool scan is a reading of a pool that
     // carried something rather than of an empty one.
@@ -232,22 +224,23 @@ for (const [what, fullName, marker] of HOSTILE_NAMES) {
     assertMarkerNotRendered(pool, marker,
       'the discovered repository name reached the rendered coverage note');
 
-    const refused = pool.notices.filter((n) => /HTTP 500/.test(n));
-    assert.equal(refused.length, 1,
-      'the refused releases request is reported once: ' + JSON.stringify(pool.notices));
-    const notice = refused[0];
+    // The name is refused before it is used for anything (TR-141): no request carries it, so
+    // the URL serializer's spelling of it is never a target and never a redaction value.
+    assert.equal(calls.some((u) => u.includes(marker)), false,
+      'a request was made from a name that is not a repository name: ' + calls.join('; '));
 
-    // ... and the notice still records the degradation: the organisation row, the repository's
-    // position in the listing, the status and the cause.
+    // ... and the skip is still reported: the organisation row and the entry's position in the
+    // listing are named, and nothing the answer supplied is.
+    const skipped = pool.notices.filter((n) => /skip/i.test(n));
+    assert.equal(skipped.length, 1,
+      'the non-conforming entry is not reported exactly once: ' + JSON.stringify(pool.notices));
+    const notice = skipped[0];
     assert.ok(new RegExp('\\b' + ORG_ROW + '\\b').test(notice),
       'the notice does not name the organisation row: ' + notice);
     assert.ok(POSITION_BEFORE.test(notice) || POSITION_AFTER.test(notice),
       "the notice does not name the repository's position in the listing: " + notice);
     assert.ok(new RegExp('\\b' + ORDINAL + '\\b').test(notice),
       'the notice does not name the entry the listing put at position ' + ORDINAL + ': ' + notice);
-    assert.ok(/HTTP 500/.test(notice), 'the notice does not carry the status: ' + notice);
-    assert.ok(causeNamed(notice),
-      'the notice names the status but not the cause: ' + notice);
   });
 }
 
@@ -332,7 +325,9 @@ const LONG_TARGET = 'x'.repeat(3000);
 const LONG_URL = 'https://registry.npmjs.org/' + LONG_TARGET;
 
 test('TR-136 a valid notice cap still bounds a notice exactly', async () => {
-  const cap = 300;
+  // The lowest cap that carries the whole shaped error text under the shipped snippet bound:
+  // below it the cap is a configuration error rather than a notice that lost its cause (TR-142).
+  const cap = 403;
   const settings = { ...RUN_SETTINGS, notice_max_chars: cap };
   const net = {
     fetchText: async () => {

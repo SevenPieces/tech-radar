@@ -185,8 +185,11 @@ test('TR-129 a notice whose source is very long still carries the status and the
 });
 
 test('TR-129 a lowered notice cap is honoured', async () => {
-  const notice = await noticeForLongSource(300);
-  assert.ok(notice.length <= 300,
+  // The lowered value is the lowest the cap may be: the source's half has to leave room for the
+  // whole shaped error text the snippet bound produces (TR-142 raised the floor to 2 * bound + 3),
+  // so a cap below it is a configuration error and no longer a cap that cuts the cause away.
+  const notice = await noticeForLongSource(403);
+  assert.ok(notice.length <= 403,
     'a lowered configured cap does not bound the notice (' + notice.length + ' chars): ' + notice);
   assert.ok(/HTTP 503/.test(notice),
     'the status is lost to the lowered cap: ' + notice.slice(-120));

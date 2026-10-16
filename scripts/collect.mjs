@@ -43,15 +43,24 @@ const GITHUB_API = 'https://api.github.com';
 // that quotes nothing the request sent needs none.
 const NOTICE_CONTROLS = /[\u0000-\u001f\u007f-\u009f]/g;
 // The notice cap has a usable range, not merely a type. Below the floor an assembled notice
-// cannot carry its source, its status and its cause: noticeSource gives the source at most half
-// the cap, so the other half has to hold the separator, the request prefix and the longest fixed
-// cause the transport shaper builds ('could not resolve the host (curl exit 6)'). Above the
-// ceiling the value bounds nothing an assembled notice could contain -- every part of one is
-// bounded already -- so it states the policy of no cap, and the whole reason the cap exists is
-// that one hostile answer must not become an unbounded published note. Both ends are refused as
-// a configuration error that names the setting (exit 2) rather than obeyed silently.
+// cannot carry its source, the separator and even the shortest diagnosis; above the ceiling the
+// value bounds nothing an assembled notice could contain -- every part of one is bounded already
+// -- so it states the policy of no cap, and the whole reason the cap exists is that one hostile
+// answer must not become an unbounded published note. Both ends are refused as a configuration
+// error that names the setting (exit 2) rather than obeyed silently. This floor is the absolute
+// one; that the status and the cause survive is the relationship between this cap and
+// error_snippet_max_chars, checked in validateSettings (TR-142), because the shaped error text
+// the cap has to leave room for is the other setting's bound.
 const MIN_NOTICE_CHARS = 128;
 const MAX_NOTICE_CHARS = 100000;
+
+// The largest time value a Date can carry, in milliseconds: infrastructure rather than policy,
+// like the transport's own capture ceiling, so it is stated here and not in configuration. The
+// same bound caps a window: the start is the clock minus a number of weeks, and a cap beyond
+// what a Date can represent made the subtraction produce an instant toISOString refuses with the
+// runtime's own message ('Invalid time value'), which names no setting at all (TR-143).
+const MAX_DATE_MS = 8.64e15;
+const MAX_WINDOW_WEEKS = Math.floor(MAX_DATE_MS / (7 * 24 * 3600 * 1000));
 
 // The notice cap is a quantity like every other one, so it is configuration and never a literal
 // here. A caller may pass the settings object it read; a caller that carries none -- a fixture,
@@ -77,6 +86,35 @@ function usableNoticeCap(value) {
 function outOfRangeCap(raw) {
   return `notice_max_chars is out of range in config/settings.md: ${JSON.stringify(raw)}`
     + ` (an integer between ${MIN_NOTICE_CHARS} and ${MAX_NOTICE_CHARS} is required)`;
+}
+function windowCapError(raw) {
+  return `window_cap_weeks is out of range in config/settings.md: ${JSON.stringify(raw)}`
+    + ` (a positive integer of at most ${MAX_WINDOW_WEEKS} weeks is required)`;
+}
+// The cap and the shaped-error bound are one guarantee, not two settings: the source a notice
+// names takes at most half the cap, so the room left for the shaped error text is
+// ceil(cap / 2) - 2 (the ': ' separator), and it has to carry the whole of what
+// error_snippet_max_chars produces or the cause is cut away. The least cap that does so is
+// 2 * snippet + 3, and that is the number the refusal states. Both settings are named, because
+// either one of them can be the one that is wrong.
+function noticeCapRoomError(cap, snippet, room) {
+  return 'notice_max_chars leaves no room for error_snippet_max_chars in config/settings.md: '
+    + `a ${cap}-character notice leaves ${room} characters for the shaped error text, and `
+    + `error_snippet_max_chars is ${snippet} (notice_max_chars must be at least ${2 * snippet + 3})`;
+}
+// The check itself, shared by validateSettings (the CLI path, where a mistyped value is a
+// configuration error that names the setting and exits 2) and collectAll (a public seam a caller
+// can drive without validateSettings, so the floor holds wherever the settings arrive). A value
+// that is not a positive number is the key's own validation's business; this owns the
+// relationship alone, and it is skipped when the settings carry no snippet bound at all.
+function requireNoticeCapRoom(cap, settings) {
+  if (settings === null || typeof settings !== 'object') return;
+  const raw = settings.error_snippet_max_chars;
+  if (raw === undefined || raw === null) return;
+  const snippet = Number(raw);
+  if (!Number.isFinite(snippet) || snippet <= 0) return;
+  const room = Math.ceil(cap / 2) - 2;
+  if (snippet > room) throw new Error(noticeCapRoomError(cap, snippet, room));
 }
 function noticeLimit(settings) {
   if (settings && Object.prototype.hasOwnProperty.call(settings, 'notice_max_chars')
@@ -284,11 +322,19 @@ function requiredSettingKeys(rows, options) {
 }
 
 function validateSettings(settings, rows, options) {
-  for (const key of requiredSettingKeys(rows, options)) {
+  const keys = requiredSettingKeys(rows, options);
+  for (const key of keys) {
     const n = Number(settings?.[key]);
     if (!Number.isInteger(n) || n <= 0) {
       throw new Error(`${key} is missing or invalid in config/settings.md`);
     }
+  }
+  // A window cap the clock cannot carry is a configuration error that names the setting: the
+  // start is the clock minus this many weeks, and an unrepresentable reach-back used to pass
+  // here as a legal value and then throw the runtime's own 'Invalid time value' from
+  // windowStart, a message that names no setting at all.
+  if (keys.has('window_cap_weeks') && Number(settings.window_cap_weeks) > MAX_WINDOW_WEEKS) {
+    throw new Error(windowCapError(settings.window_cap_weeks));
   }
   // The notice cap is a positive integer like the rest, but it has a usable range as well: a cap
   // too small for the source, the status and the cause, and a cap too large to bound anything,
@@ -297,6 +343,12 @@ function validateSettings(settings, rows, options) {
   if (rows.length > 0 && !usableNoticeCap(Number(settings?.notice_max_chars))) {
     throw new Error(outOfRangeCap(settings?.notice_max_chars));
   }
+  // ... and the cap is checked against the shaped-error bound it has to carry, not on its own.
+  // The two were validated independently, so a cap that was legal by itself still cut the cause
+  // away: with the shipped snippet bound the notice read 'request failed for <url>' and ended
+  // there. The check runs only when this run reads both keys, so a configuration that carries
+  // only what its own rows need stays legal.
+  if (keys.has('notice_max_chars')) requireNoticeCapRoom(Number(settings.notice_max_chars), settings);
   const github = rows.some((r) => r.kind === 'github-repo' || r.kind === 'github-org');
   const reserve = Number(settings?.github_rate_limit_reserve);
   if (github && (!Number.isInteger(reserve) || reserve < 0)) {
@@ -344,6 +396,9 @@ export function windowStart(settings, now) {
   if (!Number.isFinite(weeks) || weeks <= 0) {
     throw new Error('window_cap_weeks is missing or invalid in config/settings.md');
   }
+  // The same named refusal here, so a direct caller that never runs validateSettings reads the
+  // setting and not the date conversion's own 'Invalid time value'.
+  if (weeks > MAX_WINDOW_WEEKS) throw new Error(windowCapError(settings.window_cap_weeks));
   return new Date(now.getTime() - weeks * 7 * 24 * 3600 * 1000).toISOString();
 }
 
@@ -394,15 +449,29 @@ function isRateLimitRefusal(err) {
 // A target a configuration named is configuration text; a target an organisation listing handed
 // back is the answer's text, and a notice may quote the first and never the second. For a
 // discovered repository the notice names the organisation row, which configuration supplied, and
-// the repository's ordinal in that listing, which is arithmetic. The discovered name travels
-// only as a value the notice is redacted against, so it can reach neither the notice text nor
-// the URL the shaped error quotes.
+// the repository's ordinal in that listing, which is arithmetic. The discovered name is never a
+// value a notice is redacted against (TR-141): a redaction set is a list of strings the run
+// deletes from its own output, so a name taken from an answer would let that answer choose which
+// words of the run's notices and published prose survive.
 function githubSource(label, t, limit) {
   const name = t.discovered ? `${t.org} repository ${t.ordinal}` : String(t.target ?? '');
   return noticeSource(label, name, limit);
 }
-function targetSecrets(t, secrets) {
-  return t.discovered ? [...secrets, String(t.target)] : secrets;
+// The shape a repository name has: exactly one slash, an owner that is a GitHub login, and a
+// repository name of the characters GitHub allows in one. A listing's name is answer text that
+// would otherwise reach the request URL and the run-wide redaction sets, so it is used only when
+// it is a repository name and skipped otherwise. The rule is deliberately narrower than the URL
+// parser: no query, no userinfo, no second slash, no segment made only of dots (the URL
+// serializer normalises such a segment away, so by-value removal could not cover its spelling),
+// and not a value that is not a string at all -- String() coerces a number, an array or an object
+// into something that reads like a name.
+const REPO_OWNER = /^[A-Za-z0-9](?:[A-Za-z0-9-]{0,37}[A-Za-z0-9])?$/;
+const REPO_NAME = /^(?![.]+$)[A-Za-z0-9._-]{1,100}$/;
+function repositoryName(value) {
+  if (typeof value !== 'string') return false;
+  const parts = value.split('/');
+  if (parts.length !== 2) return false;
+  return REPO_OWNER.test(parts[0]) && REPO_NAME.test(parts[1]);
 }
 // The cause a notice about a discovered repository carries. The shaped error's own message is
 // not used for one: it quotes the request, and the request's URL spells the answer's name in
@@ -490,7 +559,14 @@ export async function collectGithub(rows, ctx) {
       if (!Array.isArray(body)) throw new Error('unexpected response shape');
       for (let n = 0; n < body.length; n += 1) {
         const repo = body[n];
-        if (!repo.full_name) continue;
+        // A listing entry whose name is not a repository name is answer text the run refuses:
+        // it is never put in a URL, never a request target, and never a value a notice is
+        // redacted against. The notice names the organisation row (configuration) and the
+        // entry's position (arithmetic), and nothing the answer supplied.
+        if (!repo || !repositoryName(repo.full_name)) {
+          pushNotice(notices, `${noticeSource('github', `${row.target} repository ${n + 1}`, limit)}: skipped a listing entry whose name is not a repository name`, secretsFor(url), limit);
+          continue;
+        }
         // The listing's own position is the repository's ordinal, and the organisation row is
         // configuration: those two are what a notice about this repository may name.
         targets.push({
@@ -537,7 +613,7 @@ export async function collectGithub(rows, ctx) {
       // A discovered repository's notice is built from the classification, never from the
       // shaped message: the message quotes the request, and its URL spells the answer's name.
       const detail = t.discovered ? discoveredCause('releases', err) : err.message;
-      pushNotice(notices, `${githubSource('github', t, limit)}: ${detail}`, targetSecrets(t, secretsFor(url)), limit);
+      pushNotice(notices, `${githubSource('github', t, limit)}: ${detail}`, secretsFor(url), limit);
       // The refusal is the settled allowance, so the block stops spending here: the refused
       // repository is named by this notice and by the refusal count, and every repository after
       // it - which the run never asked for - is what the budget notice counts as unchecked.
@@ -576,7 +652,7 @@ export async function collectGithub(rows, ctx) {
       }
     } catch (err) {
       const detail = t.discovered ? discoveredCause('tags', err) : err.message;
-      pushNotice(notices, `${githubSource('github-tags', t, limit)}: ${detail}`, targetSecrets(t, secretsFor(url)), limit);
+      pushNotice(notices, `${githubSource('github-tags', t, limit)}: ${detail}`, secretsFor(url), limit);
       if (refused(err)) { shortfall.tags = tagFallbacks.length - i - 1; break; }
     }
   }
@@ -705,10 +781,6 @@ export function nvdStamp(iso) {
 // interpolated into a URL, so it is checked against this shape before a citation is built
 // rather than trusted, encoded or not.
 const CVE_ID = /^CVE-\d{4}-\d{4,}$/;
-
-// The largest time value a Date can carry, in milliseconds: infrastructure rather than policy,
-// like the transport's own capture ceiling, so it is stated here and not in configuration.
-const MAX_DATE_MS = 8.64e15;
 
 // Every reader answers one question: when was the version we are about to report
 // actually released? Never a "last modified" timestamp -- registry bookkeeping
@@ -1002,9 +1074,17 @@ export async function collectAll(config, opts) {
     net: {
       ...baseNet,
       fetchText: (url, timeout, headers, ...rest) => {
-        const { all, credentials } = requestSecretSets(url, headers);
-        for (const secret of all) issuedSecrets.add(secret);
-        for (const secret of credentials) issuedCredentialSecrets.add(secret);
+        // A request is issued with omitUrl (the last argument) when its target came out of an
+        // answer rather than out of configuration. Such a request carries no request credential
+        // of its own: its URL spells the answer's text, so anything a URL reader found in it
+        // would be answer text registered as a string the run deletes from every notice and
+        // every candidate field. It therefore contributes to neither union (TR-141). The
+        // request's own notice still carries the caller's credential list at the push.
+        if (rest[2] !== true) {
+          const { all, credentials } = requestSecretSets(url, headers);
+          for (const secret of all) issuedSecrets.add(secret);
+          for (const secret of credentials) issuedCredentialSecrets.add(secret);
+        }
         return baseNet.fetchText(url, timeout, headers, ...rest);
       },
     },
@@ -1013,7 +1093,22 @@ export async function collectAll(config, opts) {
   const rows = (kind) => config.watchlist.filter(
     (r) => r.kind === kind && (!ctx.domains || ctx.domains.includes(r.domain)),
   );
+  // The cap is resolved and checked here as well as in validateSettings: collectAll is a public
+  // seam that can be driven without it, and a cap that cannot carry the shaped error text the
+  // snippet bound produces has to be refused wherever it arrives, not only through the CLI
+  // (TR-142). Only the value the run will actually use is checked.
+  requireNoticeCapRoom(noticeLimit(config.settings), config.settings);
   const acc = { candidates: [], notices: [] };
+  // The kinds this run knows how to read. A row whose kind is outside this vocabulary cannot be
+  // dispatched: it used to be filtered away with no candidate, no notice and no warning, which
+  // is the silent skip the module's own rule forbids. It is reported once, naming the kind, and
+  // the run degrades visibly instead (TR-144).
+  const knownKinds = new Set(Object.keys(SOURCE_SETTINGS));
+  for (const row of config.watchlist) {
+    if (ctx.domains && !ctx.domains.includes(row.domain)) continue;
+    if (knownKinds.has(row.kind)) continue;
+    pushNotice(acc.notices, `watchlist: unknown source kind ${JSON.stringify(String(row.kind))}; the row was not read`, undefined, noticeLimit(config.settings));
+  }
   await runSource('github', rows('github-repo').concat(rows('github-org')), collectGithub, ctx, acc);
   await runSource('arxiv', rows('arxiv-category'), collectArxiv, ctx, acc);
   await runSource('feeds', rows('rss'), collectFeeds, ctx, acc);
@@ -1074,9 +1169,15 @@ export function noticeWarning(count) {
 // cause the shaper read from curl's exit code -- or, when curl never started, in the spawn
 // code -- so the line repeats that reason: a broken dependency should not require reading the
 // pool to be seen. The vocabulary is the shaper's, never curl's own line, so this line cannot
-// carry the redirect host or the proxy name into an operator's terminal either.
-const TRANSPORT_TAIL = /(could not resolve the host|failed to connect|timed out|TLS handshake failed|empty reply|partial transfer|curl exited with status \d+|curl could not be started \([^)]+\)|curl failed)$/;
-function operatorWarning(notices) {
+// carry the redirect host or the proxy name into an operator's terminal either. It is a repeat
+// and not a promise: a notice that ends in an HTTP status or a JSON-parse failure carries no
+// transport reason, and the line then keeps the plain count.
+//
+// The mapped causes are published as '<phrase> (curl exit N)', so the suffix belongs to their
+// alternatives: matching only the bare phrase left every mapped cause unmatched, which dropped
+// the reason for six of the nine causes the shaper can build (LV-2).
+const TRANSPORT_TAIL = /(?:could not resolve the host|failed to connect|timed out|TLS handshake failed|empty reply|partial transfer) \(curl exit \d+\)$|curl exited with status \d+$|curl could not be started \([^)]+\)$|curl failed$/;
+export function operatorWarning(notices) {
   const line = noticeWarning(notices.length);
   for (const notice of notices) {
     const m = TRANSPORT_TAIL.exec(String(notice));
@@ -1246,6 +1347,14 @@ export async function main(argv = process.argv.slice(2)) {
   try {
     writeAtomic(out, `${JSON.stringify(pool, null, 2)}\n`);
   } catch (err) {
+    // The pool is the only thing that carries the notices, and the write that just failed is
+    // the one that would have published it, so the notices recorded before the failure are
+    // printed here -- before the failure is reported -- instead of being lost with the pool
+    // (TR-146). The operator line keeps the count contract; each notice follows in full.
+    if (pool.notices.length > 0) {
+      console.error(operatorWarning(pool.notices));
+      for (const notice of pool.notices) console.error(`collect: notice: ${notice}`);
+    }
     console.error(`collect: cannot write ${out}: ${err.message}`);
     process.exitCode = 4;
     return 4;
