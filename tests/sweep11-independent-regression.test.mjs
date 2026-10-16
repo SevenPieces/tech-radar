@@ -12,7 +12,10 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { collectAll, neutraliseNoticeText } from '../scripts/collect.mjs';
-import { neutraliseUrl, shapeHttpError, shapeTransportError } from '../scripts/lib/net.mjs';
+import {
+  noticeRewritingPasses, neutraliseUrl, redactSecrets, redactUrl, requestSecrets, shapeHttpError,
+  shapeTransportError,
+} from '../scripts/lib/net.mjs';
 import { readSettings } from '../scripts/lib/mdtable.mjs';
 
 const CONFIG_DIR = fileURLToPath(new URL('../config/', import.meta.url));
@@ -37,13 +40,41 @@ const rateLimit = () => JSON.stringify({
   resources: { core: { limit: 5000, remaining: 5000, reset: 1790177128, used: 0 } },
 });
 
+// The pre-fix shaper, kept as a probe so this suite can prove it detects the defect it exists
+// for: with TR165_LEGACY_SHAPER set by the operator, the request is bounded before the notice
+// rewriting ends its seams -- the shipped arithmetic minus that one ordering. The cases below
+// must fail under the probe and pass without it, which is what makes them regression tests
+// rather than descriptions of the current code. Nothing sets it unless a case asks for it.
+const LEGACY_SHAPER = process.env.TR165_LEGACY_SHAPER === '1';
+function legacyShapedTransport(url, limit, headers, omitUrl) {
+  const secrets = requestSecrets(url, headers ?? {});
+  const cause = TRANSPORT_CAUSE;
+  const prefix = 'request failed for ';
+  const shortPrefix = 'request failed';
+  const separator = ': ';
+  const shown = omitUrl ? '' : redactSecrets(redactUrl(url), secrets);
+  const room = Math.max(0, limit - prefix.length - separator.length - cause.length);
+  const full = omitUrl ? shortPrefix + separator + cause
+    : prefix + (shown.length > room ? shown.slice(0, room) : shown) + separator + cause;
+  const compact = shortPrefix + separator + cause;
+  const shaped = new Error(full.length <= limit ? full : (compact.length <= limit ? compact : cause));
+  shaped.cause = cause;
+  shaped.httpStatus = null;
+  shaped.body = '';
+  shaped.url = url;
+  shaped.exitStatus = 6;
+  return shaped;
+}
+
 // A transport whose every request fails with the shape curl raises for exit 6, shaped by the
 // shipped shaper at the bound the collector passes it -- so the failure text is the run's own.
 function failingTransport() {
   return {
     fetchText: async (url, timeout, headers, ua, limit, omitUrl) => {
       if (url === PROBE) return rateLimit();
-      throw shapeTransportError(TRANSPORT_FAILURE, url, limit, headers ?? {}, Boolean(omitUrl));
+      throw (LEGACY_SHAPER
+        ? legacyShapedTransport(url, limit, headers, omitUrl)
+        : shapeTransportError(TRANSPORT_FAILURE, url, limit, headers ?? {}, Boolean(omitUrl)));
     },
   };
 }
@@ -154,16 +185,25 @@ test('TR-165 the notice normalisation is a fixed point on the shapes its own rul
 test('TR-165 the notice normalisation does not change a random hostile text on a second pass', () => {
   const next = seeded(0x51ee7);
   let rewroteSomething = 0;
+  let mostPasses = 0;
   for (let i = 0; i < 6000; i += 1) {
     const parts = 1 + next(7);
     let text = '';
     for (let j = 0; j < parts; j += 1) text += HOSTILE_FRAGMENTS[next(HOSTILE_FRAGMENTS.length)];
     const once = assertFixedPoint(text, 'fuzz case ' + i + ' (' + JSON.stringify(text) + ')');
     if (once !== text) rewroteSomething += 1;
+    // The loop that reaches the fixed point has to settle, and quickly: a pass that shortens the
+    // text cannot run on forever, and the suite fails here if a rule added later needs more
+    // passes than the bound the loop allows -- which would silently leave a partial fixed point.
+    const passes = noticeRewritingPasses(text);
+    if (passes > mostPasses) mostPasses = passes;
+    assert.ok(passes <= 3, 'the rewriting took ' + passes + ' passes on '
+      + JSON.stringify(text) + ', so the fixed point is not being reached promptly');
   }
   // A corpus the normaliser never rewrites would prove nothing about its fixed point.
   assert.ok(rewroteSomething > 500,
     'the fuzz corpus is too weak: only ' + rewroteSomething + ' of 6000 texts were rewritten at all');
+  assert.ok(mostPasses >= 2, 'no corpus text needed a second pass, so this case measured nothing');
 });
 
 test('TR-165 an accepted pair keeps the shaped transport text whole for a seam-heavy request', async () => {
@@ -198,6 +238,9 @@ test('TR-165 an accepted pair keeps the shaped transport text whole for a seam-h
 // the cause there.
 test('TR-165 a seam-heavy request at every accepted cap keeps the cause in the notice', async () => {
   const lost = [];
+  // 402 and the shipped 1000 are the pair the case was written from: at 402/200 the shaped half
+  // is exactly the bound, so the one character per seam the push adds was enough to slice the
+  // cause; the pre-fix shaper fails both rows, the shipped one passes both.
   for (const cap of [164, 200, 300, 402, 500, SHIPPED_SETTINGS.notice_max_chars]) {
     const snippet = await largestAcceptedSnippet(cap);
     if (snippet === 0) continue;

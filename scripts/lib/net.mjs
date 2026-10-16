@@ -750,13 +750,30 @@ export function neutraliseLinkSeams(text) {
 // A pass that changes nothing ends the loop, and a pass that changes something strictly shortens
 // the text, so the loop terminates; each pass also rewrites strictly fewer marker or entity
 // spellings, so it settles in a small number of passes for any text the rules can read.
+function noticePreservingPass(text) {
+  return neutraliseLinkSeams(neutraliseMarkers(neutraliseTagSpans(neutraliseEntityTags(text))));
+}
+
 export function noticePreservingRewrites(text) {
   let out = String(text ?? '');
   for (;;) {
-    const next = neutraliseLinkSeams(neutraliseMarkers(
-      neutraliseTagSpans(neutraliseEntityTags(out)),
-    ));
+    const next = noticePreservingPass(out);
     if (next === out) return out;
+    out = next;
+  }
+}
+
+// How many passes the loop above needs before its output stops moving. Exported for the
+// regression suite, which fails if the bound is ever exceeded: a rule added later that takes
+// more than two passes would otherwise make the shipped normaliser a partial fixed point, and
+// every length measured against it would be short again (TR-165).
+export function noticeRewritingPasses(text) {
+  let out = String(text ?? '');
+  let passes = 0;
+  for (;;) {
+    const next = noticePreservingPass(out);
+    passes += 1;
+    if (next === out || passes > 8) return passes;
     out = next;
   }
 }
