@@ -390,15 +390,20 @@ test('a tracked file merely named like a run artifact is kept by both answers, a
 // requires the artifact standing beside the lock to be a run artifact by its own name, so both
 // answers keep 'notes.tmp' and the hygiene guard judges a file the reader receives.
 
-// Closing sweep F34-3 (Low, a regression Batch 68 introduced). Batch 68 required the artifact beside
-// a lock to be a run artifact BY NAME, and the fixed names carry no spelling for a state file named
-// by --state: 'mystate.json.lock' was therefore kept by the no-git answer while git's answer dropped
-// it (the '.gitignore' rule ignores any '*.lock'), so the two answers disagreed where they had agreed
-// before Batch 68, and the guard read a run artifact the reader never receives. The state file's own
-// NAME carries no fixed spelling but its DOCUMENT does - the run's state is JSON - and the fallback
-// recognises a lock whose guarded artifact beside it is one. This case plants a credential shape in
-// the run's temp file too, which is the consequence the sweep measured: the guard must not read it.
-test('a lock named after a --state file is dropped by both answers, and the guard never reads it', (t) => {
+// Closing sweep F34-3 (Low, a regression Batch 68 introduced) asked for one thing, and closing
+// sweep F35-3 asked for its mirror image. Batch 68 required the artifact beside a lock to be a run
+// artifact BY NAME, and the fixed names carry no spelling for a state file named by --state:
+// 'mystate.json.lock' was therefore kept by the no-git answer while git's answer dropped it (the
+// '.gitignore' rule ignores any '*.lock'), so the guard read a run artifact the reader never
+// receives. Batch 70 answered that by dropping any lock whose guarded sibling merely ENDED IN
+// '.json', which made the two answers disagree the other way, on a TRACKED lock git keeps (the next
+// case but one). Batch 78 (closing sweep F35-3) reverses Batch 70's clause. The two layouts cannot
+// be told apart without git -- the same two files, one tracked lock and one untracked, are
+// byte-identical on disk -- so this file takes the direction its own header names as acceptable:
+// 'scanning one file too many is the safe direction for a publication guard, and skipping a file
+// the reader receives is not'. This case pins the cost: git's answer drops the --state-named lock
+// and temp (they are ignored run artifacts), and the no-git answer keeps them.
+test('a --state-named lock is dropped by the repository and kept by the no-git answer (the safe direction)', (t) => {
   const dir = walkerFixture({
     '.gitignore': readFileSync(join(SKILL_ROOT, '.gitignore')),
     'config/settings.md': 'a shipped file\n',
@@ -413,11 +418,13 @@ test('a lock named after a --state file is dropped by both answers, and the guar
   try {
     const withGit = shippedFiles(dir);
     assert.deepEqual(withGit, ['.gitignore', 'config/settings.md', 'mystate.json'],
-      'the state-named lock or temp entered an answer: ' + JSON.stringify(withGit));
-    assert.deepEqual(noGitWalk(dir), withGit,
-      'the two answers disagree about a lock named after a --state file');
+      'the state-named lock or temp entered the repository answer: ' + JSON.stringify(withGit));
+    const without = noGitWalk(dir);
+    assert.deepEqual(without,
+      ['.gitignore', 'config/settings.md', 'mystate.json', 'mystate.json.lock', 'mystate.json.tmp'],
+      'the fallback dropped a file it has no tracking information about: ' + JSON.stringify(without));
     assert.deepEqual(scan(dir, SECRET, 'carries'), [],
-      'a guard read a run artifact the reader never receives');
+      'the repository answer read a run artifact the reader never receives');
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
@@ -472,19 +479,21 @@ test('the state lock spelling .gitignore names for itself is dropped by both ans
   }
 });
 
-// THE RECORDED BOUND this rule leaves, measured and pinned rather than left implicit. A lock the
-// repository TRACKS is kept by git's answer whatever the ignore rules say - git does not ignore what
-// it carries - and the fallback in an installed skill has no tracking information to read: it has
-// only names. So a repository that force-adds the lock of its own state file gets that lock from
-// git's answer and loses it from the fallback's, which is the F33-3 direction (a file the reader
-// receives goes unjudged) and is the one layout the two answers cannot agree about without git. The
-// measurement is pinned here so a later change to it is a deliberate act rather than a drift.
-test('the recorded bound: a TRACKED lock of a tracked state file is kept by git and dropped without git', (t) => {
+// Closing sweep F35-3 (Low, a regression Batch 70 introduced), pinned on the layout the sweep
+// measured. A lock the repository TRACKS is kept by git's answer whatever the ignore rules say - git
+// does not ignore what it carries - and Batch 70's clause dropped it from the no-git answer on the
+// guarded sibling's '.json' NAME alone, so the two answers disagreed on a file the reader receives.
+// One of the sweep's fixtures carried a credential shape in just such a tracked lock, so the
+// publication guard never judged it. Batch 78 reverses that clause: the name-only rule keeps the
+// file, the fallback's set holds it beside git's, and the guard judges what it carries. The two
+// layouts (tracked and untracked lock, same two files on disk) cannot be told apart without git;
+// this is the direction this file's header names, and the case above pins its cost.
+test('a TRACKED lock of a state file is kept by BOTH answers, and the guard judges what it carries', (t) => {
   const dir = walkerFixture({
     '.gitignore': readFileSync(join(SKILL_ROOT, '.gitignore')),
     'config/settings.md': 'a shipped file\n',
     'mystate.json': '{"runs":[]}\n',
-    'mystate.json.lock': '{"host":"the builder"}\n',
+    'mystate.json.lock': 'ghp_' + 'fakefakefakefake' + '\n',
   }, ['mystate.json', 'mystate.json.lock']);
   if (dir === null) {
     t.skip('git is not available, so the repository answer was not exercised');
@@ -494,8 +503,39 @@ test('the recorded bound: a TRACKED lock of a tracked state file is kept by git 
     const withGit = shippedFiles(dir);
     assert.equal(withGit.includes('mystate.json.lock'), true,
       'the fixture lock is not tracked, so the case under test was not built');
-    assert.equal(noGitWalk(dir).includes('mystate.json.lock'), false,
-      'the fallback kept a lock it has no tracking information about');
+    assert.deepEqual(noGitWalk(dir), withGit,
+      'the two answers disagree about a tracked lock of a state file');
+    assert.deepEqual(scan(dir, SECRET, 'carries'), ['mystate.json.lock carries a GitHub token'],
+      'a file the reader receives was not judged by the publication guard');
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+// The same class in its two other spellings, both measured by the F35-3 sweep: a TRACKED
+// '*.json.tmp' beside its document, and the case-insensitive '.JSON.lock' spelling. Each is kept by
+// git and was dropped by Batch 70's clause; both answers must keep it now.
+test('a tracked .json.tmp and a tracked .JSON.lock are kept by both answers', (t) => {
+  const dir = walkerFixture({
+    '.gitignore': readFileSync(join(SKILL_ROOT, '.gitignore')),
+    'config/settings.md': 'a shipped file\n',
+    'data.json': '{}\n',
+    'data.json.tmp': '{"host":"the builder"}\n',
+    'mystate.JSON': '{}\n',
+    'mystate.JSON.lock': '{"host":"the builder"}\n',
+  }, ['data.json', 'data.json.tmp', 'mystate.JSON', 'mystate.JSON.lock']);
+  if (dir === null) {
+    t.skip('git is not available, so the repository answer was not exercised');
+    return;
+  }
+  try {
+    const withGit = shippedFiles(dir);
+    for (const rel of ['data.json.tmp', 'mystate.JSON.lock']) {
+      assert.equal(withGit.includes(rel), true,
+        rel + ' is not in the repository answer, so the case under test was not built');
+    }
+    assert.deepEqual(noGitWalk(dir), withGit,
+      'the two answers disagree about a tracked temp or lock of a JSON document');
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
