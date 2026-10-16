@@ -556,7 +556,10 @@ export function redactSecrets(text, secrets) {
   // exposed -- a marker rewritten by the marker-substring values, which is the growth the
   // fixed-point contract exists to stop. A value that carries the marker is removed first, while
   // the markers it contains are still the bytes the input had.
-  let out = protectMarkers(removeMarkerBearingValues(withoutSentinel(text), sorted));
+  // The shaper's own status and cause phrase are masked first, so no removal can take a word out
+  // of the module's own diagnosis (the mask is restored with the text below).
+  const scaffold = protectScaffold(withoutSentinel(text));
+  let out = protectMarkers(removeMarkerBearingValues(scaffold.text, sorted));
   // One removal can expose another: the credential shapes read the word boundary before them, and
   // a removal beside one changes that boundary ('XabcdefghBasic dXNlcjpw' has no boundary before
   // 'Basic' -- the 'g' is a word character -- so a pass that stopped here left 'Basic dXNlcjpw'
@@ -594,7 +597,8 @@ export function redactSecrets(text, secrets) {
     if (next === out) break;
     out = next;
   }
-  return out.replace(REDACTION_SENTINEL_RE, REDACTED_MARKER);
+  const published = out.replace(REDACTION_SENTINEL_RE, REDACTED_MARKER);
+  return scaffold.restore === null ? published : scaffold.restore(published);
 }
 
 // Pure and offline-testable: it splits the status line off the captured bytes and
@@ -713,6 +717,67 @@ const CURL_EXIT_CAUSES = new Map([
 const CAPTURE_CEILING_BYTES = 64 * 1024 * 1024;
 const CAPTURE_CEILING_MIB = CAPTURE_CEILING_BYTES / (1024 * 1024);
 const CAPTURE_CEILING_CODES = new Set(['ENOBUFS', 'ERR_CHILD_PROCESS_STDIO_MAXBUFFER']);
+
+// The shaper's own structured scaffold, and the reason it crosses the removals masked: the HTTP
+// status token and the transport-cause phrase are authored by this module, never read from a
+// request or an answer, and neither is ever a credential. The run's union can still spell one of
+// their words -- a sibling row carrying '?code=500' put '500' in the union, the whole-notice
+// redaction removed it from the status of another row's notice, and the reader was handed
+// 'HTTP [redacted] for ...' with no status at all (TR-111). The scaffold is masked for the
+// removals and restored at the end of the pass, so every later pass leaves it whole while a value
+// is still removed from the source, the request and every other byte of the line. The mask is one
+// private-use character no rule of the redaction or of the notice rewriting reads, and an input
+// that already carries it is left untouched rather than restored over.
+//
+// The status is protected wherever it stands -- its three digits are the whole token and no
+// credential value can be spelled by them. The cause is protected only where the shaper puts it:
+// after its own 'request failed for <url>: ' or 'request failed: ' prefix, or as the whole text of
+// the redaction the shaper runs over the bare cause. The same phrase in a candidate field is
+// ordinary prose a source published, and a value that spells one of its words must still be
+// removed there, so the phrase is not protected context-free.
+const SCAFFOLD_MASK = '\uE000';
+const SCAFFOLD_MASK_RE = /\uE000/g;
+function escapeScaffoldPhrase(phrase) {
+  return String(phrase).replace(/[.*+?^$(){}|[\]\\]/g, '\\$&');
+}
+const CAUSE_SCAFFOLD = [
+  ...[...CURL_EXIT_CAUSES.values()].map(escapeScaffoldPhrase),
+  'curl exited with status \\d+',
+  'curl was terminated[^:;]*',
+  'curl could not be started \\([^)]*\\)',
+  'curl failed',
+].join('|');
+// A mapped cause is published with its curl exit code beside it ('failed to connect (curl exit 7)'),
+// so the suffix is part of the same scaffold.
+const CAUSE_BODY = '(?:' + CAUSE_SCAFFOLD + ')(?: \\(curl exit \\d+\\))?';
+const SCAFFOLD_RE = new RegExp(
+  '\\bHTTP \\d{3}\\b'
+  + '|request failed for \\S+: ' + CAUSE_BODY
+  + '|request failed: ' + CAUSE_BODY
+  + '|^(?:' + CAUSE_BODY + ')$',
+  'g',
+);
+function protectScaffold(text) {
+  const source = String(text);
+  if (source.includes(SCAFFOLD_MASK)) return { text: source, restore: null };
+  let out = '';
+  let at = 0;
+  const spans = [];
+  for (const match of source.matchAll(SCAFFOLD_RE)) {
+    out += source.slice(at, match.index) + SCAFFOLD_MASK;
+    spans.push(match[0]);
+    at = match.index + match[0].length;
+  }
+  if (spans.length === 0) return { text: source, restore: null };
+  out += source.slice(at);
+  return {
+    text: out,
+    restore: (published) => {
+      let i = 0;
+      return String(published).replace(SCAFFOLD_MASK_RE, () => (i < spans.length ? spans[i++] : SCAFFOLD_MASK));
+    },
+  };
+}
 
 // The three cases a child-process failure can be, and the field each one is read from: the run's
 // own exit status when curl ran and returned one, the name of the signal the system ended it with
