@@ -485,10 +485,25 @@ function readAuthorizationValue(source, at) {
   // the same ones the anchored patterns made.
   AUTH_ATOM_AT_STICKY.lastIndex = at;
   const first = AUTH_ATOM_AT_STICKY.exec(source);
-  if (first === null) return null;
-  let end = at + first[0].length;
-  const hasScheme = AUTH_SCHEMES.has(authSchemeWord(first[0]));
-  let accepted = hasScheme || authorizationAtomIsShaped(first[0]);
+  let firstText = first === null ? null : first[0];
+  let end = first === null ? at : at + first[0].length;
+  // THE SEPARATOR-LED VALUE POSITION (Batch 77; closing sweep F35-2). A header whose value position
+  // is the attribute list's own separator -- 'authorization:,\n  tok_...', 'authorization:;tok_...'
+  // -- could not START a value: the atom class excludes ',' and ';', so this reader returned null
+  // and the credential standing behind the separator was published on both entry points, with or
+  // without the resume-point repair (it leaks at an unindented continuation too, and at space, tab
+  // and no-break-space indentation). The separator-led run is the same attribute-list shape the
+  // fold reads on a continuation line, so it is read here as the value: the separator is the
+  // grammar, and whether the value is a credential header is still the acceptance test's business.
+  if (firstText === null) {
+    AUTH_SEPARATED_ATOM_AT.lastIndex = at;
+    const led = AUTH_SEPARATED_ATOM_AT.exec(source);
+    if (led === null) return null;
+    firstText = led[1];
+    end = at + led[0].length;
+  }
+  const hasScheme = AUTH_SCHEMES.has(authSchemeWord(firstText));
+  let accepted = hasScheme || authorizationAtomIsShaped(firstText);
   if (hasScheme) {
     NEXT_AUTH_TOKEN_AT.lastIndex = end;
     const token = NEXT_AUTH_TOKEN_AT.exec(source);
@@ -550,7 +565,20 @@ function redactAuthorizationShapes(text) {
     const headerText = match[0];
     const valueAt = match.index + headerText.length;
     const value = readAuthorizationValue(source, valueAt);
-    if (value === null) continue;
+    if (value === null) {
+      // THE RESUME POINT ADVANCES ON THIS EXIT TOO (Batch 77; closing sweep F35-2). Batch 74 moved
+      // it in the DECLINED branch alone, and this exit left 'at' where it stood, so the loop's next
+      // question -- earliestAfter(match.index, at), which answers only with a match strictly after
+      // the index it is given -- found the match just read and rejected it. The pass then ended, and
+      // ONE 'authorization:,' silenced this rule for the rest of the text: a credential header on
+      // any later line was published byte for byte on both entry points, for 11 of the 11 keyword
+      // spellings (one measured text published three). A match whose value the reader cannot start
+      // is still a match that was read, so the resume point moves past its own header text, which is
+      // published unchanged here.
+      out += source.slice(at, valueAt);
+      at = valueAt;
+      continue;
+    }
     const valueText = source.slice(valueAt, value.end);
     // A match whose value carries the scaffold placeholder is the notice's OWN diagnosis, masked by
     // protectScaffold, and never a header value to consume: the placeholder is written by this module
