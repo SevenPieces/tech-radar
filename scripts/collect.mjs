@@ -625,6 +625,17 @@ function skippedListingPhrase(n) {
 function listingPagePhrase(cap) {
   return `listing page filled at ${cap} repositories; entries past the first page were not requested`;
 }
+// The page size GitHub actually enforces. Its per_page parameter is clamped at this ceiling
+// without an error -- a request for 500 is answered with a 100-entry page and status 200 -- so a
+// setting above it asks for a page the answer cannot fill. The report above compares against the
+// page the run was given rather than against the number it asked for, or a legal
+// github_org_repos of 101 or 500 would make a filled page indistinguishable from a short one and
+// the silent loss the report exists for would be back (TR-170). The request still carries the
+// configured value: asking for more than the ceiling is what the setting says.
+const GITHUB_LISTING_PAGE_CEILING = 100;
+function listingPageSize(requested) {
+  return Math.min(requested, GITHUB_LISTING_PAGE_CEILING);
+}
 // The shape a repository name has: exactly one slash, an owner that is a GitHub login, and a
 // repository name of the characters GitHub allows in one. A listing's name is answer text that
 // would otherwise reach the request URL and the run-wide redaction sets, so it is used only when
@@ -757,6 +768,7 @@ export async function collectGithub(rows, ctx) {
     if (!Number.isInteger(perOrg) || perOrg <= 0) {
       throw configError('github_org_repos is missing or invalid in config/settings.md');
     }
+    const page = listingPageSize(perOrg);
     const url = `${GITHUB_API}/orgs/${row.target}/repos`
       + `?per_page=${encodeURIComponent(perOrg)}&sort=updated`;
     try {
@@ -785,7 +797,7 @@ export async function collectGithub(rows, ctx) {
         // read only to rank the accepted entries; it never reaches a notice.
         accepted.push({ name: repo.full_name, ordinal: n + 1, updated: Date.parse(repo.updated_at) });
       }
-      const retained = takeMostRecent(accepted, perOrg);
+      const retained = takeMostRecent(accepted, page);
       for (const entry of retained) {
         targets.push({
           target: entry.name, domain: row.domain, discovered: true, org: row.target, ordinal: entry.ordinal,
@@ -800,8 +812,11 @@ export async function collectGithub(rows, ctx) {
       // the run's own arithmetic -- the page it asked for and the count it never requested -- and
       // it is emitted only when the answer filled the page, which is the only case in which an
       // entry can have gone unread. A shorter answer cannot have lost one, so nothing is said.
-      if (body.length >= perOrg) {
-        pushNoticeParts(notices, noticeSource('github', row.target, limit), listingPagePhrase(perOrg), union, limit);
+      // The count compared and named is the page GitHub enforces, not the number requested: above
+      // the ceiling the two differ, and comparing against the setting made the report unreachable
+      // exactly where the loss is real (TR-170).
+      if (body.length >= page) {
+        pushNoticeParts(notices, noticeSource('github', row.target, limit), listingPagePhrase(page), union, limit);
       }
       if (refused > 0) {
         pushNoticeParts(notices, listingSource('github', row.target, firstRefused, limit), skippedListingPhrase(refused), union, limit);

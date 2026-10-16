@@ -168,7 +168,7 @@ put in its URL is removed.
 time by probing `/rate_limit`, which GitHub documents as not consuming the core budget, so the probe is **free**
 and is not part of any floor. What is charged is: one releases request per watched repository, one request per
 `ghsa` advisory row (NVD rows are not GitHub requests), and, for each watched organisation, one listing request
-plus up to `github_org_repos` release requests — the shipped watchlist is 55 repositories and 1 advisory row with
+plus up to `github_org_repos` release requests (GitHub clamps `per_page` at 100 without an error, so a larger `github_org_repos` is answered with a 100-entry page, and the page-filled report names the size of the page the answer filled rather than the size that was asked for) — the shipped watchlist is 55 repositories and 1 advisory row with
 no organisation rows, so its floor is **56 of the 60 requests per hour** that `github_anonymous_hourly_limit`
 records. `github_rate_limit_reserve` (2) is held back before the floor is spent, leaving 58 available and 2 spare,
 and the config test in `tests/config.test.mjs` asserts that the floor still fits inside the allowance minus the

@@ -21,7 +21,7 @@ Every quantity and policy lives here, so no script and no document hardcodes one
 | github_releases_per_repo | 10 | Releases requested per repository or organisation |
 | github_anonymous_hourly_limit | 60 | GitHub's documented anonymous core allowance per hour; the collector discovers the live limit from its own probe at run time rather than trusting this value, which exists so the watchlist budget can be checked in tests |
 | github_rate_limit_reserve | 2 | GitHub core requests held back from the releases block, so the advisory block still has budget |
-| github_org_repos | 10 | Repositories taken from one watched organisation, most recently updated first |
+| github_org_repos | 10 | Repositories taken from one watched organisation, most recently updated first. GitHub clamps `per_page` at 100 without an error, so a larger value is answered with a 100-entry page; the page-filled report compares against that ceiling rather than against this value, and a listing that filled the page is reported at the size of the page GitHub enforces |
 | github_tags_per_repo | 5 | Tags requested per repository whose releases produced no candidate |
 | arxiv_max_results | 40 | Entries requested per arXiv category listing |
 | ghsa_page_size | 50 | Advisories requested per GitHub advisory page |
