@@ -205,6 +205,35 @@ test('F1 a credential-free run publishes byte-identical notices under the two si
   assert.equal(redactSecrets(notice, []), notice, 'a credential-free notice is not a fixed point');
 });
 
+// The composition fallback: a source that ends in an unterminated opener and a detail that closes
+// it with '>' make the parts disagree with the whole line's own pass (the sweep's exp14 family), so
+// the fallback is what publishes the line. The fallback must still be bounded and still carry the
+// status: this pairing reaches it at the least accepted pair, and the notice it publishes here is
+// the shaped detail itself (99 characters against a 402 cap), never a cut.
+test('F1 a line whose parts do not compose is bounded with its status kept, at 402/200', async () => {
+  const cap = 402;
+  const rows = [
+    { kind: 'rss', target: 'https://u:x@a.example/<a href=x', domain: 'ai-llm', note: '' },
+    { kind: 'rss', target: 'https://a.example/' + pad(300, 'z'), domain: 'ai-llm', note: '' },
+  ];
+  const net = {
+    fetchText: async (url, timeout, headers, ua, limit, omitUrl) => {
+      throw shapeHttpError(403, '<b>' + pad(3, '>') + '</b>', url, limit, headers ?? {}, Boolean(omitUrl));
+    },
+  };
+  const pool = await collectAll(
+    { settings: settingsAt(cap, 200), watchlist: rows },
+    { ...WINDOW, net },
+  );
+  assert.ok(pool.notices.length >= 1, 'the fallback fixture produced no notice');
+  for (const notice of pool.notices) {
+    assert.ok(notice.length <= cap,
+      'the published notice is ' + notice.length + ' characters at cap ' + cap + ': ' + JSON.stringify(notice));
+    assert.ok(notice.includes('HTTP 403'),
+      'the fallback dropped the status: ' + JSON.stringify(notice));
+  }
+});
+
 // ---------------------------------------------------------------------------------------
 // F2 -- one pass produces the published text, and a marker substring is not a secret.
 // ---------------------------------------------------------------------------------------

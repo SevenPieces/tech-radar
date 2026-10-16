@@ -279,15 +279,29 @@ function pushNotice(notices, text, secrets, limit) {
 // fit even alone is still the status, never the middle of a line. A string the caller built has no
 // shaped metadata to rebuild from, so the whole line's own single pass is bounded by the cap as it
 // always was.
+function boundedWhole(whole, cap) {
+  if (whole.length <= cap) return whole;
+  // The line does not fit and there is no shaped detail to re-build from. The two ends are where
+  // the diagnosis lives -- the source and the status at the front, the transport cause at the
+  // back -- so the middle gives way, never an end: a plain cut kept the front and lost a cause
+  // the notice had already diagnosed.
+  const SEAM = ' ... ';
+  const keep = cap - SEAM.length;
+  if (keep <= 0) return whole.slice(0, cap);
+  const front = Math.ceil(keep / 2);
+  return whole.slice(0, front) + SEAM + whole.slice(whole.length - (keep - front));
+}
 function boundedFallback(whole, detail, secrets, cap) {
   const repriced = repriceShapedError(detail, secrets, cap);
   if (repriced !== detail) {
     const priced = neutraliseNoticeText(String(repriced.message ?? ''));
-    if (priced.length + NOTICE_SEPARATOR_CHARS <= cap) return priced;
+    // The detail alone is the shortest honest text: it carries the status or the cause, and the
+    // source is the part a cap may drop. It is published without the separator rather than cut.
     if (priced.length <= cap) return priced;
-    return priced.slice(0, cap);
+    return boundedWhole(priced, cap);
   }
-  return whole.slice(0, cap);
+  // No shaped facts to re-build from: an arbitrary string. Keep both ends of the whole line.
+  return boundedWhole(whole, cap);
 }
 function assembleNotice(source, detail, secrets, limit) {
   const cap = requireNoticeLimit(limit);
