@@ -109,7 +109,48 @@ const SECRET_SHAPES = [
 // is the other half of the notice seam: the shaper's transport detail begins with those two words,
 // and without it a source label ending in the bare word 'authorization' lost the word 'request' from
 // its own diagnosis (verification F28-3, transport half).
-const AUTHORIZATION_SHAPE = /(?<!\/)\b(?:proxy-)?authorization\s*:\s*(?!\/\/(?![^\s@]*@)|https?:\/\/(?![^\s@]*@)|request failed)[^\s,;"']+(?![\s,;"']\s)/gi;
+// A header VALUE can also stand in QUOTES, and the token class above excludes both quote characters,
+// so a bare quoted value never matched at all and was published byte for byte at every cap
+// ('authorization: "tok_..."', "authorization: 'tok_...'", the real 'authorization: "Bearer <token>"'
+// and an AWS SigV4 'authorization: "AWS4-HMAC-SHA256 Credential=..., Signature=..."'). The quoted
+// alternative is read as ONE token, and it is the QUOTED form that is refused or consumed -- the
+// value inside the quotes is what the refusal tests, so a quoted URL keeps its userinfo removal and
+// the notice's own 'request failed for ...' seam still publishes. Prose that merely carries a quote
+// in a sentence is untouched, because this rule only starts after an authorization header keyword:
+// measured, 'the release said "the architecture is documented" in the notes' is returned byte for
+// byte. The unquoted alternative stays first so the first-quoted-token case it already consumed
+// ('oauth_consumer_key="abc"' inside an attribute list) is read exactly as before.
+const AUTHORIZATION_SHAPE = /(?<!\/)\b(?:proxy-)?authorization\s*:\s*(?:"[^"]*"|'[^']*'|[^\s,;"']+)(?![\s,;"']\s)/gi;
+
+// The two refusals above, read from the text after the colon before the match is made, so that the
+// quoted and the unquoted spelling of the same header value are refused by one rule: a header value
+// may be quoted or not ('"https://user:pw@host/path"' is the same value as the bare spelling), and
+// the earlier lookahead read only the bare spelling - which is why a quoted credential was never
+// read at all while a quoted URL had to be refused. The text is read with its surrounding quotes
+// peeled, which is how the shaper's own transport seam is recognised:
+//   - a URL that carries no userinfo is the assembly's own seam beside a request ('authorization:
+//     https://a.example/x') and has no credential to remove, so it is left where it stands; a URL
+//     that DOES carry userinfo is a header value and goes (sweep F28-4);
+//   - a value that begins 'request failed' is the shaper's transport detail beside the seam, not a
+//     header value, so the notice's own wording survives (verification F28-3, transport half).
+// Both are read from the WHOLE run after the colon and not from the matched token: the transport
+// detail is two words, and a refusal that saw only the matched token consumed the word 'request' and
+// left '[redacted] failed for ...' - which is the diagnosis the refusal exists to keep.
+function authorizationValueRefused(rest) {
+  const raw = String(rest).trim();
+  const value = raw.length >= 2
+    && ((raw.startsWith('"') && raw.endsWith('"')) || (raw.startsWith("'") && raw.endsWith("'")))
+    ? raw.slice(1, -1) : raw;
+  // The authority is what stands between the '//' and the first '/' or whitespace, and it is read
+  // whole: a userinfo password may contain a '/', so a character-class test that excluded the slash
+  // read 'user:s3cr3tp4ss@host/path' as carrying no userinfo and refused a header value the Batch 49
+  // rule removes.
+  if (/^(?:\/\/|https?:\/\/)/i.test(value)) {
+    const authority = value.replace(/^[a-z]+:/i, '').replace(/^\/\//, '').split(/[/\s]/, 1)[0];
+    return !authority.includes('@');
+  }
+  return /^request failed/i.test(value);
+}
 
 // The one shape in the list above that has to read what FOLLOWS its match: the authorization rule
 // consumes the token after the scheme it matched, and only when that token is the credential. The
@@ -137,8 +178,21 @@ function redactAuthorizationShapes(text) {
     // span protectScaffold wrote. Consuming it deleted the HTTP status from every notice whose
     // source label ends in the bare word 'authorization' (verification F28-3). The match is left
     // exactly where it stands, and the span is restored at the end of the pass as any other is.
-    if (match[0].includes(SCAFFOLD_PLACEHOLDER)) continue;
-    const first = match[0].slice(match[0].lastIndexOf(':') + 1).trim();
+    // A quoted value is read as its own content for this test as well: a span protectScaffold wrote
+    // could in principle sit inside the quotes beside the keyword, and the scaffold's own text must
+    // survive wherever it stands. The quotes themselves are scaffold text too, so a match whose whole
+    // value is quoted is skipped on the content alone - the same rule, read one level in.
+    const matchedValue = match[0].slice(match[0].lastIndexOf(':') + 1).trim();
+    const quoted = matchedValue.length >= 2
+      && ((matchedValue.startsWith('"') && matchedValue.endsWith('"'))
+        || (matchedValue.startsWith("'") && matchedValue.endsWith("'")));
+    const valueText = quoted ? matchedValue.slice(1, -1) : matchedValue;
+    if (valueText.includes(SCAFFOLD_PLACEHOLDER)) continue;
+    // The two refusals read the text after the colon WHOLE, not the matched token: the transport seam
+    // is the two-word phrase 'request failed', and a refusal that saw only its first word consumed
+    // that word and left '[redacted] failed for ...' where the notice's own wording belongs.
+    if (authorizationValueRefused(source.slice(match.index + match[0].lastIndexOf(':') + 1))) continue;
+    const first = matchedValue;
     const next = NEXT_AUTH_TOKEN.exec(source.slice(match.index + match[0].length));
     const consumeSecond = next !== null
       && !next[1].includes(SCAFFOLD_PLACEHOLDER)

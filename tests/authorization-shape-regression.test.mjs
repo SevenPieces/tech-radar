@@ -95,6 +95,58 @@ test('sweep F28-4 a URL-shaped header value gives up its userinfo credential', (
     'the second token of an unrecognised value is no longer preserved');
 });
 
+// Closing sweep F29-3 (Med, pre-existing): the shape's token class excluded both quote characters,
+// so a BARE quoted value never matched at all and was published byte for byte at every cap -
+// 'authorization: "tok_..."', "authorization: 'tok_...'", the real 'authorization: "Bearer <token>"'
+// and an AWS SigV4 'authorization: "AWS4-HMAC-SHA256 Credential=..., Signature=..."'. It reaches a
+// notice whenever a body with no readable message carries one. The rule now reads a quoted value as
+// ONE token, refuses or consumes by the value INSIDE the quotes (so the URL-userinfo removal of
+// Batch 49 still fires for a quoted URL), and leaves ordinary quoted prose alone - it never starts
+// without the header keyword.
+test('sweep F29-3 a bare quoted authorization value is removed, single or double quoted', () => {
+  for (const text of [
+    'authorization: "tok_9f3a2c7d1e5b"',
+    "authorization: 'tok_9f3a2c7d1e5b'",
+    'authorization: "Bearer tok_9f3a2c7d1e5b"',
+    "authorization: 'Bearer tok_9f3a2c7d1e5b'",
+    'authorization: "AWS4-HMAC-SHA256 Credential=example-key-id/20261017, Signature=deadbeef1234"',
+    'Proxy-Authorization: "Basic dXNlcjpwYXNz"',
+    'an authorization: "tok_9f3a2c7d1e5b" value',
+  ]) {
+    const out = redactSecrets(text, []);
+    assert.ok(!/tok_9f3a2c7d1e5b|deadbeef1234|dXNlcjpwYXNz/.test(out),
+      'the quoted header value was published: ' + JSON.stringify(text) + ' -> ' + JSON.stringify(out));
+    assert.equal(redactSecrets(out, []), out,
+      'the quoted-header rewrite is not a fixed point: ' + JSON.stringify(out));
+  }
+  // The quoted URL keeps the userinfo removal of Batch 49, and a URL with no userinfo is still the
+  // assembly's own seam and is refused.
+  for (const text of ['authorization: "https://user:s3cr3tp4ss@host/path"',
+    "authorization: 'https://user:s3cr3tp4ss@host/path'"]) {
+    const out = redactSecrets(text, []);
+    assert.ok(!out.includes('s3cr3tp4ss'),
+      'the quoted URL published its userinfo: ' + JSON.stringify(out));
+  }
+  assert.equal(redactSecrets('authorization: "https://evil.example/x?t=abcdefgh"', []),
+    'authorization: "https://evil.example/x?t=abcdefgh"',
+    'a URL with no userinfo inside quotes was consumed');
+});
+
+test('sweep F29-3 ordinary quoted prose survives where the header shape is absent', () => {
+  for (const text of [
+    'the release said "the architecture is documented" in the notes',
+    "he said 'hello world' loudly",
+    'quote before: "the archived releases were moved"',
+    'a "quoted" word and a plain one',
+    'authorization: "HTTP 503"',
+    'xauthorization: "tok_9f3a2c7d1e5b"',
+  ]) {
+    assert.equal(redactSecrets(text, []), text,
+      'ordinary quoted prose was rewritten: ' + JSON.stringify(text) + ' -> '
+      + JSON.stringify(redactSecrets(text, [])));
+  }
+});
+
 test('the run\'s own authorization header is still collected whole and removed', () => {
   const headers = { Authorization: 'OAuth oauth_consumer_key="abc", oauth_token="SECRETTOKEN123"' };
   const secrets = requestSecrets('https://api.github.com/repos/a/b/releases', headers);
