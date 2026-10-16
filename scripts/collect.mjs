@@ -380,6 +380,9 @@ function boundedNotice(whole, head, tail, cap, floor) {
   const partsCompose = whole === head + NOTICE_SEPARATOR + tail
     && whole.startsWith(head) && whole.endsWith(tail);
   if (partsCompose) return composeParts(head, tail, cap, floor);
+  // An empty source carries no separator: ': ' before a detail with no source on its left is the
+  // dangling separator a reader cannot place (F26-1), and there is no source to name.
+  if (head === '') return whole.slice(0, cap);
   const at = whole.lastIndexOf(NOTICE_SEPARATOR);
   if (at >= 0 && whole.startsWith(head.slice(0, at)) && whole.slice(at, at + NOTICE_SEPARATOR_CHARS) === NOTICE_SEPARATOR) {
     const source = whole.slice(0, at);
@@ -466,6 +469,12 @@ function repricedDetailWithin(whole, detail, secrets, cap, labelRoom) {
 export function assembleNotice(source, detail, secrets, limit) {
   const cap = requireNoticeLimit(limit);
   const head0 = String(source ?? '');
+  // An empty source publishes no separator: ': ' with nothing on its left is the dangling
+  // separator F26-1 filed, and there is no source for it to introduce. Every shipped collector
+  // names one, so this is the module surface's own case.
+  const join = (text) => (head0 === '' && text.startsWith(NOTICE_SEPARATOR)
+    ? text.slice(NOTICE_SEPARATOR_CHARS)
+    : text);
   // A collector hands either the shaped Error itself (so the rebuild below can run) or its own
   // phrase; the text is the message in the first case and the string in the second -- String(err)
   // would publish Node's 'Error: ' prefix, which is not what the caller wrote.
@@ -478,7 +487,7 @@ export function assembleNotice(source, detail, secrets, limit) {
   const whole = neutraliseNoticeText(redactSecrets(head0 + NOTICE_SEPARATOR + tail0, secrets));
   const head = neutraliseNoticeText(redactSecrets(head0, secrets));
   const tail = neutraliseNoticeText(redactSecrets(tail0, secrets));
-  if (whole.length <= cap) return withReason(whole, head, tail, cap);
+  if (whole.length <= cap) return join(withReason(whole, head, tail, cap));
   const labelRoom = Math.min(noticeLabelRoom(head0), cap);
   const repriced = repricedDetailWithin(whole, detail, secrets, cap, labelRoom);
   if (repriced !== null) {
@@ -486,9 +495,9 @@ export function assembleNotice(source, detail, secrets, limit) {
     // the whole line is the last word: the detail is already a slice of the whole-line redaction, so
     // the cut can only land inside it and never re-introduce a byte the pass removed.
     const room = noticeSourceLength(head.length, repriced.length, cap, labelRoom);
-    return (head.slice(0, room) + NOTICE_SEPARATOR + repriced).slice(0, cap);
+    return join((head.slice(0, room) + NOTICE_SEPARATOR + repriced).slice(0, cap));
   }
-  return boundedNotice(whole, head, tail, cap, labelRoom);
+  return join(boundedNotice(whole, head, tail, cap, labelRoom));
 }
 // The push a notice built as '<source>: <detail>' uses, so the two parts stay apart until the cap
 // is applied. A caller that carries one already-assembled string -- a re-redaction pass, a message
