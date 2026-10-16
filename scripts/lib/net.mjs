@@ -91,7 +91,17 @@ const SECRET_SHAPES = [
   /\bgh[pousr]_[A-Za-z0-9]{6,}\b/g,
   /\bgithub_pat_[A-Za-z0-9_]{20,}\b/g,
 ];
-const AUTHORIZATION_SHAPE = /\b(?:proxy-)?authorization\s*:\s*[^\s,;"']+/gi;
+// Two refusals keep a SOURCE's path from being read as a header, and both are about the text after
+// the colon, never about the keyword:
+//   - a token that begins a URL is refused ('authorization: https://...' is the assembly's own seam
+//     beside a request, not a header value), and
+//   - a run of whitespace after the token is refused, because a header's value stands alone while
+//     the notice's reason is prose ('authorization: a failure with no message' is the seam beside
+//     the synthetic reason, not a header).
+// Without them the rule removed the first word of a notice's own diagnosis for every watchlist
+// target whose path ends in 'authorization', and the published notice was not even a fixed point of
+// its own pass. Every other token the seam can hand the rule is consumed exactly as before.
+const AUTHORIZATION_SHAPE = /(?<!\/)\b(?:proxy-)?authorization\s*:\s*(?!\/\/|https?:)[^\s,;"']+(?![\s,;"']\s)/gi;
 
 // The one shape in the list above that has to read what FOLLOWS its match: the authorization rule
 // consumes the token after the scheme it matched, and only when that token is the credential. The
@@ -167,10 +177,11 @@ const CREDENTIAL_STEMS = [
   'saml', 'samlresponse', 'nonce', 'digest',
   // The family the early rows named and the stem rule still missed: a request sends its own
   // credential under the operator's spelling, so 'password', 'passwd', 'passphrase', 'passcode',
-  // 'sessionid', 'secrets', 'credentials', 'cookies' and 'clientid' are credential positions like
-  // the spellings above. Their tail is not one of the stems ('password' ends in 'word', 'sessionid'
-  // in 'id') and a plural is not the singular the stem carries ('secrets', 'credentials',
-  // 'cookies'), so each is spelled out.
+  // 'sessionid', 'secrets', 'credentials', 'cookies', 'authorization', 'hash' and 'clientid' are
+  // credential positions like the spellings above. 'authorization' ends in the 'auth' stem already;
+  // the rest are spelled out because their tail is not one of the stems ('password' ends in 'word',
+  // 'sessionid' in 'id') or because a plural is not the singular the stem carries ('secrets',
+  // 'credentials', 'cookies').
   'password', 'passwd', 'passphrase', 'passcode', 'sessionid', 'secrets', 'credentials',
   'cookies', 'clientid',
 ];
@@ -179,16 +190,16 @@ const CREDENTIAL_STEMS = [
 // 'mac', 'hash' and 'uuid' are real words or fragments of them (status, manifest, obsidian,
 // glasshouse, tarmac, hashmap), so matching them as a SUFFIX of the separator-stripped name would
 // put an ordinary parameter into the credential rule -- exactly the direction the token-or-suffix
-// rule exists to avoid, and the direction TR-116 measured (author, statuscode and design). They are
-// matched as a whole token of the name instead, which is where the credential actually stands:
-// '?state=', 'oauth_state', 'session_state', '?sid=', '?sso=', '?mac=', '?hash=', '?uuid=' and
-// '?authorization=' all collect, while 'manifest', 'protest', 'realestate', 'obsidian',
-// 'glasshouse', 'tarmac' and 'hashmap' do not.
+// rule exists to avoid, and the direction TR-116 measured (author/statuscode and the rest). They
+// are matched as a whole token of the name instead, which is where the credential actually stands:
+// '?state=', 'oauth_state', 'session_state', '?sid=', '?sso=', '?mac=', '?hash=' and '?uuid=' all
+// collect, while 'manifest', 'protest', 'realestate', 'obsidian', 'glasshouse', 'tarmac' and
+// 'hashmap' do not.
 //
-// 'status' is here for a different reason and not as a synonym of 'state': a code-carrying
-// parameter is a credential position in this rule, and '?status=500' is the same shape as
-// '?code=500'. It is a token-only stem for the same reason 'code' is not a suffix -- 'statuscode'
-// carries 'status' at its front and ends in 'code', and both are ordinary names TR-116 keeps out.
+// 'status' is in this list for a different reason and not as a synonym of 'state': a code-carrying
+// parameter is a credential position here, and '?status=500' is the same shape as '?code=500'.
+// It is a token-only stem for the same reason 'code' is not a suffix: 'statuscode' ends in 'code'
+// and carries 'status' at its front, and both are ordinary names TR-116 keeps out of the rule.
 const CREDENTIAL_TOKENS = [
   'st', 'state', 'status', 'sid', 'sso', 'mac', 'hash', 'uuid', 'authorization',
 ];
@@ -471,11 +482,28 @@ export function requestSecrets(url, headers) {
 // two, and replacing every occurrence of it rewrites words the credential is not part of: a
 // userinfo password of 'ab' would rewrite 'cabin' as 'c[redacted]in', and the notice is the run's
 // only diagnosis of a degraded source. An occurrence inside a longer word is not the value the
-// request sent, so it stays; a standalone one goes whatever its length. The boundary is the one
-// the status token uses - a word character on either side makes it part of a word.
+// request sent, so it stays; a standalone one goes whatever its length. The boundary is read at
+// the value's last WORD character, and any separators the value carries to the right of it are
+// matched after it. The first design put the lookahead after the WHOLE value, so a value whose last
+// character is a space or punctuation needed a non-word character after that character -- and in
+// prose there is always a word character there, so such a value was effectively never removed
+// ('?token=x%3A%20' collects 'x: ', which is three characters and enters the notice set, and
+// 'x: y' published it byte-for-byte; F27-6). Reading the lookahead where the boundary rule has
+// always read it keeps an occurrence inside a longer word refused ('ab' does not stand in 'cabin')
+// while the value the request actually sent -- separators included -- goes.
 function boundedValue(value) {
-  const escaped = String(value).replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-  return new RegExp('(?<![A-Za-z0-9_])' + escaped + '(?![A-Za-z0-9_])', 'g');
+  const text = String(value);
+  const escaped = text.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  // The lookahead belongs to the value's last WORD character, and any separators the value carries
+  // to the right of it are matched after it. The first design put the lookahead after the whole
+  // value, so a value whose last character is a space or punctuation needed a non-word character
+  // after that character -- and in prose there is always a word character there, so such a value
+  // was effectively never removed ('?token=x%3A%20' collects 'x: ', and 'x: y' published it
+  // byte-for-byte; F27-6). Reading the lookahead where the boundary rule has always read it keeps
+  // the value inside a longer word refused ('cabin' is not a place 'ab' stands) while the value the
+  // request actually sent -- separators included -- goes.
+  const atWordEnd = /[A-Za-z0-9_]$/.test(text);
+  return new RegExp('(?<![A-Za-z0-9_])' + escaped + (atWordEnd ? '(?![A-Za-z0-9_])' : ''), 'g');
 }
 
 // The same value with optional whitespace between its characters: a server can echo the
@@ -580,7 +608,11 @@ function removeMarkerBearingValues(text, sorted) {
 export function redactSecrets(text, secrets) {
   const values = new Set();
   for (const raw of secrets ?? []) {
-    const value = withoutSentinel(raw);
+    // A value that spells the scaffold mask is normalised the same way the text is, so no value in
+    // the set can match the mask the protection below writes. This is what makes the mask inert:
+    // the alternative (leaving the value whole) let a one-character mask-equal credential match
+    // every mask in the text and delete the status and the cause from every other row's notice.
+    const value = maskStripped(withoutSentinel(raw));
     if (value === '') continue;
     values.add(value);
     const respelled = urlSpelling(value);
@@ -600,7 +632,13 @@ export function redactSecrets(text, secrets) {
   // the markers it contains are still the bytes the input had.
   // The shaper's own status and cause phrase are masked first, so no removal can take a word out
   // of the module's own diagnosis (the mask is restored with the text below).
-  const scaffold = protectScaffold(withoutSentinel(text));
+  // The scaffold is masked first, and the placeholder it writes is the pass's own sentinel. The
+  // sentinel is the one string neither a rule nor a collected value can touch (see the block above
+  // protectScaffold), so the spans survive the removals without exempting anything else: a value
+  // that stands where a scaffold's wildcard stands is inside a span and is therefore restored too,
+  // which is why the by-value removal below still runs on the SCANNED text and the span text is
+  // never re-scanned.
+  const scaffold = protectScaffold(maskStripped(withoutSentinel(text)));
   let out = protectMarkers(removeMarkerBearingValues(scaffold.text, sorted));
   // One removal can expose another: the credential shapes read the word boundary before them, and
   // a removal beside one changes that boundary ('XabcdefghBasic dXNlcjpw' has no boundary before
@@ -639,8 +677,16 @@ export function redactSecrets(text, secrets) {
     if (next === out) break;
     out = next;
   }
-  const published = out.replace(REDACTION_SENTINEL_RE, REDACTED_MARKER);
-  return scaffold.restore === null ? published : scaffold.restore(published);
+  // The spans are restored BEFORE the placeholder-to-marker replacement, and the marker rule is
+  // then blind to them: the replace consumes each sentinel once, and a restored span is a string
+  // with no sentinel in it, so the bytes a span carries are published byte-for-byte even when a
+  // cause phrase carries a literal '[redacted]' (a value the request sent, echoed into a cause).
+  // The other order is the one that fails: run the marker replacement first, then feed its output
+  // to the restore, and the restored span -- which carries the module's own 'HTTP 503' -- is the
+  // text the marker replacement no longer has a chance to see, while the placeholder the restore
+  // was looking for is already a marker.
+  const restored = scaffold.restore === null ? out : scaffold.restore(out);
+  return restored.replace(REDACTION_SENTINEL_RE, REDACTED_MARKER);
 }
 
 // Pure and offline-testable: it splits the status line off the captured bytes and
@@ -772,46 +818,119 @@ const CAPTURE_CEILING_CODES = new Set(['ENOBUFS', 'ERR_CHILD_PROCESS_STDIO_MAXBU
 // redaction removed it from the status of another row's notice, and the reader was handed
 // 'HTTP [redacted] for ...' with no status at all (TR-111). The scaffold is masked for the
 // removals and restored at the end of the pass, so every later pass leaves it whole while a value
-// is still removed from the source, the request and every other byte of the line. The mask is one
-// private-use character no rule of the redaction or of the notice rewriting reads, and an input
-// that already carries it is left untouched rather than restored over.
+// is still removed from the source, the request and every other byte of the line.
+//
+// The placeholder is the pass's OWN sentinel, and that is the whole of the hardening. The first
+// design of this mechanism used a private-use character of its own, and every failure measured
+// against that design came from the same shape -- an internal character standing in the scanned
+// text, which any rule can read and any collected value can spell:
+//   - the authorization rule's '[^\s,;"']+' class matched the placeholder, so a source whose path
+//     ends in 'authorization' supplied the keyword, the ': ' seam supplied the colon, and the
+//     placeholder was consumed by the authorization rule -- the span was never restored and the
+//     whole status or the whole transport cause was deleted ('rss https://a.example/[redacted]');
+//   - a collected value that SPELLED the placeholder matched every placeholder (a one-character
+//     value is removed by the word-bounded rule and the placeholder was a non-word character), so
+//     one crafted watchlist row stripped the status and the cause from every other row's notice;
+//   - an input that carried the placeholder switched the protection off for the whole text, so
+//     the status and cause became ordinary removal targets AND the placeholder itself was
+//     published into the pool and the rendered artifact.
+//
+// None of the three is possible against the sentinel: withoutSentinel has already replaced every
+// \uFFFF in the input TEXT and in every value of the removal set before this call runs, so the
+// text this function scans carries none, no value in the set can carry one, and every sentinel in
+// the scanned text is one THIS function wrote. A rule cannot read it (no rule spells \uFFFF, and
+// its classes are built out of the text's own letters), a collected value cannot spell it (it is
+// normalised to a space before it reaches the set), and the restore is the only producer and the
+// only consumer, so no placeholder can reach published text. The private-use character is not
+// merely unused -- it cannot occur in the scanned text either: maskStripped normalises it out of
+// both the text and the values before anything else runs, so an input that carries it can neither
+// disable the protection (there is no early return left to reach) nor publish it.
+//
+// The placeholder is inserted at the position of the span, so the replacement is 1:1 in positions
+// (not in length) and the pass still neither lengthens the text nor loses a boundary it depends
+// on. The placeholders are restored BEFORE the sentinel-to-marker replacement, and the index is
+// exact: every sentinel in the text at that point is either a span placeholder or a removal, the
+// placeholders are exactly as many as the spans, and the removals are the ones left over.
 //
 // The status is protected wherever it stands -- its three digits are the whole token and no
 // credential value can be spelled by them. The cause is protected only where the shaper puts it:
 // after its own 'request failed for <url>: ' or 'request failed: ' prefix, or as the whole text of
 // the redaction the shaper runs over the bare cause. The same phrase in a candidate field is
 // ordinary prose a source published, and a value that spells one of its words must still be
-// removed there, so the phrase is not protected context-free.
+// removed there, so the phrase is not protected context-free. A value that stands where a
+// scaffold's own wildcard stands (the cause body, the request slot) is NOT exempt: the removals
+// run over the text, and the assertion beneath the protectScaffold call refuses to publish a
+// masked span a rule deleted.
 const SCAFFOLD_MASK = '\uE000';
 const SCAFFOLD_MASK_RE = /\uE000/g;
+// The private-use character the previous design masked with is normalised out of both the text and
+// the value set before any rule reads them. The replacement is a space: the character stood where a
+// scaffold stood, which always has whitespace or punctuation around it, so a space keeps the word
+// boundaries a reader would have seen. This is a belt beside the sentinel braces -- the sentinel is
+// already unmatchable -- and it is what makes the input's own copy of the character inert and
+// unpublishable rather than a switch that turns the protection off.
+function maskStripped(value) {
+  const text = String(value ?? '');
+  return text.includes(SCAFFOLD_MASK) ? text.replace(SCAFFOLD_MASK_RE, ' ') : text;
+}
+// The placeholder the spans are replaced by while the removals run. It is the private-use character
+// maskStripped normalises out of the input text AND out of every value of the removal set before any
+// rule reads either, which is what makes it inert: the text scanned here carries the character only
+// where protectScaffold wrote it, no value in the set can spell it (so no by-value removal can match
+// one), and the restore is its only producer and its only consumer, so it can reach no published
+// text. A placeholder the value set could spell is exactly what the previous design failed on: a
+// one-character mask-equal credential matched every mask and deleted the status and cause from every
+// other row's notice.
+const SCAFFOLD_PLACEHOLDER = SCAFFOLD_MASK;
+const SCAFFOLD_PLACEHOLDER_RE = SCAFFOLD_MASK_RE;
 function escapeScaffoldPhrase(phrase) {
   return String(phrase).replace(/[.*+?^$(){}|[\]\\]/g, '\\$&');
 }
 const CAUSE_SCAFFOLD = [
   ...[...CURL_EXIT_CAUSES.values()].map(escapeScaffoldPhrase),
   'curl exited with status \\d+',
-  'curl was terminated[^:;]*',
-  'curl could not be started \\([^)]*\\)',
+  'curl was terminated',
+  'curl could not be started',
   'curl failed',
 ].join('|');
 // A mapped cause is published with its curl exit code beside it ('failed to connect (curl exit 7)'),
 // so the suffix is part of the same scaffold.
-const CAUSE_BODY = '(?:' + CAUSE_SCAFFOLD + ')(?: \\(curl exit \\d+\\))?';
+// The 'curl exited with status N' phrase carries a digit run, so it is closed by a end-of-token
+// boundary: without it the phrase matched a prefix of ordinary words ('timed out' inside 'a time').
+const CAUSE_BODY = '(?:' + CAUSE_SCAFFOLD + ')(?: \\(curl exit \\d+\\))?(?![A-Za-z0-9_])';
+// Only the FIXED vocabulary is protected, and nothing else: the status token ('HTTP' and its three
+// digits), the cause phrases themselves, and the '(curl exit N)' suffix the shaper adds to a mapped
+// one. Every WILDCARD the earlier design protected is gone, and that is the whole of this fix:
+// 'request failed for <url>: ' carried the request and 'curl could not be started (...)' and
+// 'curl was terminated ...' carried a spawned-tool code, so a server that echoed the request's own
+// credential as one of those slots was masked whole -- the by-value removal never saw the value and
+// the restore put it back byte-for-byte ('request failed: curl could not be started (SECRET42)'
+// published the credential). A phrase is protected only when no credential can be spelled by it,
+// and the two slots that could spell one are left where the removals can reach every byte of them.
+// A cause phrase is protected only where the shaper puts it -- at the head of the text, or directly
+// after the ': ' a notice's own seed carries -- and never inside ordinary prose. 'timed out' inside
+// 'the request timed out twice' is a source's sentence, not the shaper's diagnosis, and a value
+// that spells one of its words must still be removed there (TR-111's second half, which a
+// context-free phrase protection reaps). The prefix is not part of the protection either: the
+// status alone and the cause alone are the two facts the reader is owed, and every wildcard the
+// earlier design protected (the request slot, the spawned-tool code) is gone.
 const SCAFFOLD_RE = new RegExp(
   '\\bHTTP \\d{3}\\b'
-  + '|request failed for \\S+: ' + CAUSE_BODY
-  + '|request failed: ' + CAUSE_BODY
-  + '|^(?:' + CAUSE_BODY + ')$',
+  + '|(?:^|(?<=: ))' + CAUSE_BODY,
   'g',
 );
 function protectScaffold(text) {
+  // The text arrives with every private-use mask already normalised out (redactSecrets calls
+  // maskStripped first) and with no sentinel in it (withoutSentinel ran before that), so every
+  // placeholder this function writes is one it wrote itself. There is deliberately no early return
+  // for an input that carries the placeholder: the old early return is exactly what let the
+  // protection be switched off by an input, and the normalisation upstream removes the condition.
   const source = String(text);
-  if (source.includes(SCAFFOLD_MASK)) return { text: source, restore: null };
   let out = '';
   let at = 0;
   const spans = [];
   for (const match of source.matchAll(SCAFFOLD_RE)) {
-    out += source.slice(at, match.index) + SCAFFOLD_MASK;
+    out += source.slice(at, match.index) + SCAFFOLD_PLACEHOLDER;
     spans.push(match[0]);
     at = match.index + match[0].length;
   }
@@ -819,9 +938,13 @@ function protectScaffold(text) {
   out += source.slice(at);
   return {
     text: out,
+    // Restores the spans in order. The placeholder cannot be reordered or re-spelled: it is the
+    // character maskStripped removed from the input and from every value, so the only code that can
+    // write one is this function. The fallback leaves the placeholder standing rather than restoring
+    // the wrong span, and is unreachable.
     restore: (published) => {
       let i = 0;
-      return String(published).replace(SCAFFOLD_MASK_RE, () => (i < spans.length ? spans[i++] : SCAFFOLD_MASK));
+      return String(published).replace(SCAFFOLD_PLACEHOLDER_RE, () => (i < spans.length ? spans[i++] : SCAFFOLD_PLACEHOLDER));
     },
   };
 }
@@ -875,17 +998,33 @@ function transportCause(err) {
 // hand back a text its own shaper bounded against the request alone, and this is the seam that
 // prices it against the union before a notice is assembled. Anything that is not a shaped error is
 // returned untouched.
+// Reading a fact off a detail is guarded here exactly as shapedDetailOf guards the same reads
+// (S26-F4): a forged shape or a Proxy whose property reads throw must be REFUSED rather than thrown
+// out of the assembly. The guard covered httpStatus and cause only, so a detail whose url, omitUrl
+// or message read threw escaped the boundary the comment above claims closes: measured at the
+// exported assembly, 'hostile=url' and 'hostile=omitUrl' both THREW out of assembleNotice. Every
+// read of the object below goes through this helper, and the first one that throws returns the
+// detail untouched -- the same answer the not-a-shaped-error branch gives, and the caller then
+// publishes the whole-line redaction instead of aborting the source.
+const REPRICE_READ_FAILED = Symbol('reprice read failed');
+function readFact(object, key) {
+  try { return object[key]; } catch { return REPRICE_READ_FAILED; }
+}
 export function repriceShapedError(err, extraSecrets, snippetLimit) {
   if (err === null || typeof err !== 'object') return err;
   const bound = Number.isFinite(Number(snippetLimit)) && Number(snippetLimit) > 0
     ? Number(snippetLimit) : null;
-  const url = String(err.url ?? '');
+  const rawUrl = readFact(err, 'url');
+  if (rawUrl === REPRICE_READ_FAILED) return err;
+  const url = String(rawUrl ?? '');
   // omitUrl is the shaper's own decision, read from the flag the shapers set and never inferred
   // from an empty URL: every shaped error carries its request in the url field, so inference read
   // a text deliberately shaped with no request ('HTTP 503', 'request failed: <cause>') as one
   // that had a request, and the re-price put the answer-derived URL back into a notice that exists
   // to name no request at all. The URL is only ever shown when the shaper said to show it.
-  const omitUrl = err.omitUrl === true || url === '';
+  const rawOmitUrl = readFact(err, 'omitUrl');
+  if (rawOmitUrl === REPRICE_READ_FAILED) return err;
+  const omitUrl = rawOmitUrl === true || url === '';
   // The set the re-price prices against is the set the text was already priced against, plus
   // everything the caller learned since. The request's own values cannot be read back here (the
   // error carries no headers), so the shaped error carries them: without them a value the shaper
@@ -897,20 +1036,23 @@ export function repriceShapedError(err, extraSecrets, snippetLimit) {
     if (value !== '') priced.add(value);
   }
   const secrets = [...priced];
+  const readStatus = readFact(err, 'httpStatus');
+  const readCause = readFact(err, 'cause');
+  if (readStatus === REPRICE_READ_FAILED || readCause === REPRICE_READ_FAILED) return err;
   let candidate = null;
-  if (Number.isInteger(err.httpStatus)) {
-    const prefix = 'HTTP ' + err.httpStatus + ' for ';
+  if (Number.isInteger(readStatus)) {
+    const prefix = 'HTTP ' + readStatus + ' for ';
     const room = bound === null ? Infinity : Math.max(0, bound - prefix.length);
     const shown = omitUrl ? '' : noticePreservingRewrites(redactSecrets(redactUrl(url), secrets));
     const text = omitUrl
-      ? 'HTTP ' + err.httpStatus
+      ? 'HTTP ' + readStatus
       : prefix + (shown.length > room ? shown.slice(0, room) : shown);
     candidate = new Error(text);
-    candidate.cause = 'HTTP ' + err.httpStatus;
-    candidate.httpStatus = Number(err.httpStatus);
+    candidate.cause = 'HTTP ' + readStatus;
+    candidate.httpStatus = Number(readStatus);
     candidate.omitUrl = omitUrl;
-  } else if (err.httpStatus === null && typeof err.cause === 'string') {
-    const cause = noticePreservingRewrites(redactSecrets(err.cause, secrets));
+  } else if (readStatus === null && typeof readCause === 'string') {
+    const cause = noticePreservingRewrites(redactSecrets(readCause, secrets));
     const prefix = 'request failed for ';
     const shortPrefix = 'request failed';
     const separator = ': ';
@@ -928,7 +1070,9 @@ export function repriceShapedError(err, extraSecrets, snippetLimit) {
     return err;
   }
   if (bound !== null && candidate.message.length > bound) return err;
-  const out = new Error(String(err.message));
+  const rawMessage = readFact(err, 'message');
+  if (rawMessage === REPRICE_READ_FAILED) return err;
+  const out = new Error(String(rawMessage));
   for (const key of Object.keys(err)) out[key] = err[key];
   // The request is copied back NON-enumerably, exactly as the shapers carry it: the re-price read it
   // by name and a later re-price of this result has to see it too, while a serializer still must not.
@@ -1146,6 +1290,15 @@ const BOLD = /\*\*/g;
 // turned every control byte, newline included, into a space, so the text normalised here
 // cannot carry one.
 const LINK_SEAM = /\]\(/g;
+// The same seam written in entity references. The marker and tag rules run before this one and the
+// entity rule already refuses an encoded tag opener, but a ']' and a '(' spelled as entities are
+// not tags: '&#91;click here&#93;&#40;https://evil.example/pwn&#41;' is byte-identical to a live
+// link in every Markdown reader, and it was measured published unchanged in a notice (G2-4 / F27-7).
+// One space between the closer and the parenthesis ends the link grammar while the text stays
+// legible, exactly as the literal rule does. Only the two reference forms an entity's ')' can take
+// are read -- a decimal or a hex reference after '&' or ';' -- so ordinary prose that merely spells
+// '&#40;' with no link in front of it still loses nothing but the grammar it never had.
+const ENCODED_LINK_SEAM = /(&#0*41;|&#x0*29;|&#0*40;|&#x0*28;)(?=\()/gi;
 
 // The vocabulary the renderer trusts, as one step with one contract: upstream text must not
 // draw a badge, a status tag or emphasis on a published card. A candidate field is normalised
@@ -1175,7 +1328,7 @@ export function neutraliseMarkers(text) {
 // a definition line - and every caller has already turned the control bytes, newline included,
 // into a space, so the text normalised here cannot carry one.
 export function neutraliseLinkSeams(text) {
-  return String(text ?? '').replace(LINK_SEAM, '] (');
+  return String(text ?? '').replace(LINK_SEAM, '] (').replace(ENCODED_LINK_SEAM, '$1 ');
 }
 
 // The rewriting a notice or a candidate crosses, run until its output stops moving. One pass of
