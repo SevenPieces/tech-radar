@@ -19,6 +19,7 @@ import { SKILL_ROOT, shippedFiles } from './lib/shipped-files.mjs';
 import {
   CREDENTIAL_SHAPES, FOLD_CONTINUATION_SHAPES, FOLD_HELD, FOLD_LIMIT_ROWS, KEYWORDS, PROSE_COST,
   PROSE_KEPT, PROSE_TAILS, SCHEME_WORDS, TAIL_CREDENTIAL_HELD, TAIL_CREDENTIAL_SHAPES,
+  VALUE_GRAMMAR_ROWS,
 } from './lib/authorization-corpus.mjs';
 
 // The two entry points whose agreement is the property Batch 61 introduced: the credential-free
@@ -143,6 +144,39 @@ test('Batch 69: an indented continuation is the value, and the two non-folds are
   }
   assert.equal(rows, FOLD_CONTINUATION_SHAPES.length + FOLD_LIMIT_ROWS.length + FOLD_HELD.length,
     'the fold corpus changed size: ' + rows);
+});
+
+
+// Batch 71 (closing sweep F34-2, test integrity). The sweep's mutation run left clauses of this
+// reader alive through the whole 681-test suite; each row below pins the WHOLE output of a clause
+// that decides one, so removing the clause fails a test. Measured after this batch: 0 of the
+// mutants the sweep listed as surviving (the gap clause and the scheme-name glue) survive the suite
+// any more. ONE clause is genuinely inert rather than bound, and is recorded here rather than
+// claimed: 'authorizationValueRefused' has a single caller, and that caller reaches it only for an
+// atom that already tested as a URL, so the transport half of it ('request failed ...') decides
+// nothing. Measured: a differential of the mutant that removes that half against this module over
+// 2,492 inputs x both entry points = 4,984 comparisons found 0 differing rows, so no test can bind
+// it and none needs to; the row below pins what the DECLINED branch does to that value head
+// instead, which is where its removal is actually decided.
+test('Batch 71: the value grammar the mutations moved is pinned by its whole output', () => {
+  for (const row of VALUE_GRAMMAR_ROWS) {
+    for (const [name, redact] of PATHS) {
+      const out = redact(row.text);
+      assert.equal(out, row.out,
+        name + ' changed the value grammar ("' + row.id + '"): got ' + JSON.stringify(out)
+        + ', recorded ' + JSON.stringify(row.out) + ' (' + row.why + ')');
+      assert.equal(redact(out), out, 'not a fixed point: ' + JSON.stringify(out));
+    }
+    assert.equal(redactSecrets(row.text, []), redactCredentialShapes(row.text),
+      'the two entry points disagree about ' + JSON.stringify(row.text));
+  }
+  // The refused value heads: the credential goes, the reader's own words stay, and the clause the
+  // sweep says is unreachable is NOT what keeps them (the declined branch's shaped-run scan is).
+  const refused = 'authorization: request failed ' + 'tok_' + '9f3a2c7d1e5b';
+  for (const [name, redact] of PATHS) {
+    assert.equal(redact(refused), 'authorization: request failed [redacted]',
+      name + ' moved the refused transport value head');
+  }
 });
 
 test('the closing sweep F32-3: the prose corpus is byte-identical, and the cost rows are recorded', () => {

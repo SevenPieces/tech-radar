@@ -244,6 +244,45 @@ export const FOLD_HELD = [
     out: 'authorization: see the notes' + NEWLINE + ',' + TOKEN,
     why: 'the separator does not fold a line the indentation rule leaves alone' },
 ];
+// Batch 71 (closing sweep F34-2, test integrity). The sweep's own mutation run left the clauses
+// below alive through the whole suite: the whitespace-gap continuation that decides whether the run
+// reaches an atom two gaps in (its '=' and quote marks), and the punctuation the SCHEME lookup
+// strips from the name it reads. Both decide an OUTPUT, not just a leak, so each row below pins the
+// whole output - the row fails for the clause's removal, which is what makes it a mutation kill
+// rather than a leak check. The comma and the semicolon cannot reach the glue class through a bare
+// atom (the atom class excludes both), so the spellings that carry them are the QUOTED ones.
+export const VALUE_GRAMMAR_ROWS = [
+  { id: 'a whitespace gap continues past an attribute atom',
+    text: 'authorization: see usr=1 ' + TOKEN_GAP, out: '[redacted]',
+    why: 'the gap atom carries "=", so the run continues and the credential two atoms in is reached' },
+  { id: 'a whitespace gap continues past a quoted atom',
+    text: 'authorization: see "x" ' + TOKEN_GAP, out: '[redacted]',
+    why: 'the gap atom opens with a quote, which is the reader\'s own mark for an attribute' },
+  { id: 'a whitespace gap continues past an equality mark alone',
+    text: 'authorization: see = ' + TOKEN_GAP, out: '[redacted]',
+    why: 'the atom IS the equality mark; the continuation is decided by the mark, not by a value' },
+  { id: 'a scheme word glued to a colon',
+    text: 'authorization: Basic: rotation is scheduled', out: '[redacted]',
+    why: 'the glue strip reads "Basic:" as the listed scheme word "Basic"' },
+  { id: 'a scheme word glued to a hyphen',
+    text: 'authorization: Basic- rotation is scheduled', out: '[redacted]',
+    why: 'a real surface writes the scheme name with a separator glued to it' },
+  { id: 'a scheme word glued to a full stop',
+    text: 'authorization: Basic. rotation is scheduled', out: '[redacted]',
+    why: 'same clause, the third punctuation the atom class can carry' },
+  { id: 'a scheme word glued to an exclamation mark',
+    text: 'authorization: Basic! rotation is scheduled', out: '[redacted]',
+    why: 'same clause, the fourth punctuation the atom class can carry' },
+  { id: 'a QUOTED scheme word glued to a comma',
+    text: 'authorization: "Basic," rotation is scheduled', out: '[redacted]',
+    why: 'a comma never reaches a BARE atom (the atom class excludes it), so the quoted name is the spelling that carries one' },
+  { id: 'a single-quoted scheme word glued to a semicolon',
+    text: "authorization: 'Basic;' rotation is scheduled", out: '[redacted]',
+    why: 'the same for the semicolon, the other separator the glue class strips' },
+  { id: 'a quoted scheme word glued to a colon',
+    text: 'authorization: "Basic:" rotation is scheduled', out: '[redacted]',
+    why: 'the quoted spelling of the glue case the bare colon row already carries' },
+];
 export const PROSE_TAILS = [
   'rotation is scheduled for next week',
   'rotation is documented in the runbook',
