@@ -956,10 +956,12 @@ const CAPTURE_CEILING_CODES = new Set(['ENOBUFS', 'ERR_CHILD_PROCESS_STDIO_MAXBU
 // removals and restored at the end of the pass, so every later pass leaves it whole while a value
 // is still removed from the source, the request and every other byte of the line.
 //
-// The placeholder is the pass's OWN sentinel, and that is the whole of the hardening. The first
-// design of this mechanism used a private-use character of its own, and every failure measured
-// against that design came from the same shape -- an internal character standing in the scanned
-// text, which any rule can read and any collected value can spell:
+// There are TWO internal characters and they are not the same one. The removal SENTINEL is U+FFFF
+// (REDACTION_SENTINEL above); the scaffold PLACEHOLDER is the private-use mask U+E000
+// (SCAFFOLD_MASK below, and SCAFFOLD_PLACEHOLDER is that mask). The first design of this mechanism
+// used a third, its own private-use mark for the placeholder, and every failure measured against
+// that design came from the same shape -- an internal character standing in the scanned text, which
+// any rule can read and any collected value can spell:
 //   - the authorization rule's '[^\s,;"']+' class matched the placeholder, so a source whose path
 //     ends in 'authorization' supplied the keyword, the ': ' seam supplied the colon, and the
 //     placeholder was consumed by the authorization rule -- the span was never restored and the
@@ -971,16 +973,21 @@ const CAPTURE_CEILING_CODES = new Set(['ENOBUFS', 'ERR_CHILD_PROCESS_STDIO_MAXBU
 //     the status and cause became ordinary removal targets AND the placeholder itself was
 //     published into the pool and the rendered artifact.
 //
-// None of the three is possible against the sentinel: withoutSentinel has already replaced every
-// \uFFFF in the input TEXT and in every value of the removal set before this call runs, so the
-// text this function scans carries none, no value in the set can carry one, and every sentinel in
-// the scanned text is one THIS function wrote. A rule cannot read it (no rule spells \uFFFF, and
-// its classes are built out of the text's own letters), a collected value cannot spell it (it is
-// normalised to a space before it reaches the set), and the restore is the only producer and the
-// only consumer, so no placeholder can reach published text. The private-use character is not
-// merely unused -- it cannot occur in the scanned text either: maskStripped normalises it out of
-// both the text and the values before anything else runs, so an input that carries it can neither
-// disable the protection (there is no early return left to reach) nor publish it.
+// None of the three is possible now, and each is closed by name:
+//   - a rule cannot consume the placeholder. The authorization rule's class could match it, so that
+//     rule now refuses any match whose token is the placeholder: the placeholder is written by this
+//     function and normalised out of every input and every value, so the only text that carries one
+//     is a span this function wrote, and a match over it is the notice's own diagnosis (Batch 49,
+//     verification F28-3);
+//   - a collected value cannot spell it. withoutSentinel normalises BOTH internal characters out of
+//     every value before it reaches the removal set, and a value that is empty, or that is only
+//     whitespace once normalised, is not collected at all -- so the one-character ' ' that matched
+//     every placeholder (and every standalone space) is gone (Batch 47, verification F28-1);
+//   - an input that carries either character can neither disable the protection nor publish it.
+//     withoutSentinel replaces both in the input TEXT before protectScaffold writes a single
+//     placeholder, so every placeholder in the scanned text is one this function wrote, there is no
+//     early return left for an input to reach, and the restore is the placeholder's only producer
+//     and its only consumer, so no placeholder can reach published text.
 //
 // The placeholder is inserted at the position of the span, so the replacement is 1:1 in positions
 // (not in length) and the pass still neither lengthens the text nor loses a boundary it depends
@@ -1004,7 +1011,9 @@ const SCAFFOLD_MASK_RE = /\uE000/g;
 // scaffold stood, which always has whitespace or punctuation around it, so a space keeps the word
 // boundaries a reader would have seen. This is a belt beside the sentinel braces -- the sentinel is
 // already unmatchable -- and it is what makes the input's own copy of the character inert and
-// unpublishable rather than a switch that turns the protection off.
+// unpublishable rather than a switch that turns the protection off. It is called on both the text
+// and the values beside withoutSentinel, which now normalises the mask as well, so the two together
+// leave neither internal character anywhere in the pass.
 function maskStripped(value) {
   const text = String(value ?? '');
   return text.includes(SCAFFOLD_MASK) ? text.replace(SCAFFOLD_MASK_RE, ' ') : text;
