@@ -109,8 +109,13 @@ test('sweep F28-4 a URL-shaped header value gives up its userinfo credential', (
   assert.equal(redactSecrets('authorization: token1 token2', []),
     redactCredentialShapes('authorization: token1 token2'),
     'the two entry points disagree about a bare value');
-  assert.equal(redactSecrets('authorization: tok_9f3a2c7d1e5b token2', []), '[redacted] token2',
-    'the second token of an unrecognised value is no longer preserved');
+  // Batch 67 corrected this expectation. It pinned the NARROW half of the reading ("the second token
+  // of an unrecognised value survives"), and that half is false under the whole-value rule: a line
+  // that names a credential header gives the WHOLE value, so the bare word after the credential goes
+  // with it. Before: '[redacted] token2'  After: '[redacted]'. The rule, not the expectation, is
+  // what changed; the credential still goes, which is the property this assertion exists for.
+  assert.equal(redactSecrets('authorization: tok_9f3a2c7d1e5b token2', []), '[redacted]',
+    'the whole value of a credential header was not consumed');
 });
 
 // Closing sweep F29-3 (Med, pre-existing): the shape's token class excluded both quote characters,
@@ -265,14 +270,28 @@ test('sweep F30-3b the refusal reads the value from the header\'s own colon', ()
   // target that carries a port or a colon in its query was consumed while the read was the match's
   // last colon. Read from the header's own colon it is refused, like every other URL with no
   // userinfo in it.
+  //
+  // Batch 67 corrected this expectation. The refusal is still the right reading of the value --
+  // 'request failed' and a URL with no userinfo are the assembly's own seam, and the label ending in
+  // 'authorization' must keep its diagnosis -- but the refusals are the READER's, not the rule's:
+  // the whole value is consumed by the rule now, and a refused value only stays readable when it is
+  // the seam. A VALUE that spells a URL and nothing else is a credential header whose value is a
+  // URL, so it goes. Before: the URL rows were returned byte for byte. After: '[redacted]'. The two
+  // rows that carry the assembly's own seam (beside a status or a transport cause) are asserted
+  // unchanged in tests/authorization-value-extent.test.mjs and tests/scaffold-mask-regression.test.mjs.
   for (const text of [
     'authorization: "https://a.example:8443/x"',
     'authorization: "https://a.example/x?t=1:2"',
     'authorization: https://a.example/x?t=1:2',
   ]) {
-    assert.equal(redactSecrets(text, []), text,
-      'the assembly\'s own seam URL was consumed: ' + JSON.stringify(redactSecrets(text, [])));
+    assert.equal(redactSecrets(text, []), '[redacted]',
+      'a URL-valued credential header was not consumed: ' + JSON.stringify(redactSecrets(text, [])));
   }
+  // The refusal itself still holds: a value beginning 'request failed' keeps its text, and the
+  // credential-shaped token standing in it does not go with the refusal (closing sweep F33-5).
+  assert.equal(redactSecrets('rss https://a.example/authorization: request failed for x', []),
+    'rss https://a.example/authorization: request failed for x',
+    'the transport seam was consumed');
 });
 
 // The three residues Batch 56 recorded and left standing (its own comment said they were asserted
@@ -390,7 +409,6 @@ const SWEEP_PROSE = [
   'authorization: "see the notes"',
   'authorization: a failure with no message',
   'authorization: token1 token2',
-  'authorization: see https://a.example/v2 for the details',
   'the basic setup is documented',
   'Basic authentication is used',
   'the release said "the architecture is documented" in the notes',
@@ -402,12 +420,18 @@ const SWEEP_PROSE = [
 // because a value that NAMES a scheme stops at the first run of bare words. This row is NOT in the
 // byte-identical list above - it is a credential header and its token goes - but the prose half is
 // the property the one reading must keep, on both entry points.
-test('F31 the prose after a scheme\'s token survives, on both entry points', () => {
+test('F31 a scheme\'s whole value goes, on both entry points (Batch 67 corrected the tail)', () => {
   const text = 'Authorization: Basic abcdefgh and then prose';
-  assert.equal(redactSecrets(text, []), '[redacted] and then prose',
-    'the prose after a scheme\'s token was consumed: ' + JSON.stringify(redactSecrets(text, [])));
+  // Batch 67 corrected this expectation. It pinned "the prose after a scheme's token survives", and
+  // that is false under the whole-value rule the closing sweep's F33-1 forced: the tail was reachable
+  // only because the reader stopped at the first atom that was not part of its idea of a header
+  // value, and every stop is a credential that publishes. Before: '[redacted] and then prose'
+  // After: '[redacted]'. The design cost is the tail of a sentence that literally spells a header
+  // name; it is recorded in docs/hardening-2026-10-15/ and named in the implementation's comment.
+  assert.equal(redactSecrets(text, []), '[redacted]',
+    'the whole value of a scheme-headed header was not consumed: ' + JSON.stringify(redactSecrets(text, [])));
   assert.equal(redactCredentialShapes(text), redactSecrets(text, []),
-    'the two entry points disagree about the prose after a scheme\'s token');
+    'the two entry points disagree about a scheme-headed value');
 });
 
 test('F31 ordinary prose is byte-identical through both entry points', () => {
@@ -417,6 +441,15 @@ test('F31 ordinary prose is byte-identical through both entry points', () => {
     assert.equal(redactCredentialShapes(text), text,
       'the credential-free path reaped ordinary prose: ' + JSON.stringify(redactCredentialShapes(text)));
   }
+  // Batch 67 moved this row out of SWEEP_PROSE: it was byte-identical under the head reading because
+  // the reader stopped at 'for', and the whole-value rule consumes the line, so the row is now a
+  // RECORDED COST rather than a prose pin. Before (kept byte for byte):
+  //   'authorization: see https://a.example/v2 for the details'
+  // After (the value is consumed, the URL run inside it is credential-shaped and is replaced):
+  //   'authorization: see [redacted] for the details'
+  const cost = 'authorization: see https://a.example/v2 for the details';
+  assert.equal(redactSecrets(cost, []), 'authorization: see [redacted] for the details',
+    'the recorded cost of a URL inside a consumed value moved: ' + JSON.stringify(redactSecrets(cost, [])));
 });
 // ---------------------------------------------------------------------------------------
 // Closing sweep F31-4's neighbour rows (the Batch 61 record left the keyword-reading surface

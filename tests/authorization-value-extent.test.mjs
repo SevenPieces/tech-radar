@@ -9,11 +9,16 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
-import { redactCredentialShapes, redactSecrets } from '../scripts/lib/net.mjs';
+// The module under test. The default is the shipped one; the closing sweep's mutation check
+// (docs/hardening-2026-10-15/scratch-round67-impl/) points it at a mutated copy, because the only
+// way to prove a corpus can catch a change is to make the change and read the verdict.
+const NET_MODULE = process.env.TECH_RADAR_NET_MODULE ?? '../scripts/lib/net.mjs';
+const { redactCredentialShapes, redactSecrets } = await import(NET_MODULE);
 import { assembleNotice } from '../scripts/collect.mjs';
 import { SKILL_ROOT, shippedFiles } from './lib/shipped-files.mjs';
 import {
   CREDENTIAL_SHAPES, KEYWORDS, PROSE_COST, PROSE_KEPT, PROSE_TAILS, SCHEME_WORDS,
+  TAIL_CREDENTIAL_HELD, TAIL_CREDENTIAL_SHAPES,
 } from './lib/authorization-corpus.mjs';
 
 // The two entry points whose agreement is the property Batch 61 introduced: the credential-free
@@ -48,6 +53,46 @@ test('the closing sweep F32-1 and F32-2: every credential shape goes, on both en
     'the credential corpus changed size: ' + rows);
 });
 
+// Batch 67 (closing sweep F33-1, F33-2, F33-4; test integrity). The corpus above puts every
+// credential in the value's first atom or one gap in, so a reader that decides from the value's HEAD
+// catches it and a reader that reads the whole value is indistinguishable from one that reads the
+// head: the mutation that removes the head acceptance passes the whole suite (the sweep's F33-4).
+// These rows put the credential at the tail of a longer value -- the position the batch's own leak
+// used -- and put a non-credential-shaped tail behind a credential-shaped head, so the test fails
+// for a re-widening AND for a re-narrowing.
+test('Batch 67: a credential at the tail of a value goes whole, on both entry points', () => {
+  let rows = 0;
+  const leaked = [];
+  for (const shape of TAIL_CREDENTIAL_SHAPES) {
+    const text = 'authorization: ' + shape.text.slice('authorization: '.length);
+    rows += 1;
+    for (const [name, redact] of PATHS) {
+      const out = redact(text);
+      for (const secret of shape.gone) {
+        if (out.includes(secret)) leaked.push(name + ' | ' + shape.id + ' | ' + JSON.stringify(out));
+      }
+      assert.equal(redact(out), out,
+        'the tail rewrite is not a fixed point on ' + JSON.stringify(text) + ' -> ' + JSON.stringify(out));
+    }
+    assert.equal(redactSecrets(text, []), redactCredentialShapes(text),
+      'the two entry points disagree about ' + JSON.stringify(text));
+  }
+  assert.deepEqual(leaked, [], 'a tail credential was published');
+  assert.equal(rows, TAIL_CREDENTIAL_SHAPES.length, 'the tail corpus changed size: ' + rows);
+  // The recorded residual, measured here rather than left implicit: a value with no credential-shaped
+  // run anywhere -- an all-alphabetic token, no digit -- is not a credential by the module's own
+  // shape definition, so it stays readable. Before and after Batch 67 it is the same text; the row
+  // is pinned so a change is deliberate.
+  for (const row of TAIL_CREDENTIAL_HELD) {
+    const text = 'authorization: ' + row.text.slice('authorization: '.length);
+    for (const [name, redact] of PATHS) {
+      assert.equal(redact(text), text,
+        name + ' reaped a token the shape rule does not call a credential (' + row.why + '): '
+        + JSON.stringify(redact(text)));
+    }
+  }
+});
+
 test('the closing sweep F32-3: the prose corpus is byte-identical, and the cost rows are recorded', () => {
   for (const text of PROSE_KEPT) {
     for (const [name, redact] of PATHS) {
@@ -66,16 +111,21 @@ test('the closing sweep F32-3: the prose corpus is byte-identical, and the cost 
   }
 });
 
-test('the closing sweep F32-3: a scheme word gives up the token after it and no later word', () => {
+// Batch 67 corrected this test's expectation. It pinned the tail of a scheme-word sentence surviving
+// ('[redacted] <tail without its first word>'), which was true while the reader stopped at the first
+// atom its grammar did not carry. The whole-value rule consumes the line, so before
+// 'authorization: basic rotation is scheduled for next week' -> '[redacted] is scheduled for next
+// week' and after it is '[redacted]'. The family is still measured over every scheme word and tail;
+// what moved is the cost, and it is now the whole value.
+test('the closing sweep F32-3: a scheme word gives up the whole value, and the family is still measured', () => {
   let rows = 0;
   for (const scheme of SCHEME_WORDS) {
     for (const tail of PROSE_TAILS) {
       const text = 'authorization: ' + scheme + ' ' + tail;
-      const rest = tail.split(' ').slice(1).join(' ');
       rows += 1;
       for (const [name, redact] of PATHS) {
         const out = redact(text);
-        assert.equal(out, '[redacted] ' + rest,
+        assert.equal(out, '[redacted]',
           name + ' changed what the scheme-word family costs: ' + JSON.stringify(text) + ' -> ' + JSON.stringify(out));
         assert.equal(redact(out), out, 'not a fixed point: ' + JSON.stringify(out));
       }

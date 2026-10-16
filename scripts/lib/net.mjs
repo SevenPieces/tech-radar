@@ -261,61 +261,55 @@ function consumeCredentialShapedTokens(text) {
   });
 }
 // THE ONE READING OF A CREDENTIAL HEADER'S VALUE (Batch 61; sweep F31-1, F31-2, F31-3, F31-5;
-// closing sweep F32-1, F32-2, F32-3). One matcher, one acceptance and one reading, shared by
-// redactSecrets and redactCredentialShapes. The two used to drift because the acceptance lived in
-// an OPTION of this rule ('credentialShapedOnly'), which only one of the two paths passed.
+// closing sweep F32-1, F32-2, F32-3; Batch 67, closing sweep F33-1, F33-2, F33-5). One matcher, one
+// reading and one set of refusals, shared by redactSecrets and redactCredentialShapes. The two used
+// to drift because the acceptance lived in an OPTION of this rule ('credentialShapedOnly'), which
+// only one of the two paths passed.
 //
-// The value is a run of ATOMS (see AUTH_ATOM above). It begins with the first atom after the
-// header's separator, and the run continues with
-//   - the token the scheme introduces, when the first atom NAMES a recognised scheme
-//     ('Basic "dXNl..."', 'Bearer tok_...', 'OAuth oauth_consumer_key="..."'),
-//   - every atom standing directly against the previous one ('username="u"' is the bare token
-//     'username=' and the quoted value 'u' with nothing between them) or behind the attribute
-//     list's own separator, which is ',' AND ';' (AUTH_SEPARATED_ATOM above; the SigV4 leak), and
-//   - an atom behind a gap of WHITESPACE ALONE, when that atom is part of the value's own grammar
-//     (authorizationAtomContinuesValue below). This is the closing sweep's F32-1(b) and F32-2: a
-//     second credential-shaped token ('tok_... SECRETTOKEN123'), the attributes of a list written
-//     without commas ('Digest username="u" response="..."') and a list wrapped across a line all
-//     stand one space (or one comma) from the atom before them, and a reader that stopped at the
-//     gap published them.
-// A whitespace-separated run of BARE prose words is NOT part of the value, which is what keeps
-// 'authorization: required for this feed' and 'Authorization: Basic abcdefgh and then prose'
-// readable - the second is pinned by the suite, where the scheme's own token is consumed and the
-// prose after it is not.
+// THE WHOLE VALUE (Batch 67). A line that names a credential header is a credential header whatever
+// its value spells, so the value is everything after the header's separator TO THE END OF ITS LINE,
+// the wrapped continuation beside it included, and it is consumed WHOLE. The shape test below is
+// still computed, and it decides one thing only: whether the value is a credential header at all.
+// It no longer decides where a header's value ENDS.
 //
-// ACCEPTANCE, and it is the same on both paths. A value is a credential header when its HEAD
-// carries a credential:
-//   - its first atom NAMES a recognised scheme, whatever the value then spells. No shape gate may
-//     veto a scheme's token: that veto was the F31-1 drift, where the gate read the attribute NAME
-//     standing after the scheme -- 'username=', 'oauth_consumer_key=' -- so the whole match was
-//     abandoned and the credential inside the attribute list was published byte for byte; or
-//   - the first atom is itself credential-shaped; or
-//   - the atom the reader crosses one whitespace gap to reach is credential-shaped, after a first
-//     atom that names a scheme the list does not carry ('Custom tok_...', 'SSWS 00abc...',
-//     'DPoP eyJ...', 'x-api-key 9f3a...', and the glued spellings 'Basic:', 'Basic-', 'Basic.',
-//     which authSchemeWord reads as the names they are). That is the older disjunct Batch 61
-//     dropped, and F32-1(a) is the leak it left: the token after such a word was read only when the
-//     word itself was listed, so the credential one space later was published on both paths.
-// A value whose head carries neither a scheme name nor a credential-shaped atom is PROSE and is
-// left byte for byte: 'authorization: required for this feed', 'authorization: read-only',
-// 'authorization: "see the notes" for details' and 'authorization: token1 token2' all keep their
-// bytes. The cost of the rule is measured beside it (the closing sweep's F32-3): a value whose head
-// carries a credential-shaped atom -- a version number, a host with a port, a cache directive -- is
-// consumed whatever the words around it say, and a value that NAMES one of the short scheme words
-// ('token', 'key') gives up the token after it. What the rule NO LONGER does is let an atom
-// anywhere in a long run decide for the whole run, which is how Batch 61's gate reaped
-// 'authorization: "see the notes" for details see v24.18.0' whole.
+// Why the older reading could not hold. Every round before this one tried to find the end of a
+// credential by the value's own shape -- a scheme name, a credential-shaped atom, a gap, a comma --
+// and every round the guess was reached past:
+//   - Batch 65 read the HEAD and one whitespace gap, so a credential two or more atoms into a
+//     prose-headed value was published on both entry points of the shipped KEYLESS default, which is
+//     the whole point of the rule ('INFO auth=ok authorization: see Also <credential> status=200');
+//   - an attribute list wrapped across a line by whitespace alone published every later attribute,
+//     because the whitespace run stops at the line terminator;
+//   - the refusals below published a credential standing in the value they declined.
+// So the end of the value is a LINE, not a guess. The continuation the reader still follows is the
+// surface's own fold (see authorizationValueLineEndsAt): a next line that begins with whitespace and
+// then the attribute list's separator or another attribute's atom, and that does not open with
+// another header keyword. Everything on the value's line is the value.
 //
-// THE BOUND THIS LEAVES, recorded correctly. A value whose head carries no credential-shaped atom
-// and no scheme name is published, so an all-alphabetic value ('authorization: abcdefghijklmnop',
-// 'authorization: "abcdefghijklmnop"', 'Bearer abcdefghijklmnop') is not a credential header by
-// this module's own shape definition (no digit anywhere). Batch 61's shared acceptance widened that
-// bound: three of the five header spellings now publish on the CREDENTIALED path as well, and only
-// the two quoted-Bearer spellings ('authorization: Bearer abcdefghijklmnop' and
-// 'authorization: "Bearer abcdefghijklmnop"') are removed by both paths. The earlier record
-// described this residual as keyless-only; that description was stale from Batch 61 on, and this
-// paragraph is the correction. It is a bound rather than a defect: the shape is this module's own
-// definition of not-credential-shaped, and the cost was stated when one acceptance was shared.
+// What a value that is NOT a credential header gives up: the credential-shaped runs inside it are
+// still consumed (consumeCredentialShapedTokens below), so a credential behind a refused seam does
+// not go out with the refusal (F33-5), while ordinary words and an HTTP status stay readable.
+//
+// THE PRICE, measured and stated rather than hidden. Because the value is the line, a sentence that
+// literally spells a header name loses its tail: 'Authorization: Basic abcdefgh and then prose'
+// becomes '[redacted]', 'authorization: token rotation is scheduled' becomes '[redacted]', and
+// 'authorization: see https://a.example/v2 for the details' becomes
+// 'authorization: see [redacted] for the details'. Three rows that the older reading kept byte for
+// byte (the closing sweep's 24-row prose corpus, the suite's pinned scheme-word family, and the
+// F28-4/F30-3b URL-valued rows) are false under this rule and were corrected in the suite, each
+// with its before/after recorded in the test file itself. That is the design trade-off the operator
+// owns: a rule that cannot tell a credential from prose cannot both consume the credential and keep
+// the prose, and the leak is the failure that reaches the published pool;
+//
+// THE BOUNDS THIS LEAVES, recorded correctly:
+//   - an all-alphabetic value ('authorization: abcdefghijklmnop', 'Bearer abcdefghijklmnop') carries
+//     no credential-shaped run anywhere, so nothing in it is consumed: the module's own definition
+//     of a secret needs a digit. Batch 61's shared acceptance widened this from keyless-only to both
+//     paths, and that correction still stands;
+//   - a keyword preceded by '/' is not a header (the notice seam's own defence), so
+//     'see https://a.example/authorization: <credential>' still publishes the credential on both
+//     paths (closing sweep F33-5, its narrow residual). Removing the lookbehind would cost the
+//     assembly's own diagnosis, which is the run's only one.
 function authorizationAtomIsShaped(atom) {
   return credentialShapedToken(atom) || credentialShapedToken(stripSurroundingQuotes(atom));
 }
@@ -341,12 +335,60 @@ function authorizationAtomContinuesValue(atom) {
   if (/^(?:\/\/|https?:\/\/)/i.test(stripSurroundingQuotes(atom))) return !authorizationValueRefused(atom);
   return authorizationAtomIsShaped(atom);
 }
+// Whether a HEADER KEYWORD of this module starts at the given position. Used to decide whether a
+// line the value reader is looking at is the value's own continuation or the next field of a
+// structured text: a line that opens with another credential header names a header of its own and
+// is never swallowed as the previous value's tail.
+function authorizationKeywordStartsAt(source, at) {
+  if (at >= source.length) return false;
+  for (const re of AUTHORIZATION_KEYWORDS) {
+    re.lastIndex = at;
+    const m = re.exec(source);
+    if (m !== null && m.index === at) return true;
+  }
+  return false;
+}
+// How a header VALUE's run ends. A header value is one line (see AUTH_WHITESPACE_RUN), so the run
+// ends at the line terminator, EXCEPT for the one continuation a real surface writes: the wrapped
+// value. A wrapped continuation line is recognised by the surface's own fold -- the line carries
+// leading whitespace, and what follows that whitespace is the attribute list's separator (',' or
+// ';', the spelling RFC 7230's fold and the corpus both use) or the first atom of another attribute
+// ('username=...', '"u"'). A line that opens with another header keyword is a field of its own and
+// never a continuation, and a line of ordinary prose is never one either.
+function authorizationValueLineEndsAt(source, end) {
+  const terminator = /\r\n|\n|\r/.exec(source.slice(end));
+  if (terminator === null) return source.length;
+  let lineEnd = end + terminator.index;
+  for (;;) {
+    const nextLine = lineEnd + terminator[0].length;
+    const fold = /^[\t \u00a0]+/, foldMatch = fold.exec(source.slice(nextLine));
+    if (foldMatch === null) break;
+    const afterFold = nextLine + foldMatch[0].length;
+    if (authorizationKeywordStartsAt(source, afterFold)) break;
+    const first = AUTH_ATOM_AT.exec(source.slice(afterFold));
+    if (first === null) break;
+    const continues = /^[,;]/.test(source.slice(afterFold))
+      || first[0].includes('=') || /^["']/.test(first[0]);
+    if (!continues) break;
+    lineEnd = authorizationValueLineEndsAt(source, afterFold);
+    break;
+  }
+  return lineEnd;
+}
+// THE VALUE OF A CREDENTIAL HEADER IS READ WHOLE (Batch 67; the closing sweep's F33-1, F33-2,
+// F33-3, F33-5). Everything after the header's separator to the end of its line -- the wrapped
+// continuation beside it included -- is the value, whatever the value spells and whatever atom
+// stands at which position. The shape test below is kept for the ONE thing it still decides: what
+// a value that is NOT a credential header gives up. Every earlier reading tried to find where a
+// credential ends by the value's own shape, and every round found a spelling that reached past the
+// guess: the atom one gap in, arithmetic on commas, a wrap, a refusal. A line that names a
+// credential header is a credential header, so the guess is gone from the consuming path and the
+// only thing left to guess about is a line the module declines to call a header at all.
 function readAuthorizationValue(source, at) {
   const first = AUTH_ATOM_AT.exec(source.slice(at));
   if (first === null) return null;
   let end = at + first[0].length;
   const hasScheme = AUTH_SCHEMES.has(authSchemeWord(first[0]));
-  // The acceptance, decided on the value's head: see the block above this function.
   let accepted = hasScheme || authorizationAtomIsShaped(first[0]);
   if (hasScheme) {
     const token = NEXT_AUTH_TOKEN.exec(source.slice(end));
@@ -355,9 +397,6 @@ function readAuthorizationValue(source, at) {
       if (authorizationAtomIsShaped(token[1])) accepted = true;
     }
   }
-  // The continuation of the run. An atom standing directly against the one before it and an atom
-  // behind the attribute list's separator always continue it; a gap of whitespace alone continues
-  // it only when the atom beyond the gap is part of the value's grammar.
   for (;;) {
     const separated = AUTH_SEPARATED_ATOM.exec(source.slice(end));
     if (separated !== null) {
@@ -379,7 +418,7 @@ function readAuthorizationValue(source, at) {
     end = nextAt + next[0].length;
     if (authorizationAtomIsShaped(next[0])) accepted = true;
   }
-  return { end, accepted };
+  return { end: authorizationValueLineEndsAt(source, end), accepted };
 }
 
 function redactAuthorizationShapes(text) {
@@ -425,15 +464,32 @@ function redactAuthorizationShapes(text) {
       at = value.end;
       continue;
     }
-    // The two refusals read the text after the header's own colon WHOLE, not the matched token: the
-    // transport seam is the two-word phrase 'request failed', and a refusal that saw only its first
-    // word consumed that word and left '[redacted] failed for ...' where the notice's own wording
-    // belongs.
-    if (authorizationValueRefused(source.slice(valueAt))) continue;
-    // The acceptance stated above this function, applied identically by both entry points.
-    if (!value.accepted) continue;
-    out += source.slice(at, match.index) + REDACTION_SENTINEL;
-    at = value.end;
+    // THE WHOLE VALUE (Batch 67). A line that names a credential header is a credential header, so
+    // everything the reader took -- to the end of the line, wrapped continuation included -- goes,
+    // whatever it spells and wherever the credential stands in it. This is the branch every earlier
+    // round tried to narrow, and the narrowing is what moved the leak from one atom position to the
+    // next (closing sweep F33-1: 'authorization: <prose> <prose> <credential>' published the
+    // credential on both entry points of the shipped keyless default).
+    if (value.accepted) {
+      out += source.slice(at, match.index) + REDACTION_SENTINEL;
+      at = value.end;
+      continue;
+    }
+    // A value the module declines to call a credential header -- the refused URL seam, the transport
+    // seam, ordinary prose -- stays readable, and the two readings of the refusals are honoured
+    // there: the text after the header's own colon is what the refusal reads and it is left where it
+    // stands, because a source label ending in 'authorization' is followed by the assembly's own
+    // ': ' and the shaper's diagnosis ('HTTP 503 for ...', 'request failed for ...'), which is the
+    // run's only diagnosis. What is NOT left readable is a credential-shaped token standing in that
+    // value: a credential behind a refused value went out with the refusal on both entry points
+    // (closing sweep F33-5), and the scanner is the module's own shape test, so ordinary words and
+    // an HTTP status stay byte for byte.
+    const kept = consumeCredentialShapedTokens(source.slice(match.index, value.end));
+    if (kept !== source.slice(match.index, value.end)) {
+      out += source.slice(at, match.index) + kept;
+      at = value.end;
+      continue;
+    }
   }
   return out + source.slice(at);
 }
