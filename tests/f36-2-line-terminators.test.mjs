@@ -16,6 +16,10 @@
 // list's own separator may cross. The property asserted here is the one the finding names -- the three
 // characters answer exactly as LF does, on every shape the reader has -- rather than a set of
 // hand-written outputs that would drift from LF's.
+// The row below (F37-1, Batch 86) is the shape that sentence was missing: the KEYWORD's own bridging
+// whitespace was still JavaScript's '\s', which does not contain U+0085, so a value position that IS
+// a NEL published the credential where LF removed it. It is pinned at both bridge positions -- the
+// value position itself, and the scheme token's gap -- and against LF's own answer.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { redactCredentialShapes, redactSecrets } from '../scripts/lib/net.mjs';
@@ -65,6 +69,47 @@ test('F36-2: every shape the reader has answers for LS, PS and NEL exactly as it
         name + ' is not read as the line end LF is, on shape ' + JSON.stringify(shape('<SEP>')));
       assert.equal(asLf(redactCredentialShapes(shape(separator)), separator), want,
         'the two entry points disagree about ' + name);
+    }
+  }
+});
+
+test('F37-1: a value position that IS the terminator answers exactly as LF does, at both bridge positions', () => {
+  // The value position IS the terminator: the header name is followed by the line end itself, with no
+  // inline space between them. Batch 85 gave the value's run and the token class one boundary, but the
+  // KEYWORD's trailing whitespace and the scheme token's gap were still JavaScript's '\s', which is
+  // every character of AUTH_INLINE_SPACE plus LS and PS -- and NOT U+0085. A NEL therefore stood where
+  // neither the keyword nor the token class could read it, readAuthorizationValue returned null, and
+  // the null branch published the match and the credential: measured at c8beb59 on both entry points,
+  // 'authorization:' + U+0085 + CRED came back byte for byte while LF, CR, LS and PS removed it, and
+  // 'authorization: Basic' + U+0085 + CRED published the scheme's token. The bridge the keyword reads
+  // is now AUTH_BRIDGE_SPACE -- AUTH_INLINE_SPACE plus the same five terminators -- so the two
+  // positions below are indistinguishable from LF's. This is the row Batch 85's file was missing: its
+  // sentence was broader than the shapes it built, and the suite stayed green while it was false.
+  const shapes = [
+    // (1) the value position itself is the terminator,
+    (s) => 'authorization:' + s + CRED,
+    (s) => 'authorization: ' + s + CRED,
+    // (2) the scheme's own token stands behind it (the NEXT_AUTH_TOKEN gap),
+    (s) => 'authorization: Basic' + s + CRED,
+    (s) => 'authorization: Bearer ' + s + CRED,
+    // (3) every name spelling and a non-ASCII colon, so the bridge is not read by the value reader's
+    //     widened separator alone.
+    (s) => 'HTTP_AUTHORIZATION:' + s + CRED,
+    (s) => 'authorisation:' + s + CRED,
+  ];
+  const asLf = (text, separator) => text.split(separator).join(LF);
+  for (const shape of shapes) {
+    const want = redactSecrets(shape(LF), []);
+    // The row is only load-bearing if LF's own answer removes the credential: an equality against LF
+    // would pass vacuously if LF published it too. (LF's answer is not always bare '[redacted]' --
+    // 'authorization: Bearer ' + LF + CRED keeps its keyword and loses the scheme with its value, the
+    // F32-1 reading -- so the property asserted is that the credential is gone, not a fixed shape.)
+    assert.ok(!want.includes(CRED), 'LF is not the removal on ' + JSON.stringify(shape('<SEP>')) + ': ' + JSON.stringify(want));
+    for (const [name, separator] of [['CR', CR], ['CRLF', CRLF]].concat(SEPARATORS)) {
+      assert.equal(asLf(redactSecrets(shape(separator), []), separator), want,
+        name + ' at the value position is not read as the line end LF is: ' + JSON.stringify(redactSecrets(shape(separator), [])));
+      assert.equal(asLf(redactCredentialShapes(shape(separator)), separator), want,
+        'the two entry points disagree about ' + name + ' at the value position');
     }
   }
 });

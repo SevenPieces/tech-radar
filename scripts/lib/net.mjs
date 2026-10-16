@@ -89,6 +89,10 @@ const AUTH_SCHEMES = new Set([
 // tail after the NEL was deleted, not redacted (measured: 'authorization: tok_...' + NEL + 'the run
 // covered 43 domains and merged 0 items' came back as '[redacted]' alone). A token cannot span a line
 // end, and every other line end already stops this class, so U+0085 is excluded here beside them.
+// The reader's other half is the bridge the keyword and the scheme token read (AUTH_BRIDGE_SPACE
+// above): excluding U+0085 here while the keyword's trailing '\s*' still answered \s is what left the
+// value position neither consumed nor startable, so readAuthorizationValue answered null on a
+// character this class refuses -- and the null branch publishes the match (F37-1, Batch 86).
 const AUTH_TOKEN_CHARS = '[^\\s,;"\'\u0085]+';
 function credentialShapedToken(token) {
   return token.length >= MIN_SECRET_CHARS
@@ -235,7 +239,23 @@ const AUTH_NAME = keywordName('authorization');
 const AUTH_NAME_BRITISH = keywordName('authorisation');
 const AUTH_NAME_UNDERSCORED = keywordName('authori')
   + '(?:' + nameCharacter('s') + '|' + nameCharacter('z') + ')' + keywordName('ation');
-const AUTHORIZATION_KEYWORD = new RegExp('(?<![\\w\\/])(?:proxy-)?' + AUTH_NAME + '["\']?\\s*' + AUTH_COLON + '\\s*', 'gi');
+// THE TWO SETS THE BRIDGE IS BUILT FROM are declared HERE, above every matcher that reads them
+// (Batch 86; final verification F37-1), so the header keyword's bridging whitespace and the scheme
+// token's own gap are built from the SAME set the value reader's line ends come from. Their full
+// statements stand with the value reader's helpers below. The bridge adds nothing to either set: it
+// is the inline space PLUS the five line terminators, which is every character JavaScript's \s
+// matches except U+0085 -- the one line end the keyword's trailing \s* and NEXT_AUTH_TOKEN's \s+
+// could not read. With U+0085 consumed by neither the keyword nor startable by the token class
+// (which excludes it, Batch 85), readAuthorizationValue returned null and the null branch PUBLISHED
+// the match and the credential behind it: 'authorization:' + U+0085 + 'tok_9f3a2c7d1e5b' came
+// back byte for byte at c8beb59 on both entry points, where 35f0761 removed it -- while the LF, CR,
+// LS and PS spellings of the same shape were removed at BOTH revisions.
+const AUTH_INLINE_SPACE = '\t\v\f \u00a0\u1680\u2000-\u200a\u202f\u205f\u3000\ufeff';
+const AUTH_LINE_TERMINATORS = '\\r\\n\\u2028\\u2029\\u0085';
+// The bridge itself: a character class, so a caller writes AUTH_BRIDGE_SPACE + '*' (or '+').
+const AUTH_BRIDGE_SPACE = '[' + AUTH_INLINE_SPACE + AUTH_LINE_TERMINATORS + ']';
+
+const AUTHORIZATION_KEYWORD = new RegExp('(?<![\\w\\/])(?:proxy-)?' + AUTH_NAME + '["\']?' + AUTH_BRIDGE_SPACE + '*' + AUTH_COLON + AUTH_BRIDGE_SPACE + '*', 'gi');
 // Sweep F31-4's neighbour rows: the keyword was that one spelling with a word boundary on each
 // side, so two header NAMES a real surface writes were read by nothing. 'authorisation' is the
 // British spelling of the same header - the colon and the value after it are identical, only the
@@ -247,9 +267,9 @@ const AUTHORIZATION_KEYWORD = new RegExp('(?<![\\w\\/])(?:proxy-)?' + AUTH_NAME 
 // prefix through. The underscore matcher is the one deliberate exception, and it is the shape a
 // dump writes ('HTTP_AUTHORIZATION', 'X_AUTHORIZATION', 'HTTP_X_AUTHORIZATION'); it keeps the same
 // lookbehind for '/', so the notice seam ('.../authorization: HTTP 503') is still refused.
-const AUTHORIZATION_KEYWORD_BRITISH = new RegExp('(?<![\\w\\/])' + AUTH_NAME_BRITISH + '["\']?\\s*' + AUTH_COLON + '\\s*', 'gi');
+const AUTHORIZATION_KEYWORD_BRITISH = new RegExp('(?<![\\w\\/])' + AUTH_NAME_BRITISH + '["\']?' + AUTH_BRIDGE_SPACE + '*' + AUTH_COLON + AUTH_BRIDGE_SPACE + '*', 'gi');
 const AUTHORIZATION_KEYWORD_UNDERSCORED = new RegExp('(?<![\\w.\\/-])(?:[A-Za-z0-9]+_)+(?:proxy-)?'
-  + AUTH_NAME_UNDERSCORED + '["\']?\\s*' + AUTH_COLON + '\\s*', 'gi');
+  + AUTH_NAME_UNDERSCORED + '["\']?' + AUTH_BRIDGE_SPACE + '*' + AUTH_COLON + AUTH_BRIDGE_SPACE + '*', 'gi');
 const AUTHORIZATION_KEYWORDS = [AUTHORIZATION_KEYWORD, AUTHORIZATION_KEYWORD_BRITISH, AUTHORIZATION_KEYWORD_UNDERSCORED];
 // The atoms a header VALUE is built from (see 'readAuthorizationValue' below): a quoted string --
 // double or single, an escaped quote inside it read as one character, or a quote that is never
@@ -306,7 +326,7 @@ function authorizationValueRefused(rest) {
 // "TOKEN9f3a2c7d"'), and it used to be read by nobody -- the token class excluded both quote
 // characters, so the scheme was consumed and the credential inside the quotes was published byte
 // for byte on both paths (sweep F31-3).
-const NEXT_AUTH_TOKEN = new RegExp('^\\s+(' + AUTH_ATOM + ')');
+const NEXT_AUTH_TOKEN = new RegExp('^' + AUTH_BRIDGE_SPACE + '+(' + AUTH_ATOM + ')');
 // THE WHITESPACE A VALUE CARRIES (Batch 76; closing sweep F35-1). Every character JavaScript's
 // \s class matches EXCEPT the four line terminators, which is the class those characters stand in
 // for: a header value is one line, and what separates two atoms on that line, or indents the wrapped
@@ -319,7 +339,8 @@ const NEXT_AUTH_TOKEN = new RegExp('^\\s+(' + AUTH_ATOM + ')');
 // terminators. Batch 85 (closing sweep F36-2) made the value reader agree with that reading -- the
 // value's run ends at AUTH_LINE_TERMINATORS, which is this class's complement among the characters
 // that are either reported as whitespace or as a line end by the ECMAScript and Unicode rules.
-const AUTH_INLINE_SPACE = '\t\v\f \u00a0\u1680\u2000-\u200a\u202f\u205f\u3000\ufeff';
+// (The declaration stands above the header keyword matchers, Batch 86, so the keyword's bridging
+// whitespace and the scheme token's gap are built from this same set.)
 // WHERE A LINE ENDS (Batch 85; closing sweep F36-2, F36-6). One set, used by every matcher whose
 // question is 'the end of this line', so no rule reads a different boundary from another: CR and LF
 // (with CRLF taken as the one terminator it is), and the three characters this module left out --
@@ -333,8 +354,8 @@ const AUTH_INLINE_SPACE = '\t\v\f \u00a0\u1680\u2000-\u200a\u202f\u205f\u3000\uf
 // three characters end a line here exactly as they do everywhere else. The fold's indentation class
 // (FOLD_INDENT) is built from AUTH_INLINE_SPACE and therefore already excludes all five: an indented
 // continuation is indented with whitespace that is NOT a line end, and the boundary the fold stops at
-// is this same set.
-const AUTH_LINE_TERMINATORS = '\\r\\n\\u2028\\u2029\\u0085';
+// is this same set. (The declaration stands above the header keyword matchers, Batch 86, so the
+// bridge the keyword reads is built from the same set.)
 // The attribute list's own separator: a continuation atom behind a comma OR A SEMICOLON. The ';'
 // is the F31-2 leak: the standard SigV4 order is 'Credential=..., SignedHeaders=host;x-amz-date,
 // Signature=...', and a tail that stopped at the ';' published the Signature on every path on
@@ -534,7 +555,7 @@ const FOLD_SEPARATOR = /[,;]/;
 // cost seconds (closing sweep F34-7). Each read is sticky and anchored by lastIndex instead, and the
 // leading '^' is dropped for that reason: with the 'y' flag it would match only at index 0.
 const AUTH_ATOM_AT_STICKY = new RegExp(AUTH_ATOM, 'y');
-const NEXT_AUTH_TOKEN_AT = new RegExp('\\s+(' + AUTH_ATOM + ')', 'y');
+const NEXT_AUTH_TOKEN_AT = new RegExp(AUTH_BRIDGE_SPACE + '+(' + AUTH_ATOM + ')', 'y');
 const AUTH_SEPARATED_ATOM_AT = new RegExp('[' + AUTH_INLINE_SPACE + AUTH_LINE_TERMINATORS
   + ']*[,;][' + AUTH_INLINE_SPACE + AUTH_LINE_TERMINATORS + ']*(' + AUTH_ATOM + ')', 'y');
 const AUTH_WHITESPACE_RUN_AT = new RegExp('[' + AUTH_INLINE_SPACE + ']+', 'y');
