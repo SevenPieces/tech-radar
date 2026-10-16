@@ -253,6 +253,17 @@ function authorizationValueRefused(rest) {
 // characters, so the scheme was consumed and the credential inside the quotes was published byte
 // for byte on both paths (sweep F31-3).
 const NEXT_AUTH_TOKEN = new RegExp('^\\s+(' + AUTH_ATOM + ')');
+// THE WHITESPACE A VALUE CARRIES (Batch 76; closing sweep F35-1). Every character JavaScript's
+// \s class matches EXCEPT the four line terminators, which is the class those characters stand in
+// for: a header value is one line, and what separates two atoms on that line, or indents the wrapped
+// continuation the fold adds, is this class and nothing narrower. It used to be '[\t \u00a0]' in
+// the fold and in the value's own whitespace run, so the clause that says the fold's mark is THE
+// INDENTATION was false for eight whitespace characters a surface indents with -- form feed, vertical
+// tab, U+3000 (the CJK indentation character), U+2003, U+202F, U+1680, U+205F and U+FEFF -- and a
+// credential wrapped behind any of them was published on both entry points, identically before and
+// after Batch 69. U+2028 and U+2029 are excluded with the other two line terminators: they ARE line
+// terminators, and the value reader's own line terminator is unchanged by this batch.
+const AUTH_INLINE_SPACE = '\t\v\f \u00a0\u1680\u2000-\u200a\u202f\u205f\u3000\ufeff';
 // The attribute list's own separator: a continuation atom behind a comma OR A SEMICOLON. The ';'
 // is the F31-2 leak: the standard SigV4 order is 'Credential=..., SignedHeaders=host;x-amz-date,
 // Signature=...', and a tail that stopped at the ';' published the Signature on every path on
@@ -263,11 +274,11 @@ const NEXT_AUTH_TOKEN = new RegExp('^\\s+(' + AUTH_ATOM + ')');
 // the earlier revision removed them. The whitespace-ONLY continuation below still stops at a line
 // terminator, because a header value is one line and the notice's own detail is the line after a
 // source label.
-const AUTH_SEPARATED_ATOM = new RegExp('^[\\t \\u00a0\\r\\n]*[,;][\\t \\u00a0\\r\\n]*(' + AUTH_ATOM + ')');
+const AUTH_SEPARATED_ATOM = new RegExp('^[' + AUTH_INLINE_SPACE + '\\r\\n]*[,;][' + AUTH_INLINE_SPACE + '\\r\\n]*(' + AUTH_ATOM + ')');
 // A run of whitespace inside a header value. It never crosses a line terminator: a header value
 // is one line, and the notice's own detail is the line after a source label, so a run that crossed
 // '\n' could consume the module's own diagnosis.
-const AUTH_WHITESPACE_RUN = /^[\t \u00a0]+/;
+const AUTH_WHITESPACE_RUN = new RegExp('^[' + AUTH_INLINE_SPACE + ']+');
 // The scaffold branch below: a match that carries a scaffold span is not a header value to consume
 // whole, and it is not raw text to publish whole either - the two halves of one value have to part
 // company (sweep F30-3). The span is the module's own diagnosis and is kept byte for byte; every
@@ -423,7 +434,7 @@ function authorizationKeywordStartsAt(source, at) {
 // continuation carries, and the atom (or the list separator) the continuation starts with. Each is
 // sticky or lastIndex-based, so the walk never copies the remainder of the text.
 const LINE_TERMINATOR = /\r\n|\n|\r/g;
-const FOLD_INDENT = /[\t \u00a0]+/y;
+const FOLD_INDENT = new RegExp('[' + AUTH_INLINE_SPACE + ']+', 'y');
 const FOLD_SEPARATOR = /[,;]/;
 // The same for the value's own atom run (readAuthorizationValue below): its three reads used to
 // slice the remainder of the text at every atom, which made a long value quadratic and a folded one
@@ -431,8 +442,8 @@ const FOLD_SEPARATOR = /[,;]/;
 // leading '^' is dropped for that reason: with the 'y' flag it would match only at index 0.
 const AUTH_ATOM_AT_STICKY = new RegExp(AUTH_ATOM, 'y');
 const NEXT_AUTH_TOKEN_AT = new RegExp('\\s+(' + AUTH_ATOM + ')', 'y');
-const AUTH_SEPARATED_ATOM_AT = new RegExp('[\\t \\u00a0\\r\\n]*[,;][\\t \\u00a0\\r\\n]*(' + AUTH_ATOM + ')', 'y');
-const AUTH_WHITESPACE_RUN_AT = /[\t \u00a0]+/y;
+const AUTH_SEPARATED_ATOM_AT = new RegExp('[' + AUTH_INLINE_SPACE + '\\r\\n]*[,;][' + AUTH_INLINE_SPACE + '\\r\\n]*(' + AUTH_ATOM + ')', 'y');
+const AUTH_WHITESPACE_RUN_AT = new RegExp('[' + AUTH_INLINE_SPACE + ']+', 'y');
 function authorizationValueLineEndsAt(source, end) {
   // The fold is walked in one loop rather than one recursion per continuation line, and the loop
   // reads the source IN PLACE (a lastIndex-based scan) rather than slicing the remainder at every
