@@ -136,7 +136,7 @@ function windowCapError(raw) {
 // assembled from more parts than these two and a part no caller bounded still crosses the push.
 const NOTICE_SEPARATOR = ': ';
 const NOTICE_SEPARATOR_CHARS = NOTICE_SEPARATOR.length;
-export function noticeSourceRoom(cap) {
+function noticeSourceRoom(cap) {
   return Math.ceil((cap - NOTICE_SEPARATOR_CHARS) / 2);
 }
 function noticeShapedRoom(cap) {
@@ -239,7 +239,7 @@ export function neutraliseNoticeText(text) {
 // bounded after the notice rewriting, and the rewriting is a fixed point, so the source that
 // filling the room produces is returned byte-identical by the push's own pass: no spelling it
 // lengthens can take the room back.
-export function noticeSource(label, name, limit) {
+function noticeSource(label, name, limit) {
   const room = Math.max(0, noticeSourceRoom(requireNoticeLimit(limit)) - String(label).length - 1);
   const text = neutraliseNoticeText(String(name ?? ''));
   return `${label} ${text.length > room ? text.slice(0, room) : text}`;
@@ -274,99 +274,221 @@ function pushNotice(notices, text, secrets, limit) {
 // Whether the detail is one of the shaped errors, which carries the facts its text was built
 // from, rather than a string the caller built. The two shapes are the shaper's own: an HTTP shape
 // has an integer httpStatus, a transport shape has null httpStatus and a cause string.
-export function shapedDetailOf(detail) {
+function shapedDetailOf(detail) {
   if (detail === null || typeof detail !== 'object') return null;
-  if (Number.isInteger(detail.httpStatus)) return detail;
-  if (detail.httpStatus === null && typeof detail.cause === 'string') return detail;
+  // Only the two facts BOTH shipped shapers set identify one: shapeHttpError and
+  // shapeTransportError each set an integer-or-null httpStatus AND a cause string, and the
+  // httpStatus is "HTTP <status>" in the first shape and the fixed cause vocabulary in the second.
+  // Anything else is a caller's own object, and the module may not read it as the shaper's own: a
+  // forged {httpStatus, message} or {httpStatus, cause: 'x'} is not a shaped error, and a Proxy
+  // whose property reads throw is refused rather than thrown out of the assembly (S26-F4).
+  let httpStatus;
+  let cause;
+  try {
+    httpStatus = detail.httpStatus;
+    cause = detail.cause;
+  } catch {
+    return null;
+  }
+  if (typeof cause !== 'string' || cause === '') return null;
+  if (Number.isInteger(httpStatus)) return detail;
+  if (httpStatus === null && Number.isInteger(detail.exitStatus) === false
+    && detail.httpStatus === null) return detail;
   return null;
 }
 
-// A line built inside a budget with the reason first: the detail is kept whole while it fits, and
-// once it does not, the SOURCE gives way -- to nothing, before the detail is touched -- and what
-// is left of the seam is the detail's own tail, whose callers put the transport cause there. The
-// reason lives at the head of the detail ('the response was not JSON (...)'), so the head is what
-// the last resort keeps: a bounded line still says why the source failed, and only the source, or
-// the tail of the reason, is what a cap may take from it.
+// A notice is bounded inside a budget, and the bytes it publishes are always a slice of the
+// whole-line redaction -- never a rebuild from the two separately-redacted parts. Batch 33 bounded
+// the fallback's recomposition of 'head' and 'tail', and a value that spans the ': ' seam (a
+// credential whose prefix ends the source and whose suffix begins the detail) is removed from the
+// whole line and from neither part: the rebuild put it back, and the pool published it. The parts
+// are now only what DECIDES where the cut falls; the bytes come from 'whole'.
+//
+// The cut itself is unchanged from TR-168's design: the reason at the head of the detail is what a
+// cap may never take, the SOURCE gives way to it first, and only a detail longer than the cap is
+// trimmed, from its tail, because the tail is where the transport cause sits and the head is where
+// the reason sits. The documented 'source: detail' shape is preserved with it: the label and the
+// separator are the last thing dropped, never the first, so no notice is published as a bare
+// detail or with a dangling separator (F26-1).
 const NOTICE_SEAM = ' ... ';
-function composeLine(source, detail, cap) {
-  const whole = source + NOTICE_SEPARATOR + detail;
-  if (whole.length <= cap) return whole;
-  if (detail.length <= cap) {
-    if (detail.length + NOTICE_SEPARATOR_CHARS > cap) return detail;
-    const room = Math.max(0, Math.min(noticeSourceRoom(cap), cap - NOTICE_SEPARATOR_CHARS - detail.length));
-    return (source.length > room ? source.slice(0, room) : source) + NOTICE_SEPARATOR + detail;
-  }
-  // The source is dropped whole rather than shaved to a prefix that names no source, and the
-  // detail is bounded around the two things a reader needs: the reason at its head and the cause
-  // at its tail.
-  const keep = cap - NOTICE_SEAM.length;
-  if (keep <= 0) return detail.slice(0, cap);
-  const reason = Math.ceil(keep / 2);
-  return detail.slice(0, reason) + NOTICE_SEAM + detail.slice(detail.length - (keep - reason));
+
+// How many leading characters of 'line' are also the leading characters of 'reference'. The
+// redaction only removes, and every rule that fired inside the seam is a rule the whole-line pass
+// ran too, so the two agree up to the point the whole-line pass started eating and then diverge.
+function sharedPrefixLength(line, reference) {
+  const max = Math.min(line.length, reference.length);
+  let i = 0;
+  while (i < max && line[i] === reference[i]) i += 1;
+  return i;
 }
-export function boundedWhole(whole, cap) {
+
+// The length at which the source gives way: the whole of the source when the whole line fits, or
+// the room the detail leaves it -- charged against the source's own half of the cap (TR-162), so
+// a long target cannot push the detail past the cap -- and never less than the separator itself,
+// because a notice with no separator names no source and the documented shape is 'source: detail'
+// (F26-1). The label inside the source is what 'noticeSource' put there, so it is charged against
+// the source's room and is truncated with it; 'boundedNotice' passes 'labelLength' so the room is
+// sized from the label the notice actually carries. A detail that cannot fit even beside the
+// separator is cut by the caller, which is where the reason at its head is kept.
+function noticeSourceLength(sourceLength, detailLength, cap, floor) {
+  if (sourceLength + NOTICE_SEPARATOR_CHARS + detailLength <= cap) return sourceLength;
+  // The source gives way to the detail's room and never takes more than its own half of what the
+  // cap has after the separator. It does not give way past 'floor', which is the label the notice
+  // has to keep to name a source at all (F26-1): the label is a fixed cost of the documented
+  // 'source: detail' shape and the detail is what is cut to pay for it. A detail longer than
+  // 'cap - 2' therefore reaches the caller's seam branch, which is where the reason at its head is
+  // kept and the tail that carries the transport cause is kept with it.
+  const room = Math.min(
+    noticeSourceRoom(cap),
+    Math.max(floor, cap - NOTICE_SEPARATOR_CHARS - detailLength),
+  );
+  return Math.max(0, Math.min(sourceLength, room));
+}
+
+// The label a source starts with: the notice names its source by it, so it is the room the bound
+// above never takes, and the separating space counts with it because the head the notice carries
+// already ends with one ('rss ' + ': '). An empty source has no label to keep.
+function noticeLabelRoom(name) {
+  const first = String(name ?? '').split(' ')[0];
+  return first.length === 0 ? 0 : first.length;
+}
+
+// The published bytes of a line whose parts compose to it, from those two parts. This is the
+// pre-Batch-33 composition and it is the result only while the whole-line pass agrees with it;
+// 'boundedNotice' checks that before it is used, and every other caller works on 'whole' itself.
+function composeParts(source, detail, cap, floor) {
+  const frontLength = noticeSourceLength(source.length, detail.length, cap, floor);
+  // The cap is the last word: a detail longer than 'cap - 2' cannot fit beside the separator, so
+  // the line is cut at the cap here and 'boundedNotice' takes the seam branch that keeps both the
+  // reason at the detail's head and the cause at its tail.
+  return (source.slice(0, frontLength) + NOTICE_SEPARATOR + detail).slice(0, cap);
+}
+
+// The published bytes of the fallback: 'whole' is the whole-line redaction, so every slice of it
+// is one pass's own output and none of them can carry a value that pass removed. When the parts do
+// not compose to it (a rule read across the separator, or a value that spans it), the parts still
+// say where the cut belongs -- the source's room, and the detail's whole or its tail -- and those
+// positions are applied to 'whole' instead. When they cannot be found in it, the line is bounded
+// on its own: the same positions taken from 'whole' direct.
+function boundedNotice(whole, head, tail, cap, floor) {
   if (whole.length <= cap) return whole;
-  const keep = cap - NOTICE_SEAM.length;
-  if (keep <= 0) return whole.slice(0, cap);
+  // The fallback decides WHERE the cut belongs, and the bytes come from 'whole'. The parts' own
+  // passes are kept only while they agree with the whole-line pass over the region they cover --
+  // a rule that read across the ': ' seam, a value that spans it, or a value the whole line removed
+  // and a part's own pass left standing (a value below the by-value floor that only the whole-line
+  // rule reaches) all break the agreement, and the cut is then taken from 'whole' direct.
+  const partsCompose = whole === head + NOTICE_SEPARATOR + tail
+    && whole.startsWith(head) && whole.endsWith(tail);
+  if (partsCompose) return composeParts(head, tail, cap, floor);
+  const at = whole.lastIndexOf(NOTICE_SEPARATOR);
+  if (at >= 0 && whole.startsWith(head.slice(0, at)) && whole.slice(at, at + NOTICE_SEPARATOR_CHARS) === NOTICE_SEPARATOR) {
+    const source = whole.slice(0, at);
+    const detail = whole.slice(at + NOTICE_SEPARATOR_CHARS);
+    // The label and the separator are the last thing dropped and the detail's room is what is
+    // charged against the cap here: the source is cut to 'cap - 2 - detail.length', never below the
+    // label, so the published line still names its source and still leads with the reason.
+    const line = composeParts(source, detail, cap, floor);
+    if (line.length <= cap) return line;
+  }
+  // A text with no separator at all -- a caller's own phrase, a message with no source -- has no
+  // detail to separate from a source, so there is no separator to keep and the line is bounded
+  // around both of its ends.
+  const keep = Math.max(0, cap - NOTICE_SEAM.length);
+  if (keep <= 0 || cap <= NOTICE_SEAM.length) return whole.slice(0, cap);
   const front = Math.ceil(keep / 2);
   return whole.slice(0, front) + NOTICE_SEAM + whole.slice(whole.length - (keep - front));
 }
-function boundedFallback(whole, detail, head, tail, secrets, cap) {
-  // The shaped error's own facts rebuild its text smaller: the status, the cause and the request
-  // are what the cap may keep, and the rebuild is what reaches this path with the status whole
-  // (the source is dropped, never the detail's prefix). An arbitrary string has no facts to
-  // rebuild from, so the reason at its head is what the bound protects.
-  const shaped = shapedDetailOf(detail);
-  if (shaped !== null) {
-    const repriced = repriceShapedError(shaped, secrets, cap);
-    if (repriced !== shaped) {
-      const priced = neutraliseNoticeText(String(repriced.message ?? ''));
-      // The detail alone is the shortest honest text: it carries the status or the cause, and the
-      // source is the part a cap may drop. It is published without the separator rather than cut.
-      if (priced.length <= cap) return priced;
-      return boundedWhole(priced, cap);
-    }
+
+// Reads the detail's message without trusting the object: a forged shape or a Proxy getter throws
+// here rather than out of the assembly. A caller's plain object is read the same way every other
+// string is, so a detail that is not an Error still publishes what its message says.
+function detailMessageOf(detail) {
+  if (detail === null || typeof detail !== 'object') return String(detail ?? '');
+  try {
+    return String(detail.message ?? '');
+  } catch {
+    return '';
   }
-  return composeLine(head, tail, cap);
 }
+
+// A notice whose detail is empty carries no reason: it is the bare source and separator F26-1
+// forbids, and a caller's object with no readable message is the one way to reach it. The words are
+// the module's own -- no byte of the object is read, so nothing a forged shape carries can reach the
+// notice here -- and the fallback keeps the cap like every other path.
+const NO_DETAIL_REASON = 'a failure with no message';
+function withReason(notice, head, tail, cap) {
+  if (tail !== '') return notice;
+  return (head.slice(0, Math.max(0, cap - NOTICE_SEPARATOR_CHARS - NO_DETAIL_REASON.length))
+    + NOTICE_SEPARATOR + NO_DETAIL_REASON).slice(0, cap);
+}
+
+// Whether 'text' stands in 'line' as one contiguous run. The rebuild below is accepted only while
+// it does, so the assembly can never publish a byte string the whole-line redaction did not
+// produce: 'line' is that redaction, and a contiguous run of it is one of the strings one pass
+// over the whole line returns. The rule reaches across the ': ' seam, so the rebuild is not
+// required to be a prefix -- 'head' may be removed by a rule the parts' own passes never ran.
+function containsSubstring(line, text) {
+  return text.length > 0 && line.indexOf(text) !== -1;
+}
+
+// The shaped detail's own facts rebuild its text smaller than the cap, and the rebuild is the only
+// source of published bytes other than 'whole' itself. It is accepted only when it IS a contiguous
+// run of the whole-line redaction -- the shaper prices the text against the request's own set
+// while the whole line is redacted against the run's union, which is wider, so a rebuild can put
+// back a value the union removed -- and it must fit, carry something, and survive the notice
+// rewriting. Otherwise this returns null and the whole line is what is bounded, which keeps the
+// reason and never publishes a byte the whole-line pass did not produce. The source is dropped for
+// this text, exactly as the pre-Batch-33 assembly dropped it: the status or the cause is what the
+// rebuild exists to keep whole, and the cap may not hold both it and a source.
+function repricedDetailWithin(whole, detail, secrets, cap, labelRoom) {
+  const shaped = shapedDetailOf(detail);
+  if (shaped === null) return null;
+  const repriced = repriceShapedError(shaped, secrets, cap);
+  if (repriced === shaped) return null;
+  let text = '';
+  try {
+    text = String(repriced.message ?? '');
+  } catch {
+    return null;
+  }
+  const priced = neutraliseNoticeText(text);
+  if (priced.length === 0) return null;
+  // The cap is charged to the notice, not to this text: the label and the separator are published
+  // first, so what is left for the detail is 'cap - 2 - label' and the rebuild is bounded to that.
+  // It is bounded at the point the whole line would cut anyway, which for the HTTP shape is inside
+  // the request and after the status prefix, so the status or the cause stays whole.
+  const room = Math.max(0, cap - NOTICE_SEPARATOR_CHARS - labelRoom);
+  const bounded = priced.length <= room ? priced : priced.slice(0, room);
+  if (bounded.length === 0) return null;
+  return containsSubstring(whole, bounded) ? bounded : null;
+}
+
 export function assembleNotice(source, detail, secrets, limit) {
   const cap = requireNoticeLimit(limit);
   const head0 = String(source ?? '');
   // A collector hands either the shaped Error itself (so the rebuild below can run) or its own
   // phrase; the text is the message in the first case and the string in the second -- String(err)
   // would publish Node's 'Error: ' prefix, which is not what the caller wrote.
-  const tail0 = detail !== null && typeof detail === 'object'
-    ? String(detail.message ?? '')
-    : String(detail ?? '');
+  const tail0 = detailMessageOf(detail);
+  // The whole line crosses the run's own redaction and the notice rewriting as ONE text, and it is
+  // the only text the assembly may publish from: a value that spans the ': ' seam, a rule that
+  // reads across it ('authorization: value', an unterminated tag opener reaching the detail's '>')
+  // and the redaction of one part against a value the other part carries are all handled here,
+  // once, in the order a reader of the line would apply them.
   const whole = neutraliseNoticeText(redactSecrets(head0 + NOTICE_SEPARATOR + tail0, secrets));
   const head = neutraliseNoticeText(redactSecrets(head0, secrets));
-  let tail = neutraliseNoticeText(redactSecrets(tail0, secrets));
-  if (whole !== head + NOTICE_SEPARATOR + tail) return boundedFallback(whole, detail, head, tail, secrets, cap);
-  // The redacted detail does not fit beside the source. The detail is where the status and the
-  // cause sit and it is never the part that is cut: a shaped detail is re-built smaller from its
-  // own facts -- every shipped collector hands the shaped Error itself, so the rebuild really runs
-  // here and not only at the transport seam -- and the source gives way to nothing, if that is
-  // what it takes, before the reason at the detail's head is touched. A detail no re-pricing can
-  // shrink is bounded by composeLine, which keeps the reason and the cause.
-  if (tail.length + NOTICE_SEPARATOR_CHARS > cap) {
-    const shaped = shapedDetailOf(detail);
-    if (shaped !== null) {
-      const repriced = repriceShapedError(shaped, secrets, cap);
-      if (repriced !== shaped) {
-        tail = neutraliseNoticeText(String(repriced.message ?? ''));
-        if (tail.length + NOTICE_SEPARATOR_CHARS > cap) return boundedFallback(whole, detail, head, tail, secrets, cap);
-      } else {
-        return boundedFallback(whole, detail, head, tail, secrets, cap);
-      }
-    } else {
-      return boundedFallback(whole, detail, head, tail, secrets, cap);
-    }
+  const tail = neutraliseNoticeText(redactSecrets(tail0, secrets));
+  if (whole.length <= cap) return withReason(whole, head, tail, cap);
+  const labelRoom = Math.min(noticeLabelRoom(head0), cap);
+  const repriced = repricedDetailWithin(whole, detail, secrets, cap, labelRoom);
+  if (repriced !== null) {
+    // The source is cut to the room the re-priced detail leaves, never below its label (F26-1), and
+    // the whole line is the last word: the detail is already a slice of the whole-line redaction, so
+    // the cut can only land inside it and never re-introduce a byte the pass removed.
+    const room = noticeSourceLength(head.length, repriced.length, cap, labelRoom);
+    return (head.slice(0, room) + NOTICE_SEPARATOR + repriced).slice(0, cap);
   }
-  // The detail is the floor: a detail that fits the cap alone is published without the separator
-  // rather than with a two-character overflow, and the source gives way to nothing for it.
-  if (tail.length + NOTICE_SEPARATOR_CHARS > cap) return tail;
-  const room = Math.min(noticeSourceRoom(cap), cap - NOTICE_SEPARATOR_CHARS - tail.length);
-  return (head.length > room ? head.slice(0, room) : head) + NOTICE_SEPARATOR + tail;
+  return boundedNotice(whole, head, tail, cap, labelRoom);
 }
 // The push a notice built as '<source>: <detail>' uses, so the two parts stay apart until the cap
 // is applied. A caller that carries one already-assembled string -- a re-redaction pass, a message
