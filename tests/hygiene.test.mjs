@@ -10,6 +10,7 @@ import { mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSyn
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { spawnSync } from 'node:child_process';
+import { pathToFileURL } from 'node:url';
 import { DEFAULT_UA } from '../scripts/lib/net.mjs';
 import { readSettings } from '../scripts/lib/mdtable.mjs';
 import { SKILL_ROOT, shippedFiles } from './lib/shipped-files.mjs';
@@ -295,4 +296,52 @@ test('.gitignore ignores the lock of a state named without the .json suffix', (t
   }
   assert.equal(ignored, true,
     '.gitignore must cover a lock for any state name, not only the .json spellings');
+});
+
+// Closing sweep F32-5: the walk's two answers disagreed about a TRACKED file whose name merely
+// ends in one of the run-artifact spellings. 'git check-ignore' never reports a tracked path -
+// git does not ignore what it carries - so the repository's answer kept 'kept.tmp' while the
+// fallback dropped it on the '*.tmp' suffix alone, and a file the reader receives went unjudged in
+// exactly the tree where the fallback is the only answer there is. The suffix rule now reads the
+// artifact the lock or temp name GUARDS (the name a run writes, or the artifact standing beside
+// it), so both answers keep this file and the guard judges it - while a run artifact is still
+// dropped, which the CV-4 cases above pin for '.pool.json'.
+test('a tracked file merely named like a run artifact is kept by both answers, and is judged', (t) => {
+  const dir = mkdtempSync(join(tmpdir(), 'tech-radar-lookalike-'));
+  try {
+    mkdirSync(join(dir, 'config'), { recursive: true });
+    writeFileSync(join(dir, '.gitignore'), readFileSync(join(SKILL_ROOT, '.gitignore')));
+    writeFileSync(join(dir, 'config', 'settings.md'), 'a shipped file\n');
+    writeFileSync(join(dir, 'kept.tmp'), 'Task ' + '7 ' + 'ran the probes\n');
+    const made = spawnSync('git', ['-C', dir, 'init', '-q'], { encoding: 'utf8' });
+    if (made.error || made.status !== 0) {
+      t.skip('git is not available, so the repository answer was not exercised');
+      return;
+    }
+    // '.gitignore' ignores the spelling, so the fixture has to force the file in: the case under
+    // test is a file the repository SHIPS whose name the rule would otherwise drop.
+    spawnSync('git', ['-C', dir, 'add', '-A'], { encoding: 'utf8' });
+    spawnSync('git', ['-C', dir, 'add', '-f', 'kept.tmp'], { encoding: 'utf8' });
+    spawnSync('git', ['-C', dir, '-c', 'user.email=a@b', '-c', 'user.name=a', 'commit', '-qm', 'fixture'],
+      { encoding: 'utf8' });
+    assert.equal(gitSaysIgnored('kept.tmp', dir), false,
+      'the fixture file is not tracked, so the case under test was not built');
+    const withGit = shippedFiles(dir);
+    assert.equal(withGit.includes('kept.tmp'), true,
+      "the repository's own answer dropped a file it ships: " + JSON.stringify(withGit));
+    assert.deepEqual(scan(dir, PROCESS, 'names'), ['kept.tmp names a build task number'],
+      'a shipped leak beside a run-artifact name was not judged');
+    // The fallback answer: the same tree with no git on PATH, which is the tree the rule exists
+    // for. The two answers must name the same files.
+    const moduleUrl = pathToFileURL(join(SKILL_ROOT, 'tests', 'lib', 'shipped-files.mjs')).href;
+    const child = spawnSync(process.execPath, ['-e',
+      'import(process.argv[1]).then((m) => process.stdout.write(JSON.stringify(m.shippedFiles(process.argv[2]))))',
+      moduleUrl, dir],
+      { encoding: 'utf8', env: { ...process.env, PATH: '/nonexistent' } });
+    assert.equal(child.status, 0, 'the fallback walk did not run: ' + String(child.stderr).split('\n')[0]);
+    assert.deepEqual(JSON.parse(String(child.stdout)), withGit,
+      'the two answers disagree about a file the repository ships');
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
 });

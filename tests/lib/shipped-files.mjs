@@ -16,12 +16,15 @@
 // judges, or an installed skill breaks its own suite over its own run artifact. It therefore
 // applies the run-artifact half of the same rule itself: the pool, the plan, the items and the
 // research files the run writes under output_dir, the merged state and its siblings, the locks
-// and temp files that guard them, and the OS cruft the repository ignores. The set is stated
+// and temp files that guard them - a lock or a temp file is dropped only when the artifact it
+// guards is one of those names or stands beside it, so a repository that ships a file merely
+// NAMED like one keeps it from both answers (closing sweep F32-5) - and the OS cruft the
+// repository ignores. The set is stated
 // here rather than read from .gitignore because the fallback exists precisely for the tree where
 // git cannot be asked -- the file states the rule for the repository, and this is the rule's
 // machine-artifact half, kept in step with .gitignore by the repository's own suite, which runs
 // with git available and would see any run artifact git keeps but this file drops.
-import { lstatSync, readdirSync, statSync } from 'node:fs';
+import { existsSync, lstatSync, readdirSync, statSync } from 'node:fs';
 import { spawnSync } from 'node:child_process';
 import { dirname, join, relative } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -54,11 +57,33 @@ const RUN_ARTIFACT_NAMES = new Set([
   '.DS_Store', 'Thumbs.db',
 ]);
 const RUN_ARTIFACT_SUFFIXES = ['.lock', '.tmp'];
-function isRunArtifact(rel) {
+const DIGEST_NAME = /^tech-radar-.*\.(md|html)$/;
+// Whether the artifact a lock or a temp name GUARDS is itself a run artifact, which is the rule
+// stated above: .gitignore spells any '*.lock' and any '*.tmp' because a lock names the state it
+// guards, and the guards here judge the shipping set. The name alone was the bound, and it made
+// the walk's two answers disagree: git never ignores a TRACKED file, so a repository that ships a
+// file whose name merely ends in one of these spellings got it from git's answer and lost it from
+// this one (closing sweep F32-5, measured on a tracked 'kept.tmp': git answered
+// ['.gitignore','config/settings.md','kept.tmp'] and the fallback ['.gitignore','config/settings.md']).
+// The artifact is read the two ways this tree can answer for it - the name a run writes, and the
+// artifact standing beside the lock (a state file may be named by --state, so its own name carries
+// no fixed spelling). A '.tmp' with no artifact behind it is left for the guards rather than
+// dropped: scanning one file too many is the safe direction for a publication guard, and skipping
+// a file the reader receives is not.
+function guardsRunArtifact(rel, root) {
+  const base = rel.split('/').pop();
+  const suffix = RUN_ARTIFACT_SUFFIXES.find((s) => base.endsWith(s));
+  if (suffix === undefined) return false;
+  const guarded = base.slice(0, base.length - suffix.length);
+  if (guarded === '') return true;
+  if (RUN_ARTIFACT_NAMES.has(guarded) || DIGEST_NAME.test(guarded)) return true;
+  return existsSync(join(root, rel.slice(0, rel.length - suffix.length)));
+}
+function isRunArtifact(rel, root) {
   const base = rel.split('/').pop();
   if (RUN_ARTIFACT_NAMES.has(base)) return true;
-  if (RUN_ARTIFACT_SUFFIXES.some((suffix) => base.endsWith(suffix))) return true;
-  return /^tech-radar-.*\.(md|html)$/.test(base);
+  if (guardsRunArtifact(rel, root)) return true;
+  return DIGEST_NAME.test(base);
 }
 
 function isWorkingDoc(rel) {
@@ -94,23 +119,24 @@ function entryKind(path) {
   return 'other';
 }
 
-// The prefix of the repository whose root IS this tree, or null when git resolves to
-// something else. 'git -C <dir>' answers from the nearest enclosing work tree, and a tree
-// that is not itself a repository root - an installed skill under another checkout, a
-// frozen git-archive export unpacked inside a repository - is answered by THAT repository:
-// its paths are relative to a different root. Closing sweep F31-10: a frozen export placed
-// inside another repo, where the export's own docs/ is ignored, got an empty answer from
-// check-ignore and the walk returned ZERO paths, so the publication guards scanned nothing
-// and hygiene.test.mjs went on reporting green. '${prefix}rel' is the path a path relative
-// to this tree has in that repository, which is what the walker then matches against.
-function gitTreePrefix(root) {
-  const res = spawnSync('git', ['-C', root, 'rev-parse', '--show-toplevel', '--show-prefix'], {
+// Whether git's own work-tree root IS this tree, so that git's answer is an answer about the
+// publication unit being walked. 'git -C <dir>' answers from the nearest enclosing work tree, and
+// a tree that is not itself a repository root - an installed skill under another checkout, a
+// frozen git-archive export unpacked inside a repository - is answered by THAT repository: its
+// paths are relative to a different root and its ignore rules describe a different unit. Closing
+// sweep F31-10: a frozen export placed inside another repo, where the export's own docs/ is
+// ignored, got an empty answer from check-ignore and the walk returned ZERO paths, so the
+// publication guards scanned nothing and hygiene.test.mjs went on reporting green. Only this
+// answer is used, and at this tree's own root git's paths ARE this tree's paths - measured, git
+// reports an empty prefix there - so the walk compares like with like without mapping a prefix
+// (closing sweep F32-4: the mapping this function used to return was unreachable, because the
+// root equality test is exactly the case where git's prefix is empty).
+function gitAnswersForThisTree(root) {
+  const res = spawnSync('git', ['-C', root, 'rev-parse', '--show-toplevel'], {
     encoding: 'utf8', maxBuffer: 1024 * 1024,
   });
-  if (res.error || res.status !== 0) return null;
-  const [top, prefix = ''] = String(res.stdout ?? '').split('\n');
-  if (!top || comparePaths(top, root) !== 0) return null;
-  return prefix.endsWith('/') || prefix === '' ? prefix : prefix + '/';
+  if (res.error || res.status !== 0) return false;
+  return comparePaths(String(res.stdout ?? '').trim(), root) === 0;
 }
 
 // Two paths are the same directory when they resolve to one, whether or not a trailing
@@ -126,19 +152,16 @@ function comparePaths(a, b) {
 // is not the same as "not ignored": the caller then keeps the stated rule alone.
 function gitIgnored(root, rels) {
   if (rels.length === 0) return new Set();
-  const prefix = gitTreePrefix(root);
-  if (prefix === null) return null;
-  if (rels.length === 0) return new Set();
+  if (!gitAnswersForThisTree(root)) return null;
   const res = spawnSync('git', ['-C', root, 'check-ignore', '-z', '--stdin'], {
     input: rels.join('\0'), encoding: 'utf8', maxBuffer: 64 * 1024 * 1024,
   });
   // Exit 0 lists the ignored paths, exit 1 is git's answer that none of them is ignored.
   // Every other status -- including a spawn that never happened -- leaves no answer.
   if (res.error || (res.status !== 0 && res.status !== 1)) return null;
-  // git's answer is prefixed with this tree's place in the repository it answered from, so
-  // the set is comparable with the walk's own paths; at the repository root the prefix is
-  // empty and the answer is unchanged.
-  return new Set(String(res.stdout ?? '').split('\0').filter(Boolean).map((p) => p.slice(prefix.length)));
+  // This is used only when git's own work-tree root IS this tree, so its paths already are this
+  // tree's paths and no prefix is stripped from the answer.
+  return new Set(String(res.stdout ?? '').split('\0').filter(Boolean));
 }
 
 export function shippedFiles(root = SKILL_ROOT) {
@@ -176,5 +199,5 @@ export function shippedFiles(root = SKILL_ROOT) {
   const ignored = gitIgnored(root, walked);
   return (ignored
     ? walked.filter((rel) => !ignored.has(rel))
-    : walked.filter((rel) => !isRunArtifact(rel))).sort();
+    : walked.filter((rel) => !isRunArtifact(rel, root))).sort();
 }
