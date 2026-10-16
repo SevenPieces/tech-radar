@@ -244,6 +244,11 @@ function decodedBasicToken(text) {
     // was really the first letter of the NEXT credential then decoded to a printable pair and was
     // accepted -- which carried the rest of that credential through (F26-2).
     if (length % 4 === 1) continue;
+    // The run ends in padding ('=' is in the character class), and a base64 token carries at most
+    // two of them, at the end. A run that continues past '==' is a longer run whose tail happens to
+    // be padding: decoding the candidate drops the extra characters and can still produce a
+    // printable pair, so the tail is refused and the loop tries the shorter tokenisation.
+    if (!/^[A-Za-z0-9+/]*={0,2}$/.test(candidate)) continue;
     let decoded = '';
     try { decoded = Buffer.from(candidate, 'base64').toString('utf8'); } catch { continue; }
     // The decoded text has to be a credential pair: printable, and a non-empty user and password
@@ -255,27 +260,31 @@ function decodedBasicToken(text) {
   return null;
 }
 function redactBasicCredentials(text) {
-  // The keyword and its whitespace are copied through and only the decoded credential pair is
-  // replaced, so an unrecognised word is returned exactly as it stood and no later rule sees a
-  // shape it did not have. The scan resumes AFTER the token it removed, so the next 'Basic' -- the
-  // one an unpadded blob was glued to -- is matched on the same sweep, which is what makes
-  // back-to-back blobs removable (F26-2).
+  // Only the TOKEN is replaced, in place: the keyword and its whitespace stay, so a caller that
+  // publishes the line reads exactly what it read before and the rule composes with every other
+  // one. The token is found by trying every tokenisation of the base64 run that follows the
+  // keyword and keeping the longest that decodes to 'user:password' -- the greedy single match this
+  // replaced swallowed the keyword of the NEXT credential whenever two unpadded blobs stood
+  // back-to-back, the decode failed and NOTHING was removed (F26-2). A run of length 1 (mod 4) is
+  // not a token and a candidate that carries padding in its middle is not one either: the decoder
+  // drops the leftovers and can still produce a printable pair, which is how a candidate that was
+  // really the next credential's first letter was accepted.
+  //
+  // 'Basic' is matched as a word of its own: the lookbehind refuses the five letters at the tail of
+  // an unpadded base64 run ('gBasic' is one token), so the second occurrence of an unpadded
+  // back-to-back pair -- preceded by the 'g' of the first blob's decoded token -- is not an
+  // occurrence at all and is copied through untouched. One blob alone, or blobs separated by a
+  // space, are removed normally.
   const source = String(text);
   let out = '';
   let at = 0;
-  // The keyword is a word of its own, never the five letters at the tail of an unpadded base64 run:
-  // 'gBasic' is one token and its 'asic' is not an occurrence, while 'Basic' at the start of the
-  // text or after any non-word character is. A whole-word anchor at the FRONT is not enough --
-  // matching it and then consuming the whitespace let the scan match the tail of a blob and carry
-  // five characters of the next credential through (F26-2) -- so the preceding character is
-  // asserted with a lookbehind and the whitespace is read by hand. Every occurrence is then decided
-  // on its own token, with no cursor state to get wrong.
   const pattern = /(?<![A-Za-z0-9_])Basic/gi;
   for (const match of source.matchAll(pattern)) {
     const after = source.slice(match.index + 'Basic'.length);
     const space = /^\s+/.exec(after);
     if (space === null) continue;
     const tokenStart = match.index + 'Basic'.length + space[0].length;
+    if (tokenStart <= at) continue;
     const token = decodedBasicToken(after.slice(space[0].length));
     if (token === null) continue;
     out += source.slice(at, tokenStart) + REDACTION_SENTINEL;
@@ -573,7 +582,12 @@ export function redactSecrets(text, secrets) {
         out = out.replace(boundedValue(value), REDACTION_SENTINEL);
       }
     }
-    return redactBasicCredentials(out);
+    // The Basic rule is applied twice per removal pass: a chain of back-to-back credential shapes
+    // leaves one sentinel per shape, and a pass that removed a single shape per application would
+    // need one pass per shape -- which is what a long chain of them did, running into the loop's
+    // pass bound without reaching a fixed point. Each application is itself idempotent and only
+    // removes, so applying it twice reaches the same text in half the passes.
+    return redactBasicCredentials(redactBasicCredentials(out));
   };
   for (let pass = 0; pass < 64; pass += 1) {
     const next = applyRemovals(out);
