@@ -86,10 +86,17 @@ function credentialShapedToken(token) {
 // NOT here -- it has to read what follows its own match to know whether the next token is the
 // credential, and a plain replacement would remove the keyword before that decision could be made.
 // It runs as its own rule, 'redactAuthorizationShapes', beside this list.
+// The three are named rather than anonymous because ONE caller applies two of them without the
+// third: the credential-free candidate pass (redactCredentialShapes below) reads the two curated
+// vendor spellings as they stand and bounds the generic Bearer alternative to a credential-shaped
+// value, so an ordinary 'the bearer credential held' is not reaped on that path.
+const SHAPE_BEARER = /\bBearer\s+[^\s,;"']{8,}/gi;
+const SHAPE_CLASSIC_TOKEN = /\bgh[pousr]_[A-Za-z0-9]{6,}\b/g;
+const SHAPE_FINE_GRAINED_PAT = /\bgithub_pat_[A-Za-z0-9_]{20,}\b/g;
 const SECRET_SHAPES = [
-  /\bBearer\s+[^\s,;"']{8,}/gi,
-  /\bgh[pousr]_[A-Za-z0-9]{6,}\b/g,
-  /\bgithub_pat_[A-Za-z0-9_]{20,}\b/g,
+  SHAPE_BEARER,
+  SHAPE_CLASSIC_TOKEN,
+  SHAPE_FINE_GRAINED_PAT,
 ];
 // Two refusals keep a SOURCE's path from being read as a header, and both are about the text after
 // the colon, never about the keyword:
@@ -141,8 +148,21 @@ const SECRET_SHAPES = [
 //     the closed ones, so a value that does close is read as the closed token it is.
 const AUTH_QUOTED_VALUE = '(?:"(?:[^"\\\\]|\\\\.)*"|\'(?:[^\'\\\\]|\\\\.)*\'|"(?:[^"\\\\]|\\\\.)*|\'(?:[^\'\\\\]|\\\\.)*)';
 const AUTH_BARE_VALUE = '[^\\s,;"\']+(?![\\s,;"\']\\s)';
+const AUTH_BARE_VALUE_BOUNDED = '[^\\s,;"\']+';
 const AUTHORIZATION_SHAPE = new RegExp(
   '((?<!\\/)\\b(?:proxy-)?authorization\\s*:\\s*)(' + AUTH_QUOTED_VALUE + '|' + AUTH_BARE_VALUE + ')',
+  'gi',
+);
+// The bounded reading's own pattern (redactCredentialShapes, and the options note below): the same
+// alternation with the bare token read GREEDILY, without the trailing lookahead. That lookahead is
+// what makes the shipped reading backtrack a bare token to its last-but-one character when a
+// separator and a space follow it ('authorization: tok_..., more' -> '[redacted]b, more', measured
+// at a54a744 on the notice path too), which is harmless where it is the only reading but would
+// leave a one-character fragment of a credential on the credential-free candidate path - the path
+// this pattern was added for. The value's own shape is the bound on that path, so the lookahead is
+// not needed there for anything.
+const AUTHORIZATION_SHAPE_BOUNDED = new RegExp(
+  '((?<!\\/)\\b(?:proxy-)?authorization\\s*:\\s*)(' + AUTH_QUOTED_VALUE + '|' + AUTH_BARE_VALUE_BOUNDED + ')',
   'gi',
 );
 
@@ -166,11 +186,17 @@ const AUTHORIZATION_SHAPE = new RegExp(
 // Both are read from the WHOLE run after the colon and not from the matched token: the transport
 // detail is two words, and a refusal that saw only the matched token consumed the word 'request' and
 // left '[redacted] failed for ...' - which is the diagnosis the refusal exists to keep.
+// A value with its surrounding quotes peeled, which is how the refusals read a quoted spelling as
+// the same value as the bare one.
+function stripSurroundingQuotes(value) {
+  const v = String(value ?? '');
+  return v.length >= 2
+    && ((v.startsWith('"') && v.endsWith('"')) || (v.startsWith("'") && v.endsWith("'")))
+    ? v.slice(1, -1) : v;
+}
 function authorizationValueRefused(rest) {
   const raw = String(rest).trim();
-  const value = raw.length >= 2
-    && ((raw.startsWith('"') && raw.endsWith('"')) || (raw.startsWith("'") && raw.endsWith("'")))
-    ? raw.slice(1, -1) : raw;
+  const value = stripSurroundingQuotes(raw);
   // The authority is what stands between the '//' and the first '/' or whitespace, and it is read
   // whole: a userinfo password may contain a '/', so a character-class test that excluded the slash
   // read 'user:s3cr3tp4ss@host/path' as carrying no userinfo and refused a header value the Batch 49
@@ -212,11 +238,26 @@ function consumeCredentialShapedTokens(text) {
     return credentialShapedToken(token) ? REDACTION_SENTINEL : token;
   });
 }
-function redactAuthorizationShapes(text) {
+// The optional second argument is the bounded reading, and it exists for exactly one caller: the
+// credential-free candidate pass (redactCredentialShapes). There the run issued no credential, so
+// there is no value set to remove anything BY VALUE with - the shape rules are the whole of the
+// protection, and they must not reap ordinary pool prose. With 'credentialShapedOnly' the rule
+// consumes a match only when the value it READ is credential-shaped (the module's own definition:
+// a digit-bearing run of at least MIN_SECRET_CHARS characters, not all digits), and otherwise
+// leaves the text byte for byte. So 'authorization: required for this feed', 'authorization:
+// read-only' and 'authorization: "see the notes"' survive on that path, while the sweep's
+// 'authorization: "tok_9f3a2c7d1e5b"', the quoted Bearer value and the AWS SigV4 attribute list
+// still go. The shipped notice path and the credentialed pool path call it with no options and are
+// unchanged.
+function redactAuthorizationShapes(text, options = {}) {
+  const credentialShapedOnly = options.credentialShapedOnly === true;
+  // The bounded reading has its own pattern: the same alternation with the bare token read
+  // greedily (see AUTHORIZATION_SHAPE_BOUNDED). The shipped pattern is untouched.
+  const pattern = credentialShapedOnly ? AUTHORIZATION_SHAPE_BOUNDED : AUTHORIZATION_SHAPE;
   const source = String(text);
   let out = '';
   let at = 0;
-  for (const match of source.matchAll(AUTHORIZATION_SHAPE)) {
+  for (const match of source.matchAll(pattern)) {
     // A match whose value carries the scaffold placeholder is the notice's OWN diagnosis, masked by
     // protectScaffold, and never a header value to consume: the placeholder is written by this module
     // and normalised out of every input and every value, so the only text that can carry one is a
@@ -245,6 +286,10 @@ function redactAuthorizationShapes(text) {
     const consumeSecond = next !== null
       && !next[1].includes(SCAFFOLD_PLACEHOLDER)
       && (AUTH_SCHEMES.has(first.toLowerCase()) || credentialShapedToken(next[1]));
+    // The bounded reading (see the note above this function): a match whose value is not
+    // credential-shaped is not a header value on this path, and is left where it stands.
+    if (credentialShapedOnly
+      && !credentialShapedToken(stripSurroundingQuotes(consumeSecond ? next[1] : first))) continue;
     out += source.slice(at, match.index) + REDACTION_SENTINEL;
     at = consumeSecond ? match.index + match[0].length + next[0].length : match.index + match[0].length;
     if (consumeSecond) {
@@ -967,6 +1012,65 @@ export function redactSecrets(text, secrets) {
   // to the restore, and the restored span -- which carries the module's own 'HTTP 503' -- is the
   // text the marker replacement no longer has a chance to see, while the placeholder the restore
   // was looking for is already a marker.
+  const restored = scaffold.restore === null ? out : scaffold.restore(out);
+  return restored.replace(REDACTION_SENTINEL_RE, REDACTED_MARKER);
+}
+
+// The generic Bearer alternative, bounded to a credential-shaped value. It is not part of
+// SECRET_SHAPES because SECRET_SHAPES runs on the notice path too, and the wider spelling is
+// deliberate there: a notice is the run's only diagnosis and a missed Bearer value is a
+// disclosure, while the candidate fields are the prose the digest is written from. 'Bearer
+// credential held' is prose; 'Bearer abcdefghijklmnopqrstuvwxyz012345' is a value.
+const BEARER_VALUE = /\bBearer\s+([^\s,;"']+)/gi;
+function redactCredentialShapedBearer(text) {
+  return String(text).replace(BEARER_VALUE, (m, token) => (
+    credentialShapedToken(token) ? REDACTION_SENTINEL : m));
+}
+
+// THE SHAPE HALF OF THE REDACTION, ON ITS OWN (superseding normalizeInternalChars as the collector's
+// credential-free candidate pass; sweep F30-1, High). The candidate fields reached redactSecrets
+// only when the run had issued a credential: 'credentialUnion.length === 0' took the pass below
+// straight to normalizeInternalChars, which normalises the two internal characters and runs NO
+// removal rule at all. The shipped keyless run has an empty union by construction (githubHeaders()
+// adds an Authorization header only when GITHUB_TOKEN/GH_TOKEN is set, and no configured target
+// carries a query parameter), so the pool published upstream credential-shaped text byte for byte -
+// a ghp_ token, a fine-grained PAT, a 'Bearer <value>', a quoted authorization header, an AWS SigV4
+// attribute list - while the identical text was '[redacted]' as soon as one credential was
+// configured anywhere in the run. The curated shapes, the authorization rule and the Basic rule
+// exist precisely for the credential classes no curated value set can know, so they run on this
+// path too.
+//
+// What does NOT run here is the BY-VALUE removal, and that is the TR-110 contract rather than an
+// oversight: with an empty set there is nothing to remove by value, and with a set the candidate
+// pass is already the conditional one the collector documents below. What this function also does
+// NOT do is take the shape rules as the notice path takes them:
+//   - the generic Bearer alternative is bounded to a credential-shaped value, because
+//     'The bearer credential held by the gateway' is ordinary advisory prose and this is the pool
+//     the digest is written from;
+//   - the authorization rule is called with 'credentialShapedOnly', so 'authorization: read-only'
+//     and 'authorization: required for this feed' survive and only a credential-shaped value is
+//     consumed.
+// The scaffold protection and the marker reading are the same ones redactSecrets uses, so an
+// 'HTTP 503' span inside the text is kept byte for byte and a marker already in the text is inert.
+// The two internal characters are normalised exactly as before (withoutSentinel inside
+// protectScaffold), which is the half F28-4 closed and this change must not reopen.
+export function redactCredentialShapes(text) {
+  const scaffold = protectScaffold(maskStripped(withoutSentinel(text)));
+  let out = protectMarkers(scaffold.text);
+  const applyShapes = (input) => {
+    let s = input.replace(SHAPE_CLASSIC_TOKEN, REDACTION_SENTINEL)
+      .replace(SHAPE_FINE_GRAINED_PAT, REDACTION_SENTINEL);
+    s = redactCredentialShapedBearer(s);
+    s = redactAuthorizationShapes(s, { credentialShapedOnly: true });
+    // The Basic rule is applied twice per pass for the reason the notice path states: a chain of
+    // back-to-back credential shapes reaches the same text in half the passes.
+    return redactBasicCredentials(redactBasicCredentials(s));
+  };
+  for (let pass = 0; pass < 64; pass += 1) {
+    const next = applyShapes(out);
+    if (next === out) break;
+    out = next;
+  }
   const restored = scaffold.restore === null ? out : scaffold.restore(out);
   return restored.replace(REDACTION_SENTINEL_RE, REDACTED_MARKER);
 }

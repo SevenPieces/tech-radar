@@ -16,7 +16,7 @@ import {
   fetchText, hostOf, isDiscoveryOnly, splitItems, field, atomLink, plainText, redactUrl,
   neutraliseMarkers, neutraliseLinkSeams, noticePreservingRewrites, neutraliseUrl, redactSecrets,
   requestSecrets, requestSecretSets, neutraliseTagSpans, neutraliseEntityTags, repriceShapedError,
-  normalizeInternalChars, NOTICE_SEPARATOR, NO_DETAIL_REASON,
+  redactCredentialShapes, NOTICE_SEPARATOR, NO_DETAIL_REASON,
 } from './lib/net.mjs';
 
 // The collector must work from any working directory, so the default configuration
@@ -1723,12 +1723,27 @@ export async function collectAll(config, opts) {
   // character lower-case credential; the measurement is in net.mjs). The per-source pass above stays
   // as it is, and a token-named value is still removed from every notice, because it stays in the
   // notice set - only the candidate set was ever the question here.
+  //
+  // F30-1 (the credential-free path, High, first measured by the closing sweep): an empty union
+  // took this pass straight to normalizeInternalChars, which normalises the two internal characters
+  // and runs NO removal rule at all - so the pool of a run that issued no credential published
+  // upstream credential-shaped text byte for byte (a ghp_ token, a fine-grained PAT, a 'Bearer
+  // <value>', a quoted authorization header, an AWS SigV4 attribute list), while the identical text
+  // was '[redacted]' as soon as one credential was configured anywhere in the run. The keyless run
+  // is the shipped default: githubHeaders() adds an Authorization header only when GITHUB_TOKEN or
+  // GH_TOKEN is set, and no configured target carries a query parameter. An empty union means there
+  // is nothing to remove BY VALUE; it does not mean there is no credential to remove BY SHAPE, and
+  // the curated shapes, the authorization rule and the Basic rule exist precisely for the classes a
+  // curated value set cannot know. The empty-union branch therefore crosses the SHAPE half of the
+  // redaction now (net.mjs redactCredentialShapes), which keeps the internal-character
+  // normalisation F28-4 closed and removes by shape; the non-empty branch is redactSecrets with the
+  // credential positions, exactly as before.
   const redactedCandidates = candidates.map((candidate) => {
     const out = { ...candidate };
     for (const [field, value] of Object.entries(out)) {
       if (typeof value !== 'string') continue;
       out[field] = credentialUnion.length === 0
-        ? normalizeInternalChars(value)
+        ? redactCredentialShapes(value)
         : redactSecrets(value, credentialUnion);
     }
     return out;
