@@ -212,14 +212,22 @@ changes. A pass may not invent: a field without a fetched source stays empty and
 Dedupe across passes by story key; resolve contradictions by showing both (see `reference/evidence.md`); rank
 within the budget; select a featured deep dive only when the week warrants one — the criterion is in **The
 evidence bar**; enforce the per-domain ceilings and the total budget from `config/settings.md`. **The total
-budget is the constraint the allocation has to satisfy: a digest must meet `total_min_items` however many core
-domains came back quiet.** The per-domain ceilings are ceilings and never targets, so when quiet domains thin the
-total, take more from the domains that do have material — up to `core_max_items` each and `watch_notable_max`
-across the watch domains — until the digest clears the floor; only then does the ceiling bind. An allocation of
-two or three items per core, in particular, is a normal week only while the core domains are mostly productive:
-with seven of the fourteen core domains quiet it yields fewer than thirty items and the gate fails the run, while
-four per core on the same pool passes. If the floor cannot be reached even at the ceilings, the pool is the
-problem, not the allocation: say so in the Coverage note and re-collect. Write
+budget is the constraint the allocation has to satisfy: a digest must meet its run's completeness floor however
+many core domains came back quiet.** The floor is `total_min_items` scaled to the share of the catalogue the run
+covers — `ceil(total_min_items × covered domains ÷ catalogue domains)`, clamped to between one and
+`total_min_items`, and for a multi-domain run also at least one item per covered domain plus one (the rule and
+its message are stated in full under **The completeness floor scales to the run's scope** below). On the shipped
+settings and catalogue (`total_min_items 30`, 43 domains) an unscoped whole-catalogue run must reach **thirty**,
+a `--domain`-scoped run covering fourteen of those domains must reach **fifteen** (ceil(30 × 14 ÷ 43)), and a
+single-domain run must reach **one** — so the same 29-item digest passes the floor on a fourteen-domain run and
+fails it on a whole-catalogue one. The per-domain ceilings are ceilings and never targets, so when quiet domains
+thin the total, take more from the domains that do have material — up to `core_max_items` each and
+`watch_notable_max` across the watch domains — until the digest clears the floor; only then does the ceiling
+bind. An allocation of two or three items per core, in particular, is a normal week only while the core domains
+are mostly productive: on an unscoped run with seven of the fourteen core domains quiet it yields fewer than
+thirty items and the gate fails the run, while four per core on the same pool passes. If the floor cannot be
+reached even at the ceilings, the pool is the problem, not the allocation: say so in the Coverage note and
+re-collect. Write
 `tech-radar-YYYY-MM-DD.md` strictly in the grammar of `reference/output-contract.md` — every item either on one
 line or on a headline line followed by indented continuation lines, with the headline and em dash on the item
 line; a dated citation, exactly one provenance marker, exactly one of `#new` or `#followup`, a quiet core domain
@@ -376,9 +384,11 @@ One line each, written against the failures the skill exists to prevent:
   quiet; every watch domain that produced nothing is named on the quiet line, and the gate checks both.
 - **An item count that is a function of how the model felt.** The ceilings and the total budget come from
   `config/settings.md`, and the gate fails a run that leaves the budget.
-- **An allocation that meets `core_max_items` per domain but misses the floor.** On a week when several core
-  domains are quiet, two or three items per productive core leaves the digest under `total_min_items` and the gate
-  fails it: the floor is what the allocation has to satisfy, so take more from the domains that have material.
+- **An allocation that meets `core_max_items` per domain but misses the run's completeness floor.** On a week
+  when several core domains are quiet, two or three items per productive core leaves an unscoped digest under
+  `total_min_items` and the gate fails it: the floor — thirty on the whole catalogue, or the scope-scaled share
+  of it on a `--domain`-scoped run (fifteen for fourteen of the forty-three domains) — is what the allocation
+  has to satisfy, so take more from the domains that have material.
 - **Five weeks of silence turned into a five-week digest with no cap and no accounting.** The plan computes and
   caps the window, and the Coverage note states what the cap skipped.
 - **A format invented or negotiated with the reader** because no standing format existed. `reference/output-contract.md`
