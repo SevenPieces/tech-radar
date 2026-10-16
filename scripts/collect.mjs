@@ -625,7 +625,7 @@ function skippedListingPhrase(n) {
 // listing whose answer filled the page may hold more than the page carried, and the run reads only
 // that page, so without a word the truncated listing reads exactly like a complete one.
 function listingPagePhrase(cap) {
-  return `listing page filled at ${cap} repositories; entries past the first page were not requested`;
+  return `listing page filled at ${cap} repositor${cap === 1 ? 'y' : 'ies'}; entries past the first page were not requested`;
 }
 // The page size GitHub actually enforces. Its per_page parameter is clamped at this ceiling
 // without an error -- a request for 500 is answered with a 100-entry page and status 200 -- so a
@@ -943,7 +943,7 @@ export async function collectArxiv(rows, ctx) {
       // A capped listing is not a complete one: the window cannot be enforced for this
       // source past the cap, so the run says so instead of looking complete.
       if (entries.length >= cap) {
-        pushNoticeParts(notices, noticeSource('arxiv', row.target, limit), `listing capped at ${cap} entries; older items inside the window may be missing`, union, limit);
+        pushNoticeParts(notices, noticeSource('arxiv', row.target, limit), `listing capped at ${cap} ${cap === 1 ? 'entry' : 'entries'}; older items inside the window may be missing`, union, limit);
       }
       for (const entry of entries) {
         const link = atomLink(entry);
