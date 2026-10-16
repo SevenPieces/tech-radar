@@ -153,15 +153,28 @@ const SECRET_SHAPES = [
 //     that begins 'request failed' is refused below. The last-resort alternatives are therefore after
 //     the closed ones, so a value that does close is read as the closed token it is.
 // The separator a header NAME is joined to its value by, in every spelling a surface writes it:
-// the ASCII colon, the fullwidth colon (U+FF1A -- the same character in a fullwidth form), the
-// small colon (U+FE55) and the ratio (U+2236), the two spellings a typographic surface writes in
-// its place, and the three entity spellings an undecoded surface hands over ('&#58;', '&#x3A;',
-// '&colon;'). The last three were read by nothing, so a credential behind one was published byte
-// for byte on both entry points (closing verification F32-2); the two typographic characters were
-// read by nothing either, and measured, a credential behind U+FE55 or U+2236 reached the PUBLISHED
-// POOL of the shipped keyless collectors, not the module surface alone (closing sweep F34-5). One
-// matcher reads them all, so the value that follows is read exactly as it is behind the ASCII colon.
-const AUTH_COLON = '(?:[:\uFF1A\uFE55\u2236]|&#0*58;|&#[xX]0*3[aA];|&colon;)';
+// the ASCII colon; the fullwidth colon (U+FF1A -- the same character in a fullwidth form), the
+// small colon (U+FE55) and the ratio (U+2236); the six further colon-shaped separators a
+// typographic surface writes in its place -- the vertical U+FE13, the modifier letter U+A789, the
+// triangular U+02D0, the two-dot U+205A, the Armenian full stop U+0589 and the Ethiopic wordspace
+// U+1361 (closing sweep F35-6); and the entity spellings an undecoded surface hands over, '&#58;',
+// '&#x3A;' and '&colon;'. The entity spellings were read by nothing, so a credential behind one was
+// published byte for byte on both entry points (closing verification F32-2); the two typographic
+// characters Batch 72 added were read by nothing either, and measured, a credential behind U+FE55
+// or U+2236 reached the PUBLISHED POOL of the shipped keyless collectors, not the module surface
+// alone (closing sweep F34-5). One matcher reads them all, so the value that follows is read
+// exactly as it is behind the ASCII colon.
+//
+// THE NUMERIC REFERENCE NEEDS NO SEMICOLON (Batch 81; closing sweep F35-6). HTML resolves '&#58'
+// -- a numeric character reference whose semicolon is missing is a parse error the spec still
+// resolves -- so an undecoded surface can hand over a colon spelled that way and every reader of
+// the text except this one sees the separator. The semicolon is optional here now, for the decimal
+// and the hexadecimal spelling alike, and the digit guard keeps the class exact: a reference that
+// continues into another character ('&#580;' is U+0244, '&#x3A0;' is U+03A0) is NOT this
+// separator and is not read as one. The NAMED reference without its semicolon ('&colon') is still
+// not read, and deliberately: HTML resolves no named reference without a semicolon unless it is in
+// its legacy list, and 'colon' is not. Pinned in the suite as a bound.
+const AUTH_COLON = '(?:[:\uFF1A\uFE55\u2236\uFE13\uA789\u02D0\u205A\u0589\u1361]|&#0*58(?![0-9]);?|&#[xX]0*3[aA](?![0-9a-fA-F]);?|&colon;)';
 // The NAME's own letters, in the two spellings a surface can hand over: the letter itself, or the
 // character reference that spells it (decimal or hexadecimal, either case, any number of leading
 // zeros). Closing sweep F34-5: 'authoriz&#97;tion:' was read by nothing, because every matcher
