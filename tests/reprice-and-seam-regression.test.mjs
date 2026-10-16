@@ -15,6 +15,12 @@
 // F27-7 / G2-4: an entity-encoded link seam ('&#93;&#40;(') survived the notice rewriting byte for
 // byte while the literal form did not, so upstream text could draw a live anchor in the published
 // Coverage note. The encoded closer is ended with a space, exactly as the literal rule ends ']('.
+//
+// Batch 48 correction, stated here because the first closure was FALSE: the spelling the first rule
+// read ('&#93;&#40;(' with a literal '(' after an entity) is not the spelling the defect has. What
+// leaked -- and what this file now pins -- is both halves written as references, including the
+// semicolon-less numeric form a browser decodes and the named form '&rbrack;&lpar;(' (verification
+// F28-2, sweep F28-3).
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { redactSecrets, repriceShapedError, shapeTransportError } from '../scripts/lib/net.mjs';
@@ -85,13 +91,34 @@ test('F27-6 a short value ending in a separator is removed where it stands as a 
     'a value inside a longer word was reaped');
 });
 
+// The spellings that actually leak, and the reason this list is longer than the first one: the
+// Batch 45 rule read an entity for ')' or '(' followed by a LITERAL '(' -- '&#93;&#40;(' and
+// '&#41;(' -- which is not the defect. The defect is both halves written as references, and the
+// semicolon-less numeric reference is the same link to a browser (the HTML Standard's
+// 'missing-semicolon-after-character-reference'). The list below carries those spellings, and the
+// assertion beside it is the family-wide one: after the rewrite no closing spelling stands
+// immediately before an opening spelling, whatever form each takes.
+const ENCODED_TIGHT = /(?:&#0*(?:93|41|40);?|&#x0*(?:5d|29|28);?|&(?:rbrack|rsqb|rpar|lpar);)(?=\(|&#0*40;?|&#x0*28;?|&lpar;)/i;
+
 test('F27-7 / G2-4 an entity-encoded link seam is ended like the literal one', () => {
-  for (const seam of ['&#93;&#40;(url)', '&#41;(url)', '&#x29;(url)', 'text &#41;(url)']) {
+  for (const seam of [
+    '&#93;&#40;(url)', '&#41;(url)', '&#x29;(url)', 'text &#41;(url)',
+    // The spellings the first rule missed.
+    '&#91;a&#93;&#40;url&#41', '&#x5B;a&#x5D;&#x28;(url)', '&rbrack;&lpar;(url)',
+    '&#91;a&#93;&#40(url)', '&lsqb;a&rsqb;&lpar;url&rpar;',
+  ]) {
     const rewritten = neutraliseNoticeText(seam);
     assert.doesNotMatch(rewritten, /(?:&#0*4[01];|&#x0*2[89];)\(/,
       'the encoded seam survived a notice: ' + JSON.stringify(rewritten));
+    assert.doesNotMatch(rewritten, ENCODED_TIGHT,
+      'an entity-encoded seam survived a notice: ' + JSON.stringify(rewritten));
     assert.equal(neutraliseNoticeText(rewritten), rewritten,
       'the encoded-seam rewrite is not a fixed point: ' + JSON.stringify(rewritten));
+  }
+  // A longer reference that merely starts with one of these digits is not a seam and is untouched.
+  for (const untouched of ['&#401;', '&#93;&#401;', '&#x281;', '&rbracket;', 'a &#91;remark&#93; (here)']) {
+    assert.equal(neutraliseNoticeText(untouched), untouched,
+      'a reference that is not a seam was rewritten: ' + JSON.stringify(untouched));
   }
   // Ordinary punctuation and the text around the seam are untouched.
   assert.equal(neutraliseNoticeText('a normal (remark) here'), 'a normal (remark) here');
@@ -99,4 +126,14 @@ test('F27-7 / G2-4 an entity-encoded link seam is ended like the literal one', (
     'an entity with no link grammar after it was rewritten');
   const notice = assembleNotice('nvd', 'see &#91;click here&#93;&#40;(https://evil.example/pwn) for details', [], 1000);
   assert.doesNotMatch(notice, /&#0*41;\(/, 'the published notice still draws a link: ' + JSON.stringify(notice));
+  // The spellings the sweep measured published unchanged at b2a7dc9.
+  for (const leaked of [
+    'see &#91;click here&#93;&#40;https://evil.example/pwn&#41; for details',
+    'see &#x5B;click here&#x5D;&#x28;https://evil.example/pwn&#x29; for details',
+    'see &rbrack;&lpar;https://evil.example/pwn&rpar; for details',
+  ]) {
+    const published = assembleNotice('nvd', leaked, [], 1000);
+    assert.doesNotMatch(published, ENCODED_TIGHT,
+      'the published notice still draws a link: ' + JSON.stringify(published));
+  }
 });

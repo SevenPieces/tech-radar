@@ -1401,10 +1401,43 @@ const LINK_SEAM = /\]\(/g;
 // not tags: '&#91;click here&#93;&#40;https://evil.example/pwn&#41;' is byte-identical to a live
 // link in every Markdown reader, and it was measured published unchanged in a notice (G2-4 / F27-7).
 // One space between the closer and the parenthesis ends the link grammar while the text stays
-// legible, exactly as the literal rule does. Only the two reference forms an entity's ')' can take
-// are read -- a decimal or a hex reference after '&' or ';' -- so ordinary prose that merely spells
-// '&#40;' with no link in front of it still loses nothing but the grammar it never had.
-const ENCODED_LINK_SEAM = /(&#0*41;|&#x0*29;|&#0*40;|&#x0*28;)(?=\()/gi;
+// legible, exactly as the literal rule does. The spellings READ are the ones a parser actually
+// decodes, which the Batch 45 rule did not: it required a literal '(' after an entity for ')' or
+// '(', so it fired on '&#93;&#40;(' -- a spelling the defect never had -- while the leaking
+// '&#91;a&#93;&#40;url&#41' (both halves as semicolon-less references), '&#x5B;a&#x5D;&#x28;(url)'
+// and the named '&rbrack;&lpar;(url)' passed through byte for byte. Both halves are read now, in
+// every form an entity can take, and ordinary prose that merely spells '&#40;' with no link in
+// front of it still loses nothing but the grammar it never had.
+// A numeric character reference for one code point, in decimal or in hex, WITH or WITHOUT its
+// terminating semicolon. The semicolon-less form is not a lax spelling: the HTML Standard's
+// 'missing-semicolon-after-character-reference' rule says the parser behaves as if the reference
+// were terminated by ';' (https://html.spec.whatwg.org/multipage/parsing.html#numeric-character-reference-end-state),
+// so '&#x5D;' and '&#x5D' decode to the same ']' in every browser. The semicolon-less alternative is
+// refused only when a digit (decimal) or a hex digit (hex) continues the run, because that run is a
+// longer reference: '&#401;' is one code point and is not '&#40' followed by '1'.
+function entityRef(decimal, hex) {
+  return '(?:&#' + decimal + ';|&#' + decimal + '(?!\\d)'
+    + '|&#x' + hex + ';|&#x' + hex + '(?![0-9a-fA-F]))';
+}
+// The character that can stand immediately before a link's '(' -- a link's ']', and the two legacy
+// spellings this rule has always read. A NAMED reference is decoded only with its ';' (the standard
+// has no semicolon-less legacy form for these), so the named alternatives carry one.
+const ENCODED_SEAM_END = '(?:'
+  + entityRef('0*93', '0*5d') + '|&rbrack;|&rsqb;'
+  + '|' + entityRef('0*41', '0*29') + '|&rpar;'
+  + '|' + entityRef('0*40', '0*28') + '|&lpar;'
+  + ')';
+// What can open a destination: the literal '(' or any spelling of it as a reference.
+const ENCODED_SEAM_START = '(?:\\(|' + entityRef('0*40', '0*28') + '|&lpar;)';
+// The seam is read as '<closing spelling> immediately before <opening spelling>', with the opening
+// half in a LOOKAHEAD rather than consumed. That is what makes one application of this rule a fixed
+// point on a chain: '&#x5B;a&#x5D;&#x28;(url)' is split at BOTH seams by the one pass (after the
+// first match the scan resumes ON the opening reference, whose own lookahead then sees the literal
+// '('). Consuming the opening half instead left '&#93; &#40;(' for the next pass, and the previous
+// design -- an opening reference followed by a literal '(' -- never read the spellings that leak at
+// all (a ']' and a '(' both written as references), which is what the false closure of Batch 45
+// measured (verification F28-2, sweep F28-3).
+const ENCODED_LINK_SEAM = new RegExp('(' + ENCODED_SEAM_END + ')(?=' + ENCODED_SEAM_START + ')', 'gi');
 
 // The vocabulary the renderer trusts, as one step with one contract: upstream text must not
 // draw a badge, a status tag or emphasis on a published card. A candidate field is normalised
@@ -1436,6 +1469,7 @@ export function neutraliseMarkers(text) {
 export function neutraliseLinkSeams(text) {
   return String(text ?? '').replace(LINK_SEAM, '] (').replace(ENCODED_LINK_SEAM, '$1 ');
 }
+
 
 // The rewriting a notice or a candidate crosses, run until its output stops moving. One pass of
 // the rules above is a function, not a fixed point: a rule can hand the next one a shape it did
