@@ -1503,6 +1503,33 @@ function decodedLength(value) {
 // echoed into an RSS title reached the published candidate pool (F26-2). Shortening the candidate
 // one character at a time finds the blob, and an ordinary word still decodes to nothing that carries
 // a colon, so no prose is reaped.
+// THE QUOTED SPELLINGS (Batch 108; scratch-final48-sweep F48-2). The Basic token may stand in
+// quotes, and a surface that ESCAPES or DOUBLES the quote it is embedded in writes the same
+// credential with the quote spelled twice: a JSON-encoded log line echoes
+// 'Basic \"<base64>\"', a CSV- or HTML-style field doubles it ('Basic ""<base64>""'), and the
+// unclosed escaped form ('Basic \"<base64>') is the same spelling with its closing quote absent.
+// The reader's quote used to be only the raw payload's literal first byte, so all three were read
+// by neither view and the WHOLE base64 credential published -- on the candidate field, the notice,
+// the assembly at every accepted cap and the real keyless pool's title and summary. The opening
+// and the closing spelling are returned together, longest first, so the escaped, doubled and bare
+// forms cannot shadow one another; the payload inside is read exactly as the bare quoted spelling
+// reads it. A backslash is a literal byte in publishing text, so prose that shows one before a
+// quote ('the quote is \" here') is only ever read where the rule's own decode test accepts a
+// payload.
+const BASIC_QUOTE_SPELLINGS = [
+  ['\\"', '\\"'],
+  ["\\'", "\\'"],
+  ['""', '""'],
+  ["''", "''"],
+  ['"', '"'],
+  ["'", "'"],
+];
+function basicQuoteSpelling(raw) {
+  for (const [open, close] of BASIC_QUOTE_SPELLINGS) {
+    if (raw.startsWith(open)) return { open, close };
+  }
+  return null;
+}
 function decodedBasicToken(text) {
   // The text starts at the whitespace the 'Basic' keyword requires, and the run of base64
   // characters ends at the first separator: the token is a prefix of it, which is why the loop
@@ -1514,15 +1541,25 @@ function decodedBasicToken(text) {
   // for byte. The quotes are part of the SPAN this function returns, so the caller replaces them
   // with the token and the published line keeps no orphan quote.
   const raw = String(text);
-  const quote = raw.startsWith('"') || raw.startsWith("'") ? raw[0] : '';
+  const spelling = basicQuoteSpelling(raw);
+  const open = spelling === null ? '' : spelling.open;
   // The gap before the run reads the scheme gap -- the bridge plus the invisible class -- not \s
   // (Batch 88; closing sweep F38-1; widened Batch 96, closing sweep F40-1): with 'Basic' + SP + NEL
   // + <base64> the caller's own gap consumes only the inline space, so the NEL stands here -- \s
   // matched nothing and the run was never read, which published the blob -- and with
   // 'Basic' + ZWSP + <base64> the invisible character stood where no rule read it at all.
-  const prefix = SCHEME_GAP_RUN_OPTIONAL.exec(quote === '' ? ' ' + raw : raw.slice(1));
+  //
+  // THE GAP INSIDE THE QUOTES IS PART OF THE TOKEN (Batch 108; scratch-final48-sweep F48-1). The
+  // reader deliberately takes a gap after the opening quote ('Basic " <base64>"'), but the token it
+  // returned carried the quote and the payload and NOT that gap, so the caller's span was short by
+  // the gap. The gap is read here as the difference between the prefix match and its run group and
+  // the span carries it, so the quoted spelling is removed whole and the caller's end is the
+  // source's own end.
+  const rest = spelling === null ? ' ' + raw : raw.slice(open.length);
+  const prefix = SCHEME_GAP_RUN_OPTIONAL.exec(rest);
   if (prefix === null) return null;
   const run = prefix[1];
+  const gap = prefix[0].slice(0, prefix[0].length - run.length);
   for (let length = run.length; length >= 8; length -= 1) {
     const candidate = run.slice(0, length);
     // Base64 never carries exactly one leftover character, so a run of length 1 (mod 4) is not a
@@ -1541,11 +1578,16 @@ function decodedBasicToken(text) {
     // around the colon. 'Basic auth', 'Basic authentication' and every other ordinary word decode
     // to text that carries no colon and are left alone.
     if (!/^[\x20-\x7e]+$/.test(decoded) || !/^[^:=]+:[^:=]+$/.test(decoded)) continue;
-    if (quote === '') return candidate;
+    if (spelling === null) return candidate;
     // A quoted run whose closing quote stands right after the candidate is the CLOSED spelling and
     // its span carries both quotes. The quote can stand at no other position, because the run is the
     // maximal base64 run and a quote is not a base64 character -- so this is the whole closed check.
-    if (raw[1 + length] === quote) return quote + candidate + quote;
+    // The closing spelling is read at the OPENING spelling's own length plus the internal gap
+    // (Batch 108; F48-1): with a gap after the opening quote every index used to be shifted by the
+    // gap and the closed spelling was missed.
+    if (raw.startsWith(spelling.close, open.length + gap.length + length)) {
+      return open + gap + candidate + spelling.close;
+    }
     // THE UNCLOSED QUOTED SPELLING (Batch 107). A quoted spelling whose closing quote is absent was
     // read by NEITHER view: the closed
     // check above refused every candidate and the walk's quoted branch required the quote too, so the
@@ -1556,7 +1598,10 @@ function decodedBasicToken(text) {
     // takes that reading now: the payload after the opening quote is read at the same lengths the
     // closed spelling reads, and the span carries the opening quote and the payload, so no orphan
     // quote is published in its place.
-    return quote + candidate;
+    // The span carries the internal gap too (Batch 108; F48-1): the token is what the caller
+    // replaces and what its end is derived from, so a token that omitted the gap left the payload
+    // one character short of the source's end.
+    return open + gap + candidate;
   }
   return null;
 }
@@ -1686,8 +1731,19 @@ function gluedBasicTokenEnd(raw, absoluteStart, acceptedLength = -1) {
   // split inside its base64 published the whole quoted credential on the shipped keyless pool
   // (F42-2's neighbouring position), so the quote is peeled here, the payload is joined across the
   // evidence as any other run is, and the closing quote is required where the published text has it.
-  const quote = raw.startsWith('"') || raw.startsWith("'") ? raw[0] : '';
-  const body = quote === '' ? raw : raw.slice(1);
+  // The quoted spelling's OPENING spelling is peeled, not one quote character (Batch 108; F48-2):
+  // '\"' and '""' are the escaped and doubled spellings of the same quote, and the closing spelling
+  // is read where the published text has it.
+  const spelling = basicQuoteSpelling(raw);
+  const open = spelling === null ? '' : spelling.open;
+  const body = spelling === null ? raw : raw.slice(open.length);
+  // THE QUOTED SPELLING'S INTERNAL GAP (Batch 108; F48-1). decodedBasicToken takes a gap after the
+  // opening quote as part of the token ('Basic " <payload>"'), so the walk must begin at the RUN
+  // rather than at that gap. Read at the gap the first run was EMPTY, the position table stayed
+  // empty, and the final return indexed it -- 'positions[best - 1]' was undefined, the end was NaN,
+  // and the caller's 'source.slice(NaN)' republished the WHOLE source on every pass. The gap was
+  // already consumed as the token's own, so it is skipped here; a bare token's gap was consumed by
+  // the caller and this run is empty for it.
   // THE JOIN: the runs are joined across split evidence for as many runs as the split uses, and
   // across an ordinary word gap at most once (the bound Batch 100 stated). The rule's own decode
   // test decides, on the JOINED text, so a payload split into two fragments that each decode to
@@ -1699,11 +1755,13 @@ function gluedBasicTokenEnd(raw, absoluteStart, acceptedLength = -1) {
   // legitimate split puts at least one base64 character in every run, so a legitimate split uses AT
   // MOST body.length runs. The loop is bounded by that number -- not by a round one a long userinfo
   // could reach -- and the tracker stops it earlier the moment no longer prefix can be accepted.
+  const gapRun = spelling === null ? null : SCHEME_GAP_RUN.exec(body);
+  const bodyStart = gapRun === null ? 0 : gapRun[0].length;
   const positions = [];
   let joined = '';
-  let end = valueRunEnd(body, 0, isBasicRunChar);
-  joined = body.slice(0, end);
-  for (let i = 0; i < joined.length; i += 1) positions.push(i);
+  let end = valueRunEnd(body, bodyStart, isBasicRunChar);
+  joined = body.slice(bodyStart, end);
+  for (let i = bodyStart; i < end; i += 1) positions.push(i);
   const tracker = basicJoinTracker();
   tracker.feed(joined);
   // The joined text's LAYOUT, maintained incrementally (Batch 106): the acceptance test reads these
@@ -1776,7 +1834,7 @@ function gluedBasicTokenEnd(raw, absoluteStart, acceptedLength = -1) {
     const state = tracker.state();
     const tokenLength = acceptedBasicTokenLength(joined, state, layout);
     if (tokenLength !== -1) {
-      if (quote === '') {
+      if (spelling === null) {
         // Across split evidence the joined run is what the rule reads, so any accepted prefix is the
         // payload's own. Across the ONE ordinary word gap the token has to REACH INTO the run after
         // it: an acceptance that ends exactly at the prefix before the gap is a run the rule's own
@@ -1785,16 +1843,21 @@ function gluedBasicTokenEnd(raw, absoluteStart, acceptedLength = -1) {
         if (evidence || tokenLength > before) best = Math.max(best, tokenLength);
       } else if (tokenLength === layout.length) {
         // THE QUOTED SPELLING, CLOSED AND UNCLOSED (Batch 107). 'nextEnd' is an index into 'body'
-        // (= raw.slice(1)), so the source's exclusive end
-        // after the payload is absoluteStart + nextEnd + 1, and the CLOSED spelling's span is the
-        // payload PLUS the closing quote standing right after it -- at body[nextEnd] -- so it ends
-        // one character further. This reader used to return the shorter end, and every split
+        // (= raw.slice(open.length)), so the source's exclusive end
+        // after the payload is absoluteStart + open.length + nextEnd, and the CLOSED spelling's span
+        // is the payload PLUS the closing spelling standing right after it -- at body[nextEnd] -- so
+        // it ends by the closing spelling's own length. This reader used to return the shorter end, and every split
         // position published 'Basic [redacted]"' (the closing quote left standing) while the comment
         // claimed the span carried it (F47-4). Where NO closing quote stands after the payload, the
         // spelling is the UNCLOSED one (F47-1): the longest accepted payload is the walk's best, read
         // exactly as the closed spelling's payload is read, and the final span carries the opening
         // quote together with the payload.
-        if (body[nextEnd] === quote) return absoluteStart + nextEnd + 2;
+        // The CLOSED spelling's closing quote (and the escaped/doubled spelling's closing pair) is
+        // read at the payload's end; the source's exclusive end is the opening spelling, the payload
+        // and the closing spelling.
+        if (body.startsWith(spelling.close, nextEnd)) {
+          return absoluteStart + open.length + nextEnd + spelling.close.length;
+        }
         best = Math.max(best, tokenLength);
       }
     }
@@ -1806,10 +1869,20 @@ function gluedBasicTokenEnd(raw, absoluteStart, acceptedLength = -1) {
     if (state.bad !== -1 || state.secondColon !== -1) break;
   }
   if (best === -1) return -1;
-  // The quoted spelling's span carries the OPENING quote as well as the payload (Batch 107):
-  // 'positions' indexes 'body' (= raw.slice(1)) and the caller's accepted length is the payload
-  // without its quotes, so the source's exclusive end is one character further than the bare run's.
-  return absoluteStart + positions[best - 1] + (quote === '' ? 1 : 2);
+  // THE END IS A POSITION THE WALK ACTUALLY APPENDED (Batch 108; F48-1). 'best' can be the
+  // separated view's accepted length, which the walk never mapped -- the quoted spelling whose own
+  // gap left the first run empty is the case that broke. Indexing 'positions' with it yielded
+  // 'undefined', the sum was NaN, and the caller's 'source.slice(NaN)' published the whole source
+  // and never reached a fixed point (measured: a 52-character row grew 52 -> 127 -> 427 -> 1,627 ->
+  // 6,427 and the 64-pass loop could not return). -1 is a defined answer, and the caller's
+  // separated view already carries that end, so an unmapped 'best' simply defers to it.
+  const lastPosition = positions[best - 1];
+  if (lastPosition === undefined) return -1;
+  // The quoted spelling's span carries the OPENING spelling as well as the payload (Batch 107):
+  // 'positions' indexes 'body' (= raw.slice(open.length)) and the caller's accepted length is the
+  // payload without its quotes, so the source's exclusive end is one character further than the
+  // bare run's, plus the opening spelling's own length.
+  return absoluteStart + lastPosition + 1 + open.length;
 }
 
 function redactBasicCredentials(text) {
@@ -1870,17 +1943,27 @@ function redactBasicCredentials(text) {
     // NO split position that carries split evidence can leave a fragment: the payload's own runs are
     // all read, the acceptance is read at every joined length and to the end of the joined run, and
     // the removal maps back over every separator the split used.
-    const quote = payload.startsWith('"') || payload.startsWith("'") ? payload[0] : '';
+    const spelling = basicQuoteSpelling(payload);
     // The quoted spelling's span carries its quotes (Batch 61) and the accepted payload is the token
     // WITHOUT them. Both spellings are read now (Batch 107): the CLOSED one carries two
     // quotes, the UNCLOSED one (no closing quote) carries the opening quote only, which is what the
     // reader returns -- so the payload's length is the token's length less the quotes it carries.
-    const quotedQuotes = token === null || quote === '' ? 0 : token.endsWith(quote) ? 2 : 1;
+    // THE SPELLING IS THE QUOTE'S OWN (Batch 108; F48-2): the escaped ('\"') and doubled ('""')
+    // spellings carry two characters at each end, and the token's length less the characters the
+    // spelling actually contributed is the payload the walk is handed. A quoted spelling also
+    // carries its INTERNAL gap now, which is part of the payload's source span rather than of the
+    // payload (F48-1).
+    const quotedQuotes = token === null || spelling === null ? 0
+      : spelling.open.length + (token.endsWith(spelling.close) ? spelling.close.length : 0);
     const acceptedLength = token === null ? -1 : token.length - quotedQuotes;
     const separatedEnd = token === null ? -1 : tokenStart + token.length;
     const gluedEnd = gluedBasicTokenEnd(payload, tokenStart, acceptedLength);
     const tokenEnd = Math.max(separatedEnd, gluedEnd);
-    if (tokenEnd === -1) continue;
+    // A defined end or nothing (Batch 108; F48-1). The end this scan computes is an INDEX into the
+    // source; NaN compared false against every match position and 'source.slice(NaN)' returned the
+    // whole source, so the rule published everything and the pass loop could never converge. The
+    // walk no longer returns NaN and this refuses one even if a later change computed it.
+    if (!Number.isFinite(tokenEnd) || tokenEnd < 0) continue;
     out += source.slice(at, tokenStart) + REDACTION_SENTINEL;
     at = tokenEnd;
     resumeAt = at;
