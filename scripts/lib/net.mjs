@@ -331,9 +331,10 @@ export const INVISIBLE_SEPARATOR_PATTERN = /\p{Default_Ignorable_Code_Point}/u;
 // THE JOIN. A value run that ALREADY satisfies the rule is complete and is never extended -- the
 // prose guard's spine. A run that does not is joined forwards:
 //   - ACROSS SPLIT EVIDENCE (the mark, an invisible separator, a non-ordinary whitespace spelling)
-//     the join is UNBOUNDED in the number of runs and the fragments after the first need not be
-//     shaped on their own: the joined text is what the rule tests. That is F42-1 (neither fragment
-//     shaped) and F42-2 (two or more runs) closed with one clause.
+//     the join crosses for as many runs as the split uses within the join's own bound (the Basic
+//     join derives it from the text, Batch 104; the other two keep 64) and the fragments after the
+//     first need not be shaped on their own: the joined text is what the rule tests. That is F42-1
+//     (neither fragment shaped) and F42-2 (two or more runs) closed with one clause.
 //   - ACROSS AN ORDINARY WORD GAP -- a space or a line end, the characters prose writes between two
 //     words -- the join crosses AT MOST ONCE, only before any split evidence has been seen, and only
 //     when the fragment after it passes the rule's own test on its own (Batch 100's bound, kept
@@ -387,9 +388,12 @@ export const INVISIBLE_SEPARATOR_PATTERN = /\p{Default_Ignorable_Code_Point}/u;
 //       at the gap -- by EVERY separator that CARRIES SPLIT EVIDENCE (a control byte, a
 //       default-ignorable, a non-ordinary whitespace spelling, an entity spelling of one) removes on
 //       both entry points, in the assembled notice at 128/402/1000 and in the shipped keyless
-//       collectAll, however many runs the split uses: nothing of the credential is published. The
-//       ordinary word gap is the one spelling that carries no evidence, and its bound and price are
-//       measured below;
+//       collectAll, for as many runs as the split uses WITHIN THE JOIN'S OWN BOUND. The Basic join's
+//       bound is the text's own length (Batch 104; F44-1b), so no legitimate Basic split can reach
+//       it; the curated bodies and the authorization value keep the 64-run bound, and a split of
+//       one of those past 64 runs is outside this measurement rather than claimed closed by it.
+//       The ordinary word gap is the one spelling that carries no evidence, and its bound and
+//       price are measured below;
 //   (b) no published byte moves for an input with no separator at a shape position: the tracked
 //       corpus differential is 0 (the glue is only taken where the spaced run cannot match), both
 //       entry points are the same text, and the caps and the fixed points hold;
@@ -501,7 +505,9 @@ function separatorRunEnd(text, from) {
 // separator class that is NOT an ordinary word gap, it writes this one character in its place: a
 // private-use mark that records "a separator stood here". The shape rules then join fragments
 // across the mark -- and across an invisible separator, which is the same evidence written by the
-// surface itself -- for AS MANY RUNS AS THE SPLIT USES, and NEVER across an ordinary space, which
+// surface itself -- for as many runs as the split uses within the join's own bound (the Basic join
+// derives its bound from the text, Batch 104; the other two keep 64) -- and NEVER across an
+// ordinary space, which
 // stays the prose guard. The mark is rendered as a space everywhere text is published, is invisible
 // to every other rule (it is not a word character, not whitespace, and not a member of any shape's
 // body class), and cannot come from an input: plainText normalises any incoming U+E001 to a space
@@ -520,8 +526,15 @@ function separatorRunEnd(text, from) {
 // is evidence a surface wrote a split, and prose never spells it, so the join is unbounded there.
 const SEPARATOR_MARK = '\uE001';
 const SEPARATOR_MARK_RE = /\uE001/g;
-// The join's own bound: a credential is short, and a bound that a legitimate split can never reach
-// keeps a hostile text from walking the rest of the document one run at a time.
+// THE JOIN'S BOUND, AND WHAT IT IS NOT (Batch 104; the final sweep's F44-1b). This round number
+// bounds the two joins whose shape has a bounded legitimate length -- the curated schemes' body
+// (ghp_ + 36 characters, github_pat_ + 36) and the authorization value's atom -- so a legitimate
+// split of either cannot reach it. It NEVER bounded the Basic payload: a '<user>:<password>' pair
+// can be longer than 64 base64 characters (a 47-character userinfo puts the ':' past the 64th), and
+// a surface that splits the payload one character per run reached the bound and published the WHOLE
+// credential -- measured in the shipped keyless pool, in the notice, and in the assembly at
+// 402/1000. The Basic join therefore derives its own bound from the text it is handed (see
+// gluedBasicTokenEnd); this constant is not used there and must not be read as a bound on it.
 const MAX_JOINED_RUNS = 64;
 // The ordinary word gaps: the plain whitespace, every member of which JavaScript's \s matches.
 // Everything else in the one class is split evidence (see the block above).
@@ -567,10 +580,10 @@ export function renderSeparatorMarks(text) {
 // already satisfies it is complete and is never extended, which is the prose guard's spine -- and
 // the join then walks the runs after it:
 //   - across a separator run that CARRIES SPLIT EVIDENCE (the mark, an invisible separator, a
-//     non-ordinary whitespace spelling) the join is UNBOUNDED in the number of runs, and the
-//     fragment after it need not be shaped on its own: the joined text is what the rule tests. That
-//     is the pair's F42-1 (neither fragment shaped on its own) and F42-2 (two or more runs) closed
-//     with one clause, on the evidence the mark preserves.
+//     non-ordinary whitespace spelling) the join crosses for as many runs as the split uses within
+//     the join's own bound, and the fragment after it need not be shaped on its own: the joined text
+//     is what the rule tests. That is the pair's F42-1 (neither fragment shaped on its own) and
+//     F42-2 (two or more runs) closed with one clause, on the evidence the mark preserves.
 //   - across an ORDINARY word gap (a space, a tab, a line end) the join crosses AT MOST ONCE, only
 //     while no split evidence has been seen, and only when the fragment after it passes
 //     'acceptsSecond' -- the bound Batch 100 stated, kept exactly: an ordinary sentence cannot pull
@@ -1001,7 +1014,8 @@ function authorizationValueLineEndsAt(source, end) {
 function gluedAuthorizationValue(source, from, runEnd) {
   // THE JOIN (Batch 101; F42-1/F42-2 at the authorization family). Across SPLIT EVIDENCE -- the
   // separator mark, an invisible separator, a non-ordinary whitespace spelling -- the atoms are
-  // joined for as many runs as the split uses and the joined value is what the shape test reads, so
+  // joined for as many runs as the split uses within MAX_JOINED_RUNS and the joined value is what
+  // the shape test reads, so
   // a token whose fragments are each too short (or carry the digits on one side) is one credential.
   // Across an ORDINARY word gap the bound is Batch 100's, unchanged, and it is the prose guard: one
   // run, the atom after it must pass the value's own grammar and shape test on its own, and the two
@@ -1508,6 +1522,99 @@ const isBasicRunChar = (ch) => ch !== undefined && /[A-Za-z0-9+/=]/.test(ch);
 // across the separator run. Returns the SPACED end index, or -1 when no token is recognised. A
 // token the separated view already accepted is never extended: the caller reads it first, and the
 // word after a complete payload survives (the one-run bound stated at the class statement).
+// THE BASE64 PREFIX, READ INCREMENTALLY (Batch 104; the final sweep's F44-1b). Until this batch the
+// join tested the rule's own `decodedBasicToken` on the joined text at every run, and that reader
+// tries every candidate length from the run's own length down to 8 -- so a text split one character
+// per run was tested quadratically per run. The tracker below reads the SAME acceptance test the
+// rule reads, one base64 group at a time: a decoded byte outside printable ASCII (or a '=' inside
+// the payload) fixes the longest possible token at that byte, a second ':' fixes it at that ':', and
+// a token is one ':' with at least one character on each side. What the rule's own reader decides is
+// unchanged -- that reader is still the fallback when the surface's padding is not where a base64
+// payload may put it -- but the join now learns at that byte that no longer prefix can ever be
+// accepted, so a hostile text cannot make it walk the rest of the document one run at a time.
+function basicJoinTracker() {
+  let pending = '';
+  let decoded = 0;
+  let bad = -1;
+  let colon = -1;
+  let secondColon = -1;
+  const take = (bytes, base) => {
+    for (let i = 0; i < bytes.length; i += 1) {
+      const code = bytes.charCodeAt(i);
+      const at = base + i;
+      if (bad === -1 && (code < 0x20 || code > 0x7e || code === 0x3d)) bad = at;
+      if (code === 0x3a) {
+        if (colon === -1) colon = at;
+        else if (secondColon === -1) secondColon = at;
+      }
+    }
+    decoded = base + bytes.length;
+  };
+  return {
+    feed(chunk) {
+      for (const ch of String(chunk)) {
+        pending += ch;
+        if (pending.length === 4) {
+          take(Buffer.from(pending, 'base64').toString('latin1'), decoded);
+          pending = '';
+        }
+      }
+    },
+    // The same reading including the partial group (two or three characters decode one or two
+    // bytes), which is what a run boundary can leave behind.
+    state() {
+      let outBad = bad;
+      let outColon = colon;
+      let outSecond = secondColon;
+      let outDecoded = decoded;
+      if (pending.length === 2 || pending.length === 3) {
+        const part = Buffer.from(pending, 'base64').toString('latin1');
+        for (let i = 0; i < part.length; i += 1) {
+          const code = part.charCodeAt(i);
+          const at = decoded + i;
+          if (outBad === -1 && (code < 0x20 || code > 0x7e || code === 0x3d)) outBad = at;
+          if (code === 0x3a) {
+            if (outColon === -1) outColon = at;
+            else if (outSecond === -1) outSecond = at;
+          }
+        }
+        outDecoded += part.length;
+      }
+      return { decoded: outDecoded, bad: outBad, colon: outColon, secondColon: outSecond };
+    },
+  };
+}
+// The base64 length that decodes to exactly `bytes` bytes of the stream (padding is not counted).
+function basicBase64Length(bytes) {
+  const groups = Math.floor(bytes / 3);
+  const rest = bytes % 3;
+  return rest === 0 ? groups * 4 : rest === 1 ? groups * 4 + 2 : groups * 4 + 3;
+}
+// The accepted token's length in the JOINED text, or -1. This IS the rule's decode test, read on
+// the tracker's state: the longest decoded prefix that is printable, carries no '=' of its own, and
+// has exactly one ':' with a character on each side.
+function acceptedBasicTokenLength(joined, state) {
+  let longest = state.decoded;
+  if (state.bad !== -1) longest = Math.min(longest, state.bad);
+  if (state.secondColon !== -1) longest = Math.min(longest, state.secondColon);
+  if (state.colon < 1 || longest < state.colon + 2) return -1;
+  let length = basicBase64Length(longest);
+  // The run ends in padding ('=' is in the character class), and the '=' or '==' the surface wrote
+  // on the final group is part of the payload. The extension stops at the first non-'=' character,
+  // so a malformed single '=' is taken exactly as the rule's own reader takes it.
+  if (longest === state.decoded) {
+    const groupEnd = Math.ceil(length / 4) * 4;
+    while (length < groupEnd && length < joined.length && joined[length] === '=') length += 1;
+  }
+  if (length < 8) return -1;
+  if (!/^[A-Za-z0-9+/]*={0,2}$/.test(joined.slice(0, length))) {
+    // A '=' inside the region is not padding: the rule's own reader is exact for the hostile
+    // spelling, and this path is not reachable from a legitimate payload.
+    const token = decodedBasicToken(joined);
+    return token === null ? -1 : token.length;
+  }
+  return length;
+}
 function gluedBasicTokenEnd(raw, absoluteStart) {
   // The quoted spelling is read whole or not at all (see decodedBasicToken): a quote cannot stand
   // inside a run. The quoted spelling IS read across the class now (Batch 101): a quoted payload
@@ -1516,49 +1623,53 @@ function gluedBasicTokenEnd(raw, absoluteStart) {
   // evidence as any other run is, and the closing quote is required where the published text has it.
   const quote = raw.startsWith('"') || raw.startsWith("'") ? raw[0] : '';
   const body = quote === '' ? raw : raw.slice(1);
-  // THE JOIN (Batch 101; F42-1/F42-2 at Basic): the runs are joined across split evidence for as
-  // many runs as the split uses, and across an ordinary word gap at most once (the bound Batch 100
-  // stated). The rule's own decode test decides, on the JOINED text, so a payload split into two
-  // fragments that each decode to nothing is still one credential.
+  // THE JOIN: the runs are joined across split evidence for as many runs as the split uses, and
+  // across an ordinary word gap at most once (the bound Batch 100 stated). The rule's own decode
+  // test decides, on the JOINED text, so a payload split into two fragments that each decode to
+  // nothing is still one credential.
+  //
+  // THE BOUND IS THE TEXT'S OWN (Batch 104; F44-1b). A Basic payload is the base64 of
+  // '<user>:<password>', and the 'Basic ' keyword and its gap are read before this function is
+  // entered: the longest payload in the text this rule was handed is the text itself, and a
+  // legitimate split puts at least one base64 character in every run, so a legitimate split uses AT
+  // MOST body.length runs. The loop is bounded by that number -- not by a round one a long userinfo
+  // could reach -- and the tracker stops it earlier the moment no longer prefix can be accepted.
   const positions = [];
   let joined = '';
-  let pos = 0;
-  let end = valueRunEnd(body, pos, isBasicRunChar);
+  let end = valueRunEnd(body, 0, isBasicRunChar);
   joined = body.slice(0, end);
   for (let i = 0; i < joined.length; i += 1) positions.push(i);
+  const tracker = basicJoinTracker();
+  tracker.feed(joined);
   let evidenceSeen = false;
-  for (let runs = 0; runs < MAX_JOINED_RUNS; runs += 1) {
+  for (let runs = 0; runs < body.length; runs += 1) {
     const afterSeparator = separatorRunEnd(body, end);
     if (afterSeparator === -1) break;
     const evidence = separatorRunIsEvidence(body.slice(end, afterSeparator));
     if (!evidence && !evidenceSeen && runs > 0) break;
     const nextEnd = valueRunEnd(body, afterSeparator, isBasicRunChar);
     if (nextEnd === afterSeparator) break;
-    joined += body.slice(afterSeparator, nextEnd);
+    const added = body.slice(afterSeparator, nextEnd);
+    joined += added;
     for (let i = afterSeparator; i < nextEnd; i += 1) positions.push(i);
-    // The rule's own acceptance, read on the recognition view. A quoted payload's closing quote must
-    // stand where the published text has it, exactly as the separated view requires.
-    if (quote !== '') {
+    tracker.feed(added);
+    const state = tracker.state();
+    const tokenLength = acceptedBasicTokenLength(joined, state);
+    if (tokenLength !== -1) {
+      if (quote === '') return absoluteStart + positions[tokenLength - 1] + 1;
       // The quoted spelling: the token is the payload, and the span the published text carries is
-      // the payload plus the closing quote that stands right after it.
-      if (quotedPayloadToken(joined, body, nextEnd, quote) !== null) {
-        return absoluteStart + nextEnd + 1;
-      }
-    } else {
-      const token = decodedBasicToken(joined);
-      if (token !== null) return absoluteStart + positions[token.length - 1] + 1;
+      // the payload plus the closing quote that stands right after it, exactly as the separated
+      // view requires.
+      if (tokenLength === joined.length && body[nextEnd] === quote) return absoluteStart + nextEnd + 1;
     }
     if (!evidence && !evidenceSeen) return -1;
     evidenceSeen = evidenceSeen || evidence;
     end = nextEnd;
+    // Once a byte fixes the longest accepted prefix, no longer prefix can ever be accepted: the
+    // walk is over, which is what keeps the cost linear on adversarial input.
+    if (state.bad !== -1 || state.secondColon !== -1) break;
   }
   return -1;
-}
-// The quoted payload's token, when the closing quote stands at the end of the run just joined: the
-// joined text is the recognition view, and the quote the published text carries is the one at 'end'.
-function quotedPayloadToken(joined, body, end, quote) {
-  if (body[end] !== quote) return null;
-  return decodedBasicToken(quote + joined + quote);
 }
 
 function redactBasicCredentials(text) {
@@ -2797,18 +2908,37 @@ export function decodeEntities(s) {
 // for the decimal and the hexadecimal spelling alike. The digit guard is the longest-match rule the HTML
 // spec itself uses -- the whole digit run is consumed -- so a reference that continues into another
 // character is NOT misread: '&#82030' is U+1406E and '&#x200B1' is U+200B1, neither a separator, and both
-// are left as the text they are. The named reference still requires its semicolon: HTML resolves no named
-// reference without one unless it is in its legacy list, and no class name is (the same bound AUTH_COLON
-// records for '&colon').
-const ENTITY_REFERENCE = /&(?:#x([0-9a-f]+);?|#(\d+);?|([a-z][a-z0-9]*);)/gi;
+// are left as the text they are.
+//
+// THE NAMED REFERENCE IS READ WITHOUT ITS SEMICOLON WHERE HTML IS IN ITS LEGACY LIST (Batch 104; the
+// final pair's F44-1a). The sentence this paragraph carried -- 'HTML resolves no named reference
+// without one unless it is in its legacy list, and no class name is' -- was false twice, and the
+// direction it was false in publishes. Python's html.entities.html5 (the WHATWG table, offline) has
+// 2,231 keys: 2,125 carry a semicolon and 106 are the legacy no-semicolon spellings. Exactly TWO of
+// the 106 resolve to a member of this one class -- 'nbsp' (U+00A0) and 'shy' (U+00AD), the set
+// tests/separator-mark-property.test.mjs derives from the pinned table -- and an HTML5 reader resolves
+// both without the semicolon in TEXT (the attribute-only '=' / alphanumeric guard does not apply to a
+// pool): 'a&shy.b' is 'a' SHY '.b' and 'a&shyb' is 'a' SHY 'b'. '&shy' is Default_Ignorable, so a
+// value split by it is visually intact -- the shipped keyless pool published the literal spelling
+// while an HTML5 reader saw the commit token whole (measured: github_pat_...&shy... in the title AND
+// the summary). The legacy names are therefore read here exactly as Python's html.unescape reads
+// them: the LONGEST table entry wins, so '&shy;' is the semicolon form (read by the named branch) and
+// '&shyabc;' is '&shy' followed by the text 'abc;' -- the longer non-name is not swallowed whole.
+// The other 104 legacy names resolve to characters outside this class and are left as the text they
+// are, which is the reach '&amp;' has always had (an ordinary reference must not move).
+const NAMED_NAMES_ALT = Object.keys(NAMED).sort((a, b) => b.length - a.length).join('|');
+// A legacy no-semicolon reference for the two class names, or any named reference WITH its semicolon.
+// The named branch is tried first, so a semicolon spelling always wins over its legacy prefix.
+const ENTITY_REFERENCE = new RegExp(
+  '&(?:#x([0-9a-f]+);?|#(\\d+);?|(' + NAMED_NAMES_ALT + ');|(nbsp|shy))', 'gi');
 function resolvedReference(hex, dec, name) {
   if (hex !== undefined) return charOrReplacement(parseInt(hex, 16));
   if (dec !== undefined) return charOrReplacement(Number(dec));
   return NAMED[String(name).toLowerCase()] ?? null;
 }
 export function decodeSeparatorEntities(s) {
-  return String(s).replace(ENTITY_REFERENCE, (match, hex, dec, name) => {
-    const ch = resolvedReference(hex, dec, name);
+  return String(s).replace(ENTITY_REFERENCE, (match, hex, dec, name, legacy) => {
+    const ch = resolvedReference(hex, dec, name ?? legacy);
     if (ch === null || ch === undefined) return match;
     if (!SCHEME_GAP_PATTERN.test(ch)) return match;
     // A reference that names ANY member of the class -- an invisible separator, a whitespace

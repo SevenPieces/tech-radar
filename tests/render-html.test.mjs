@@ -41,6 +41,23 @@ test('render produces a complete document with no external assets', () => {
   assert.doesNotMatch(html, /\burl\(\s*["']?https?:/i);
 });
 
+test('F44-3: the internal characters do not reach the .html, and strip rather than eat the text', () => {
+  // The module keeps three characters that are not text -- the separator mark U+E001, the scaffold
+  // mask U+E000, the removal sentinel U+FFFF -- and U+0001 is a C0 control no Markdown reads. The
+  // renderer is a publication point a caller may hand a digest that carries one; at 0063439 it
+  // copied every one into the deliverable and check-quality PASSed the digest.
+  for (const [label, ch] of [['the separator mark', '\uE001'], ['the scaffold mask', '\uE000'],
+    ['the removal sentinel', '\uFFFF'], ['a C0 control', '\u0001']]) {
+    const html = render(md.replace('cap not hit', 'cap not hit' + ch + 'probe'), config);
+    assert.ok(!html.includes(ch), label + ' reached the .html deliverable');
+    assert.match(html, /probe/, label + ' was removed with its text instead of being rendered as a space');
+  }
+  // U+0000 is still refused rather than normalised: one input the renderer cannot turn into a
+  // document keeps its own refusal (exit 2), and this normalisation must not swallow it.
+  assert.throws(() => render(md + '\u0000', config), /substitution sentinel/,
+    'a digest carrying U+0000 is no longer refused');
+});
+
 test('render links the cited URL and escapes the headline', () => {
   const html = render(md, config);
   assert.match(html, /href="https:\/\/huggingface\.co\/blog\/x"/);

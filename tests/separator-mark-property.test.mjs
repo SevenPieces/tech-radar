@@ -85,7 +85,11 @@ const codePointOrReplacement = (n) => (n > 0x10ffff || (n >= 0xd800 && n <= 0xdf
 const readerView = (text) => String(text)
   .replace(/&#x([0-9a-f]+);?/gi, (m, h) => codePointOrReplacement(parseInt(h, 16)))
   .replace(/&#(\d+);?/g, (m, d) => codePointOrReplacement(Number(d)))
-  .replace(/&([a-z][a-z0-9]*);/gi, (m, n) => NAMED_READER[String(n).toLowerCase()] ?? m);
+  .replace(/&([a-z][a-z0-9]*);/gi, (m, n) => NAMED_READER[String(n).toLowerCase()] ?? m)
+  // HTML's TEXT context resolves a LEGACY name without its semicolon however the next character
+  // reads (the '=' / alphanumeric guard is attribute-only), so the detector for the legacy rows
+  // below decodes '&nbsp'/'&shy' as the reader does (Batch 104; F44-1a).
+  .replace(/&(nbsp|shy)/gi, (m, n) => NAMED_READER[String(n).toLowerCase()] ?? m);
 const PUBLISHED = (text, value) => text.includes(value) || RECOVER(value).test(readerView(text));
 
 const candidate = (raw) => redactCredentialShapes(plainText(raw, 400));
@@ -313,3 +317,157 @@ test('the recorded Low bounds: the candidate re-redaction, the early-stop tail, 
   assert.equal(candidate('Bearer version 2026-10-15 is now available'),
     'Bearer version 2026-10-15 is now available', 'the stamp exemption regressed');
 });
+
+
+// THE LEGACY NO-SEMICOLON NAMES, DERIVED AND PINNED (Batch 104; the final pair's F44-1a). The
+// pinned table is Python's html.entities.html5 legacy half (the 106 names the WHATWG table carries
+// WITHOUT a semicolon); it is here so the expected set is COMPUTED from the table rather than
+// asserted from the module. Python 3.12 / html.entities, 2,231 keys, 2,125 with a semicolon:
+//   python3 -c "import html.entities as h; print({k: v for k, v in h.html5.items() if not k.endswith(';')})"
+// and the class filter is the module's own SCHEME_GAP_PATTERN, so a drift in either moves the test.
+const HTML5_LEGACY = { AElig: '\u00c6', AMP: '&', Aacute: '\u00c1', Acirc: '\u00c2', Agrave: '\u00c0', Aring: '\u00c5', Atilde: '\u00c3', Auml: '\u00c4', COPY: '\u00a9', Ccedil: '\u00c7', ETH: '\u00d0', Eacute: '\u00c9', Ecirc: '\u00ca', Egrave: '\u00c8', Euml: '\u00cb', GT: '>', Iacute: '\u00cd', Icirc: '\u00ce', Igrave: '\u00cc', Iuml: '\u00cf', LT: '<', Ntilde: '\u00d1', Oacute: '\u00d3', Ocirc: '\u00d4', Ograve: '\u00d2', Oslash: '\u00d8', Otilde: '\u00d5', Ouml: '\u00d6', QUOT: '"', REG: '\u00ae', THORN: '\u00de', Uacute: '\u00da', Ucirc: '\u00db', Ugrave: '\u00d9', Uuml: '\u00dc', Yacute: '\u00dd', aacute: '\u00e1', acirc: '\u00e2', acute: '\u00b4', aelig: '\u00e6', agrave: '\u00e0', amp: '&', aring: '\u00e5', atilde: '\u00e3', auml: '\u00e4', brvbar: '\u00a6', ccedil: '\u00e7', cedil: '\u00b8', cent: '\u00a2', copy: '\u00a9', curren: '\u00a4', deg: '\u00b0', divide: '\u00f7', eacute: '\u00e9', ecirc: '\u00ea', egrave: '\u00e8', eth: '\u00f0', euml: '\u00eb', frac12: '\u00bd', frac14: '\u00bc', frac34: '\u00be', gt: '>', iacute: '\u00ed', icirc: '\u00ee', iexcl: '\u00a1', igrave: '\u00ec', iquest: '\u00bf', iuml: '\u00ef', laquo: '\u00ab', lt: '<', macr: '\u00af', micro: '\u00b5', middot: '\u00b7', nbsp: '\u00a0', not: '\u00ac', ntilde: '\u00f1', oacute: '\u00f3', ocirc: '\u00f4', ograve: '\u00f2', ordf: '\u00aa', ordm: '\u00ba', oslash: '\u00f8', otilde: '\u00f5', ouml: '\u00f6', para: '\u00b6', plusmn: '\u00b1', pound: '\u00a3', quot: '"', raquo: '\u00bb', reg: '\u00ae', sect: '\u00a7', shy: '\u00ad', sup1: '\u00b9', sup2: '\u00b2', sup3: '\u00b3', szlig: '\u00df', thorn: '\u00fe', times: '\u00d7', uacute: '\u00fa', ucirc: '\u00fb', ugrave: '\u00f9', uml: '\u00a8', uuml: '\u00fc', yacute: '\u00fd', yen: '\u00a5', yuml: '\u00ff' };
+const LEGACY_CLASS = Object.keys(HTML5_LEGACY)
+  .filter((name) => [...HTML5_LEGACY[name]].length === 1 && SCHEME_GAP_PATTERN.test(HTML5_LEGACY[name]));
+
+test('the derived legacy no-semicolon names are exactly two, and they are read as the separator they name', () => {
+  assert.deepEqual(LEGACY_CLASS.sort(), ['nbsp', 'shy'],
+    'the pinned HTML5 legacy table no longer derives exactly two class names: ' + LEGACY_CLASS.join(','));
+  for (const name of LEGACY_CLASS) {
+    // HTML resolves a legacy name without its semicolon in TEXT whatever follows (the '=' /
+    // alphanumeric guard is attribute-only): a letter, '_', '=' and the end all resolve.
+    // The trailing spelling is trimmmed exactly as a trailing space is, so the empty tail leaves 'a'.
+    for (const [tail, out] of [['b', MARK + 'b'], ['_b', MARK + '_b'], ['=b', MARK + '=b'], ['', '']]) {
+      assert.equal(plainText('a&' + name + tail, 100), 'a' + out,
+        '&' + name + ' (no semicolon) was not read as the separator it names: ' + JSON.stringify(tail));
+    }
+    // The semicolon spelling wins over the legacy prefix, and a longer non-name is not swallowed:
+    // '&shyabc;' is the reference followed by the text, exactly as html.unescape reads it.
+    assert.equal(plainText('a&' + name + ';b', 100), 'a' + MARK + 'b',
+      '&' + name + '; is no longer read as the semicolon family reads it');
+    assert.equal(plainText('a&' + name + 'abc;b', 100), 'a' + MARK + 'abc;b',
+      '&' + name + 'abc; was read as a longer name instead of the legacy reference plus text');
+  }
+  // The other 104 legacy names resolve to characters outside this class and stay as the text they
+  // are: the direction that keeps ordinary entity prose byte-identical.
+  for (const name of Object.keys(HTML5_LEGACY)) {
+    if (LEGACY_CLASS.includes(name)) continue;
+    assert.equal(plainText('a&' + name + '.b', 100), 'a&' + name + '.b',
+      'the ordinary legacy name &' + name + ' moved: it is not a separator');
+  }
+  // The measured leak, on every surface: the PAT body split by the legacy reference was published
+  // byte for byte in the shipped keyless pool at 0063439.
+  for (const ref of ['&nbsp', '&shy']) {
+    const raw = 'a commit carried github_pat_abcdef' + ref + 'ghijklmnopqrst end';
+    for (const [surface, text] of surfaces(raw)) {
+      assert.ok(!PUBLISHED(text, PAT), 'F44-1a: the ' + surface + ' published the PAT split by ' + ref + ': ' + JSON.stringify(text));
+    }
+  }
+  // Ordinary entity prose does not move on either entry point.
+  // The row is the pre-Batch-104 answer (one decode of the entity, as before): the fix adds the two
+  // legacy names and must not move the ordinary reference at either boundary.
+  for (const [row, out] of [['safe prose with &amp;amp; and &amp;mdash; only', 'safe prose with &amp; and &mdash; only'],
+    ['a &copy; notice and &amp;amp; twice', 'a &copy; notice and &amp; twice']]) {
+    assert.equal(candidate(row), out, 'ordinary entity prose moved on the candidate pass: ' + JSON.stringify(row));
+    // The notice path has always decoded ONLY the class spelling (decodeEntities is the candidate's
+    // own first decoder), so an ordinary reference is byte-identical there; the fix does not change it.
+    assert.equal(notice(row), row, 'ordinary entity prose moved on the notice pass: ' + JSON.stringify(row));
+  }
+});
+
+test('F44-1a: the shipped keyless pool no longer publishes a value split by a legacy no-semicolon name', async () => {
+  const settings = {
+    user_agent: 'tech-radar/1.0', title_max_chars: 200, summary_max_chars: 400,
+    error_snippet_max_chars: 200, notice_max_chars: 1000, request_timeout_ms: 20000,
+  };
+  const feed = (text) => '<rss><channel><item><title>' + text + '</title>'
+    + '<link>https://feeds.example/1</link><pubDate>Sun, 20 Sep 2026 12:00:00 GMT</pubDate>'
+    + '<description>' + text + '</description></item></channel></rss>';
+  const runPool = (text) => collectAll(
+    { settings, watchlist: [{ kind: 'rss', target: 'https://feeds.example/f.xml', domain: 'languages-runtimes', note: '' }] },
+    { since: '2026-09-16T00:00:00Z', until: '2026-09-23T00:00:00Z',
+      net: { hostOf: (url) => new URL(url).host, isDiscoveryOnly: () => false, fetchText: async () => feed(text) } });
+  for (const ref of ['&nbsp', '&shy']) {
+    const raw = 'a commit carried github_pat_abcdef' + ref + 'ghijklmnopqrst end';
+    const pool = await runPool(raw);
+    assert.ok(pool.candidates.length > 0, 'the legacy row produced no candidate at all: ' + ref);
+    for (const c of pool.candidates) {
+      for (const key of ['title', 'summary']) {
+        const value = String(c[key] ?? '');
+        assert.ok(!PUBLISHED(value, PAT),
+          'F44-1a: the shipped keyless pool ' + key + ' published the PAT split by ' + ref + ': ' + JSON.stringify(value));
+      }
+    }
+  }
+});
+
+test('F44-1b: the Basic join is bounded by the text, so every legitimate split removes, and a long userinfo cannot reach a round number first', async () => {
+  const ZWSP = String.fromCodePoint(0x200b);
+  const userinfo = (n) => 'u'.repeat(n) + ':' + 's3cr3tp4ssw0rd';
+  const encOf = (n) => Buffer.from(userinfo(n)).toString('base64');
+  // The boundary the sweep measured: a 47-character userinfo puts the ':' past the 64th base64
+  // character, so a split one character per run used to stop before the pair completed and publish
+  // the whole payload. It removes now on every surface.
+  for (const n of [47, 48, 60]) {
+    const enc = encOf(n);
+    const raw = 'release: Basic ' + [...enc].join(ZWSP) + ' and prose';
+    for (const [surface, text] of surfaces(raw)) {
+      assert.ok(!PUBLISHED(text, enc),
+        'F44-1b: the ' + surface + ' published the whole Basic payload for a ' + n + '-character userinfo');
+    }
+  }
+  // THE BOUND IS THE TEXT'S OWN, NOT A RUN COUNT: a payload split one character per run uses one
+  // run per character, so its split count is the payload length -- far past the old 64 -- and the
+  // join covers it. Beyond the loop's bound there is no text left to split: body.length runs need
+  // more characters than the body carries, so the bound is unreachable by a split (stated here as
+  // the invariant the loop holds).
+  for (const n of [60, 120, 200]) {
+    const enc = encOf(n);
+    const raw = 'release: Basic ' + [...enc].join(ZWSP) + ' and prose';
+    assert.ok(enc.length > 64, 'the row no longer splits past 64 runs: ' + enc.length);
+    const surfaceRows = [['candidate', redactCredentialShapes(raw)], ['notice', notice(raw)]];
+    // The candidate field is bounded at 400 characters after plainText: only the rows the field
+    // carries whole can be asserted through that surface.
+    if (raw.length <= 400) surfaceRows.push(['candidate+plainText', candidate(raw)]);
+    for (const [surface, text] of surfaceRows) {
+      assert.ok(!PUBLISHED(text, enc),
+        'F44-1b: the ' + surface + ' published the whole Basic payload at ' + enc.length + ' runs');
+    }
+    for (const cap of CAPS) {
+      assert.ok(!PUBLISHED(assembleNotice('rss', raw, [SECRET], cap), enc),
+        'F44-1b: the assembly at ' + cap + ' published the whole Basic payload at ' + enc.length + ' runs');
+    }
+  }
+  // The shipped keyless pool: the summary carries it whole at 0063439.
+  const longEnc = encOf(60);
+  const raw = 'release: Basic ' + [...longEnc].join(ZWSP) + ' and prose';
+  const settings = {
+    user_agent: 'tech-radar/1.0', title_max_chars: 200, summary_max_chars: 400,
+    error_snippet_max_chars: 200, notice_max_chars: 1000, request_timeout_ms: 20000,
+  };
+  const feed = (text) => '<rss><channel><item><title>' + text + '</title>'
+    + '<link>https://feeds.example/1</link><pubDate>Sun, 20 Sep 2026 12:00:00 GMT</pubDate>'
+    + '<description>' + text + '</description></item></channel></rss>';
+  const pool = await collectAll(
+    { settings, watchlist: [{ kind: 'rss', target: 'https://feeds.example/f.xml', domain: 'languages-runtimes', note: '' }] },
+    { since: '2026-09-16T00:00:00Z', until: '2026-09-23T00:00:00Z',
+      net: { hostOf: (url) => new URL(url).host, isDiscoveryOnly: () => false, fetchText: async () => feed(raw) } });
+  assert.ok(pool.candidates.length > 0, 'the Basic split row produced no candidate at all');
+  for (const c of pool.candidates) {
+    for (const key of ['title', 'summary']) {
+      assert.ok(!PUBLISHED(String(c[key] ?? ''), longEnc),
+        'F44-1b: the shipped keyless pool ' + key + ' published the whole Basic payload');
+    }
+  }
+  // THE ADVERSARIAL COST: a 20,000-byte payload (26,668 base64 characters) that decodes to printable
+  // text with no ':' is split one character per run. The tracker finds no pair and stops when the
+  // text runs out, in ONE pass; a per-run decode test would test every prefix of every run. The
+  // generous bound is a guard against that regression, not a benchmark.
+  const huge = Buffer.from('a'.repeat(20000)).toString('base64');
+  const adversarial = 'release: Basic ' + [...huge].join(ZWSP) + ' end';
+  const started = Date.now();
+  const out = redactCredentialShapes(adversarial);
+  const elapsed = Date.now() - started;
+  assert.equal(out, adversarial, 'the adversarial no-pair split moved text it does not name');
+  assert.ok(elapsed < 4000, 'the Basic join is no longer linear: 20,000 bytes split per character took ' + elapsed + 'ms');
+});
+

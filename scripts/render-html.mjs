@@ -69,6 +69,19 @@ export function linkify(text) {
 function normalizeNewlines(md) {
   return String(md ?? '').replace(/\r\n?/g, '\n');
 }
+// THE INTERNAL CHARACTERS DO NOT REACH THE DELIVERABLE (Batch 104; the final sweep's F44-3). The
+// module keeps three characters that are not text: the separator mark U+E001 (the published view of
+// a split separator), the scaffold mask U+E000 and the removal sentinel U+FFFF. The pool, the
+// candidate, the notice and the assembly are clean by construction, but the renderer is a
+// publication point a caller may hand a digest it wrote or quoted from a source that carries one,
+// and it copied every non-escaped code point straight into the .html while check-quality accepted
+// the digest. They are rendered as the spaces they stand in for here, exactly as
+// renderSeparatorMarks renders the mark at every redaction entry point, and a C0 control that is not
+// Markdown's own whitespace (tab, LF, CR are kept; U+0000 is refused below) is spaced the same way.
+const INTERNAL_DIGEST_CHARS = /[\u0001-\u0008\u000B\u000C\u000E-\u001F\u007F\uE000\uE001\uFFFF]/g;
+function stripInternalChars(md) {
+  return String(md ?? '').replace(INTERNAL_DIGEST_CHARS, ' ');
+}
 
 const CSS = [
   ':root{color-scheme:dark;--bg:#0f1216;--panel:#161b22;--panel2:#1c232c;--fg:#e6edf3;--dim:#9aa7b4;--line:#28313c;--acc:#4da3ff;--new:#2ea043;--follow:#d29922}',
@@ -195,7 +208,7 @@ export function render(md, config) {
     return (at > 0 ? cut.slice(0, at) : cut).trim();
   };
   const chipOf = (row) => clipChip(shortOf[row.domain] || row.domain.split(/,|\s*\(|\s+and\s+/)[0]);
-  const digest = normalizeNewlines(md);
+  const digest = stripInternalChars(normalizeNewlines(md));
   // The count and card placeholders are replaced before the document is returned, so the
   // token has to be one no digest can write. A digest is Markdown text, so a control
   // character is the one thing it cannot legitimately contain; a digest that does carry
