@@ -254,18 +254,42 @@ const AUTH_INLINE_SPACE = '\t\v\f \u00a0\u1680\u2000-\u200a\u202f\u205f\u3000\uf
 const AUTH_LINE_TERMINATORS = '\\r\\n\\u2028\\u2029\\u0085';
 // The bridge itself: a character class, so a caller writes AUTH_BRIDGE_SPACE + '*' (or '+').
 const AUTH_BRIDGE_SPACE = '[' + AUTH_INLINE_SPACE + AUTH_LINE_TERMINATORS + ']';
-// The bridge as a RUN, for the two GENERIC keyword rules (Batch 88; closing sweep F38-1). Those two
-// rules -- the Basic keyword's own gap and BEARER_VALUE's gap -- each still read JavaScript's \s,
-// which is exactly AUTH_INLINE_SPACE + CR/LF/LS/PS and NOT U+0085, so 'Basic' + NEL + <base64> and
-// 'Bearer' + NEL + <token> came back byte for byte from redactSecrets (both entry points) AND through
-// the shipped keyless candidate pass, while LF, CR, CRLF, LS, PS and all eight inline spellings
-// removed them. A run of the bridge is the same set the keyword's own AUTH_BRIDGE_SPACE '*' reads, so
-// a NEL at these gaps answers exactly as LF does; the optional form is the same run for a gap that may
-// be absent. Nothing else changes: the run adds U+0085 to \s and no other character.
-const AUTH_BRIDGE_RUN = new RegExp('^' + AUTH_BRIDGE_SPACE + '+');
+// THE INVISIBLE SEPARATOR CLASS (Batch 96; closing sweep F40-1). The rule the two GENERIC scheme
+// rules were missing is not about the NEL and not about the control bytes: a character a surface may
+// write BETWEEN A KEYWORD AND ITS VALUE and that carries NO VISIBLE CONTENT is a separator at that
+// gap, exactly as a space is. The reader of 'release Bearer' + ZWSP + 'tok_...' sees a Bearer
+// credential; a gap that reads only whitespace leaves the value standing, and the shipped keyless
+// candidate pass published it byte for byte (measured: ZWSP, SHY, WJ, MVS, U+3164, ZWNJ, ZWJ, U+2061,
+// U+115F and U+17B4, in both the Bearer and the Basic spelling, into .pool.json and into the assembled
+// notice, while U+00A0, U+FEFF, LF and NEL removed at the same gap). The class is NAMED BY THE UNICODE
+// PROPERTY and not by a list of characters, so the family is closed whole rather than one character at
+// a time: every DEFAULT-IGNORABLE code point carries no visible content by definition, and the
+// property is the invisible class this module can name. Measured first-hand, 0x0000-0x2FFF holds 38
+// of them -- U+00AD, U+034F, U+061C, U+115F..U+1160, U+17B4..U+17B5, U+180B..U+180F,
+// U+200B..U+200F, U+202A..U+202E, U+2060..U+206F -- and the class continues above the BMP (the
+// variation selectors U+FE00..U+FE0F and U+E0100..U+E01EF, the tag characters U+E0000..U+E007F).
+// It is disjoint from the bridge's own whitespace members -- White_Space is subtracted from the
+// property, so no character is counted twice and U+00A0 stays a bridge character and no more -- and
+// U+FEFF is the one member the two sets share. The property requires the 'u' flag, which is why
+// every regex below that reads the gap carries it.
+export const INVISIBLE_SEPARATOR = '\\p{Default_Ignorable_Code_Point}';
+export const INVISIBLE_SEPARATOR_PATTERN = /\p{Default_Ignorable_Code_Point}/u;
+// THE GAP THE TWO GENERIC SCHEME RULES READ: the bridge plus the invisible class above. It is a
+// character class, so a caller writes SCHEME_GAP + '*' (or '+').
+export const SCHEME_GAP = '[' + AUTH_INLINE_SPACE + AUTH_LINE_TERMINATORS + INVISIBLE_SEPARATOR + ']';
+export const SCHEME_GAP_PATTERN = new RegExp(SCHEME_GAP, 'u');
+// The gap as a RUN, for the two GENERIC keyword rules (Batch 88; closing sweep F38-1, widened whole
+// in Batch 96; closing sweep F40-1). Those two rules -- the Basic keyword's own gap and BEARER_VALUE's
+// gap -- each still read JavaScript's \s, which is exactly AUTH_INLINE_SPACE + CR/LF/LS/PS and NOT
+// U+0085, so 'Basic' + NEL + <base64> and 'Bearer' + NEL + <token> came back byte for byte from
+// redactSecrets (both entry points) AND through the shipped keyless candidate pass, while LF, CR,
+// CRLF, LS, PS and all eight inline spellings removed them. A run of the scheme gap is the same set
+// those rules' own gaps read, so a NEL -- or any invisible character -- at these gaps answers exactly
+// as LF does; the optional form is the same run for a gap that may be absent.
+const SCHEME_GAP_RUN = new RegExp('^' + SCHEME_GAP + '+', 'u');
 // The same optional gap in front of the Basic token's base64 run, which is the second half of that
 // keyword's gap (Batch 88; closing sweep F38-1).
-const AUTH_BRIDGE_RUN_OPTIONAL = new RegExp('^' + AUTH_BRIDGE_SPACE + '*([A-Za-z0-9+/]+={0,2})');
+const SCHEME_GAP_RUN_OPTIONAL = new RegExp('^' + SCHEME_GAP + '*([A-Za-z0-9+/]+={0,2})', 'u');
 
 const AUTHORIZATION_KEYWORD = new RegExp('(?<![\\w\\/])(?:proxy-)?' + AUTH_NAME + '["\']?' + AUTH_BRIDGE_SPACE + '*' + AUTH_COLON + AUTH_BRIDGE_SPACE + '*', 'gi');
 // Sweep F31-4's neighbour rows: the keyword was that one spelling with a word boundary on each
@@ -1025,10 +1049,12 @@ function decodedBasicToken(text) {
   // with the token and the published line keeps no orphan quote.
   const raw = String(text);
   const quote = raw.startsWith('"') || raw.startsWith("'") ? raw[0] : '';
-  // The gap before the run reads the bridge, not \s (Batch 88; closing sweep F38-1): with
-  // 'Basic' + SP + NEL + <base64> the caller's own gap consumes only the inline space, so the NEL
-  // stands here -- \s matched nothing and the run was never read, which published the blob.
-  const prefix = AUTH_BRIDGE_RUN_OPTIONAL.exec(quote === '' ? ' ' + raw : raw.slice(1));
+  // The gap before the run reads the scheme gap -- the bridge plus the invisible class -- not \s
+  // (Batch 88; closing sweep F38-1; widened Batch 96, closing sweep F40-1): with 'Basic' + SP + NEL
+  // + <base64> the caller's own gap consumes only the inline space, so the NEL stands here -- \s
+  // matched nothing and the run was never read, which published the blob -- and with
+  // 'Basic' + ZWSP + <base64> the invisible character stood where no rule read it at all.
+  const prefix = SCHEME_GAP_RUN_OPTIONAL.exec(quote === '' ? ' ' + raw : raw.slice(1));
   if (prefix === null) return null;
   const run = prefix[1];
   for (let length = run.length; length >= 8; length -= 1) {
@@ -1092,9 +1118,10 @@ function redactBasicCredentials(text) {
     const prev = idx === 0 ? '' : source[idx - 1];
     if (/[A-Za-z0-9_]/.test(prev) && idx !== resumeAt) continue;
     const after = source.slice(idx + 'Basic'.length);
-    // The keyword's own gap reads AUTH_BRIDGE_RUN, not \s (Batch 88; closing sweep F38-1): a NEL
-    // between 'Basic' and its blob is a line end exactly as LF is, and \s does not match it.
-    const space = AUTH_BRIDGE_RUN.exec(after);
+    // The keyword's own gap reads SCHEME_GAP_RUN, not \s (Batch 88; closing sweep F38-1; widened
+    // Batch 96, closing sweep F40-1): a NEL between 'Basic' and its blob is a line end exactly as LF
+    // is and \s does not match it, and an invisible character there is a separator no reader can see.
+    const space = SCHEME_GAP_RUN.exec(after);
     if (space === null) continue;
     const tokenStart = idx + 'Basic'.length + space[0].length;
     if (tokenStart < at) continue;
@@ -1534,12 +1561,15 @@ export function redactSecrets(text, secrets) {
 // abcdefghijklmnopqrstuvwxyz012345' is a value. A Bearer value standing in an authorization header
 // is not read by this rule at all: it is the header's own scheme, and the header rule consumes the
 // whole value (whatever it spells) because the header says it is one.
-// The gap reads AUTH_BRIDGE_SPACE and the value run reads the reader's own token class
-// (AUTH_TOKEN_CHARS), not JavaScript's \s (Batch 88; closing sweep F38-1). \s is every line end
-// except U+0085, so 'Bearer' + NEL + <token> matched nothing at all and was published, and a value
-// run built from \s did not stop at a NEL either -- 'Bearer ' + SP + NEL + <token> let the capture
-// run past the line end where LF stopped it. Both positions now answer exactly as LF does.
-const BEARER_VALUE = new RegExp('\\bBearer' + AUTH_BRIDGE_SPACE + '+(' + AUTH_TOKEN_CHARS + ')', 'gi');
+// The gap reads SCHEME_GAP -- the bridge PLUS the invisible separator class -- and the value run
+// reads the reader's own token class (AUTH_TOKEN_CHARS), not JavaScript's \s (Batch 88; closing sweep
+// F38-1, widened whole in Batch 96; closing sweep F40-1). \s is every line end except U+0085, so
+// 'Bearer' + NEL + <token> matched nothing at all and was published, and a value run built from \s did
+// not stop at a NEL either -- 'Bearer ' + SP + NEL + <token> let the capture run past the line end
+// where LF stopped it. Both positions now answer exactly as LF does, and the gap also reads every
+// character that carries no visible content (ZWSP, SHY, WJ, MVS, U+3164, ZWNJ, ZWJ and the rest of the
+// default-ignorable class), which is a shape no reader can tell from 'Bearer <value>'.
+const BEARER_VALUE = new RegExp('\\bBearer' + SCHEME_GAP + '+(' + AUTH_TOKEN_CHARS + ')', 'giu');
 function redactBearerValues(text) {
   return String(text).replace(BEARER_VALUE, (m, token) => (
     credentialShapedToken(token) ? REDACTION_SENTINEL : m));
