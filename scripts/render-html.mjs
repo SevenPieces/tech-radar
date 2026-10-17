@@ -78,7 +78,17 @@ function normalizeNewlines(md) {
 // the digest. They are rendered as the spaces they stand in for here, exactly as
 // renderSeparatorMarks renders the mark at every redaction entry point, and a C0 control that is not
 // Markdown's own whitespace (tab, LF, CR are kept; U+0000 is refused below) is spaced the same way.
-const INTERNAL_DIGEST_CHARS = /[\u0001-\u0008\u000B\u000C\u000E-\u001F\u007F\uE000\uE001\uFFFF]/g;
+//
+// THE CLASS IS THE ONE THE MODULE NORMALISES, NOT THREE CHARACTERS (Batch 105; the closing sweep's
+// F45-3). Batch 104 spaced U+E000/U+E001/U+FFFF and C0/DEL and left the position right beside it
+// open: C1 controls (U+0080-U+009F, the class CONTROL_CHARACTERS already names) and the invisible
+// separator class -- ZWSP, SHY, FEFF, WJ, the bidi and line/paragraph separators, the tag characters
+// U+E0000-U+E007F and the variation selectors -- reached the .html byte for byte while the gate
+// PASSed (measured). They are spaced here as well, so the deliverable cannot carry a character no
+// reader can see or a control a reader cannot render. The price is stated: a digest that writes a
+// variation selector beside an emoji keeps the emoji and gets the space in the selector's place; no
+// shipped example carries one, and the shipped example still renders byte-identically.
+const INTERNAL_DIGEST_CHARS = /[\u0001-\u0008\u000B\u000C\u000E-\u001F\u007F-\u009F\u00AD\u061C\u180E\u200B-\u200F\u202A-\u202E\u2028\u2029\u2060-\u2064\u2066-\u206F\u3164\uFE00-\uFE0F\uFEFF\uFFF0-\uFFF8\uE000\uE001\uFFFF\u{E0000}-\u{E007F}\u{E0100}-\u{E01EF}]/gu;
 function stripInternalChars(md) {
   return String(md ?? '').replace(INTERNAL_DIGEST_CHARS, ' ');
 }

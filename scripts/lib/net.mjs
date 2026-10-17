@@ -526,15 +526,26 @@ function separatorRunEnd(text, from) {
 // is evidence a surface wrote a split, and prose never spells it, so the join is unbounded there.
 const SEPARATOR_MARK = '\uE001';
 const SEPARATOR_MARK_RE = /\uE001/g;
-// THE JOIN'S BOUND, AND WHAT IT IS NOT (Batch 104; the final sweep's F44-1b). This round number
-// bounds the two joins whose shape has a bounded legitimate length -- the curated schemes' body
-// (ghp_ + 36 characters, github_pat_ + 36) and the authorization value's atom -- so a legitimate
-// split of either cannot reach it. It NEVER bounded the Basic payload: a '<user>:<password>' pair
-// can be longer than 64 base64 characters (a 47-character userinfo puts the ':' past the 64th), and
-// a surface that splits the payload one character per run reached the bound and published the WHOLE
-// credential -- measured in the shipped keyless pool, in the notice, and in the assembly at
-// 402/1000. The Basic join therefore derives its own bound from the text it is handed (see
-// gluedBasicTokenEnd); this constant is not used there and must not be read as a bound on it.
+// THE JOIN'S BOUND, AND WHAT IT IS NOT (Batch 104; the final sweep's F44-1b; its claim corrected in
+// Batch 105 by the closing pair's sweep F45-2 and verify F45-1). This round number bounds the two
+// joins that take it: the curated schemes' body join (gluedContinuation, which also joins the Bearer
+// value) and the authorization value's join (gluedAuthorizationValue). It is NOT a bound on a
+// legitimate length. The curated bodies' legitimate shape is bounded (ghp_ + 36 characters,
+// github_pat_ + 36), but the AUTHORIZATION and BEARER atoms are unbounded -- AUTH_TOKEN_CHARS is
+// [^\s,;"'\u0085]+ -- and a legitimate all-alphabetic value split one character per run is 108+
+// runs and publishes WHOLE, split and unsplit identically: that is the class's recorded
+// all-alphabetic bound (A-6 / TAIL_CREDENTIAL_HELD; credentialShapedToken requires a digit), not a
+// reach of this cap. A legitimate split CAN reach this bound, and the cap's own measured harm needs a
+// digit-bearing value whose first digit sits past the 65th character AND a dense split: such a value
+// publishes whole on the notice and in the assembly, where the notice push hands the rule the raw
+// separator (measured, F45-2); the shipped keyless pool is clean because plainText turns that
+// separator into the mark and the token class spans it. The sentence this comment carried ('a
+// legitimate split of either cannot reach it') was false. It NEVER bounded the Basic payload: a
+// '<user>:<password>' pair can be longer than 64 base64 characters (a 47-character userinfo puts the
+// ':' past the 64th), and a surface that splits the payload one character per run reached the old
+// bound and published the WHOLE credential -- measured in the shipped keyless pool, in the notice,
+// and in the assembly at 402/1000. The Basic join therefore derives its own bound from the text it is
+// handed (see gluedBasicTokenEnd); this constant is not used there and must not be read as a bound.
 const MAX_JOINED_RUNS = 64;
 // The ordinary word gaps: the plain whitespace, every member of which JavaScript's \s matches.
 // Everything else in the one class is split evidence (see the block above).
@@ -598,22 +609,35 @@ function gluedContinuation(text, from, runEnd, isRunChar, accepts, acceptsSecond
   let joined = first;
   let pos = runEnd;
   let evidenceSeen = false;
+  // THE LONGEST ACCEPTED SPAN, NOT THE FIRST (Batch 105; the closing sweep's F45-1 at the Basic join,
+  // and TR-344 / FINAL43 F43-3's early-stop tail here). The walk used to return at the FIRST joined
+  // run the rule accepts -- the SHORTEST value that passes -- so a credential whose run was split
+  // into several pieces lost its head and left the rest of its own run published ('ghp_' + 'ab' +
+  // ZWSP + 'cd' + ZWSP + 'efgh' + ZWSP + 'ijklmnop' kept 'ijklmnop' where the unsplit rule removes
+  // the whole body). The longest accepted end is tracked instead and the walk continues while the
+  // surface's evidence can still extend the value; the unsplit rule removes the whole run, so this
+  // is the same answer. Within this join's own bound (MAX_JOINED_RUNS, unchanged here: a dense
+  // evidence split PAST it still leaves a tail, the recorded A-54 state).
+  let best = -1;
   for (let runs = 0; runs < MAX_JOINED_RUNS; runs += 1) {
     const afterSeparator = separatorRunEnd(text, pos);
-    if (afterSeparator === -1) return null;
+    if (afterSeparator === -1) break;
     const evidence = separatorRunIsEvidence(text.slice(pos, afterSeparator));
-    if (!evidence && evidenceSeen === false && runs > 0) return null;
+    if (!evidence && evidenceSeen === false && runs > 0) break;
+    // A value already accepted whose run ends at an ordinary separator is complete: the word after
+    // it is prose, and joining it would extend the removal past the value.
+    if (best !== -1 && !evidence) break;
     const nextEnd = valueRunEnd(text, afterSeparator, isRunChar);
-    if (nextEnd === afterSeparator) return null;
+    if (nextEnd === afterSeparator) break;
     const next = text.slice(afterSeparator, nextEnd);
     if (!evidence && !evidenceSeen && !acceptsSecond(next)) return null;
     joined += next;
-    if (accepts(joined)) return nextEnd;
-    if (!evidence && !evidenceSeen) return null;
+    if (accepts(joined)) best = nextEnd;
+    if (!evidence && !evidenceSeen && best === -1) return null;
     evidenceSeen = evidenceSeen || evidence;
     pos = nextEnd;
   }
-  return null;
+  return best;
 }
 // A word boundary in the published text, for a shape whose pattern ended with '\b': the character
 // after the span is not a word character (the end of the text is a boundary).
@@ -1642,34 +1666,59 @@ function gluedBasicTokenEnd(raw, absoluteStart) {
   const tracker = basicJoinTracker();
   tracker.feed(joined);
   let evidenceSeen = false;
+  // THE ACCEPTANCE IS READ TO THE END OF THE RUN, NOT TO THE FIRST ACCEPTING PREFIX (Batch 105; the
+  // closing sweep's F45-1, which is also TR-344 / FINAL43 F43-3's early stop). This reader used to
+  // return at the FIRST prefix that decodes to 'user:password' -- the SHORTEST valid pair -- while
+  // the unsplit rule decodedBasicToken takes the LONGEST candidate. On a payload split one character
+  // per run the short pair completed early and the rest of the base64 stream published: with a
+  // 46-character userinfo the tail was a clean base64 of password[1:] and decoded to the password
+  // without its first character, on the candidate, the notice, the assembly at every accepted cap
+  // and the shipped keyless pool's summary (measured). The LONGEST accepted prefix is tracked here
+  // while the evidence can still extend the payload, so the join recovers exactly what the unsplit
+  // rule recovers from the run, and no payload tail is left published.
+  let best = -1;
   for (let runs = 0; runs < body.length; runs += 1) {
     const afterSeparator = separatorRunEnd(body, end);
     if (afterSeparator === -1) break;
     const evidence = separatorRunIsEvidence(body.slice(end, afterSeparator));
     if (!evidence && !evidenceSeen && runs > 0) break;
+    // A token already accepted whose run ends at an ORDINARY separator is the payload: the word
+    // after it is prose, not a continuation, and joining it could only extend the removal past the
+    // payload (the word is base64 letters as often as not).
+    if (best !== -1 && !evidence) break;
     const nextEnd = valueRunEnd(body, afterSeparator, isBasicRunChar);
     if (nextEnd === afterSeparator) break;
     const added = body.slice(afterSeparator, nextEnd);
+    const before = joined.length;
     joined += added;
     for (let i = afterSeparator; i < nextEnd; i += 1) positions.push(i);
     tracker.feed(added);
     const state = tracker.state();
     const tokenLength = acceptedBasicTokenLength(joined, state);
     if (tokenLength !== -1) {
-      if (quote === '') return absoluteStart + positions[tokenLength - 1] + 1;
-      // The quoted spelling: the token is the payload, and the span the published text carries is
-      // the payload plus the closing quote that stands right after it, exactly as the separated
-      // view requires.
-      if (tokenLength === joined.length && body[nextEnd] === quote) return absoluteStart + nextEnd + 1;
+      if (quote === '') {
+        // Across split evidence the joined run is what the rule reads, so any accepted prefix is the
+        // payload's own. Across the ONE ordinary word gap the token has to REACH INTO the run after
+        // it: an acceptance that ends exactly at the prefix before the gap is a run the rule's own
+        // reader already declined -- a 'user:' pair with an empty password and '==' padding followed
+        // by an ordinary word (the final verify's F45-3) -- and the gap was prose, not a split.
+        if (evidence || tokenLength > before) best = Math.max(best, tokenLength);
+      } else if (tokenLength === joined.length && body[nextEnd] === quote) {
+        // The quoted spelling: the token is the payload, and the span the published text carries is
+        // the payload plus the closing quote that stands right after it, exactly as the separated
+        // view requires.
+        return absoluteStart + nextEnd + 1;
+      }
     }
-    if (!evidence && !evidenceSeen) return -1;
+    if (!evidence && !evidenceSeen && best === -1) return -1;
     evidenceSeen = evidenceSeen || evidence;
     end = nextEnd;
     // Once a byte fixes the longest accepted prefix, no longer prefix can ever be accepted: the
     // walk is over, which is what keeps the cost linear on adversarial input.
     if (state.bad !== -1 || state.secondColon !== -1) break;
   }
-  return -1;
+  if (best === -1) return -1;
+  return absoluteStart + positions[best - 1] + 1;
 }
 
 function redactBasicCredentials(text) {
@@ -2842,35 +2891,45 @@ export function decodeBuffer(buf) {
 // published text decodes these exactly as it decodes '&amp;', so a credential split by one renders
 // intact in a Markdown view while the model saw only the letters of the reference. They are decoded
 // here -- by the same table the numeric references already crossed -- into the character each names,
-// and the redaction normalises that character like any other separator. The table is lower-cased by
-// the reader below, so the HTML spelling's own case ('&ZeroWidthSpace;', '&ThinSpace;') resolves too.
+// and the redaction normalises that character like any other separator.
+//
+// THE TABLE IS CASE-SENSITIVE, IN THE SPELLINGS THE WHATWG TABLE CARRIES (Batch 105; the closing
+// pair's verify F45-2). The reader below used to match the table with a case-insensitive pattern and
+// look it up lower-cased, so '&NBSP', '&SHY', '&NBSP;' and '&ZEROWIDTHSPACE;' were read as separators
+// where HTML5 (and Python's html.unescape) leave them literal. Reading more separators is
+// over-removal only, but it is not what an HTML5 reader does, and the record must not call it one.
+// The keys below are therefore the exact WHATWG spellings: a table name is matched only as HTML5
+// spells it ('&ZeroWidthSpace;', '&ThinSpace;', '&af;', '&amp;', '&AMP;'), and every other case is
+// left as the text it is.
 const NAMED = {
-  amp: '&', lt: '<', gt: '>', quot: '"', apos: "'", nbsp: ' ',
-  shy: '\u00ad', zwnj: '\u200c', zwj: '\u200d', lrm: '\u200e', rlm: '\u200f',
-  zerowidthspace: '\u200b', nobreak: '\u2060', invisibletimes: '\u2062',
-  invisiblecomma: '\u2063', invisibleseparator: '\u2063', ensp: '\u2002', emsp: '\u2003',
-  thinsp: '\u2009', thinspace: '\u2009', hairsp: '\u200a', numsp: '\u2007', puncsp: '\u2008',
-  mediumspace: '\u205f', nonbreakingspace: '\u00a0', tab: '\t', newline: '\n',
-  // The rest of the HTML5 spellings that name a member of this class, so the table is the family and
-  // not a sample of it: the two legacy ZWJ/ZWNJ names, the thin/hair spaces, the invisible plus and
-  // the no-break and thick spellings. A named reference outside this table is left as the text it is
-  // (an ordinary '&amp;' must not move), which is the stated reach of the decoding.
-  zerowidthjoiner: '\u200d', zerowidthnonjoiner: '\u200c', verythinspace: '\u200a',
-  invisibleplus: '\u2064', nobreakspace: '\u00a0', thickspace: '\u205f',
+  amp: '&', AMP: '&', lt: '<', LT: '<', gt: '>', GT: '>', quot: '"', QUOT: '"', apos: "'",
+  COPY: '\u00a9', REG: '\u00ae', nbsp: ' ', shy: '\u00ad',
+  zwnj: '\u200c', zwj: '\u200d', lrm: '\u200e', rlm: '\u200f',
+  ZeroWidthSpace: '\u200b', NoBreak: '\u2060', InvisibleTimes: '\u2062',
+  InvisibleComma: '\u2063', InvisibleSeparator: '\u2063', ensp: '\u2002', emsp: '\u2003',
+  thinsp: '\u2009', ThinSpace: '\u2009', hairsp: '\u200a', numsp: '\u2007', puncsp: '\u2008',
+  MediumSpace: '\u205f', NonBreakingSpace: '\u00a0', Tab: '\t', NewLine: '\n',
+  // Five spellings in the table are NOT in the WHATWG table and are over-reads: 'ZeroWidthJoiner',
+  // 'ZeroWidthNonJoiner', 'NoBreakSpace', 'InvisiblePlus' and 'VeryThinSpace' (HTML5 leaves
+  // '&ZeroWidthJoiner;' literal). They are kept in their exact case so an existing removal does not
+  // move, and they are recorded here rather than silently dropped; the case-sensitivity above is what
+  // this batch changes, not the membership of the table.
+  ZeroWidthJoiner: '\u200d', ZeroWidthNonJoiner: '\u200c', VeryThinSpace: '\u200a',
+  InvisiblePlus: '\u2064', NoBreakSpace: '\u00a0', ThickSpace: '\u205f',
   // THE FAMILY IS DERIVED, NOT SAMPLED (Batch 103; the Gate's F43-1). Batch 102 claimed the table was
   // the whole HTML5 spelling set and it was not: ten names that resolve to a member of this class
   // were outside it, and a reference a Markdown/HTML reader decodes published the value behind it --
   // measured through the shipped keyless collectAll, a PAT body split by '&af;' came back byte for
   // byte in the pool title AND summary. The table is now DERIVED from the WHATWG list: of
   // the 2,125 named references Python's html.entities.html5 carries (offline, the HTML5 table), the
-  // 32 whose value is exactly one code point of the one separator class are all here. The ten Batch
-  // 102 missed are the ones below; the other 22 were already named above. A name outside the table
+  // 33 whose value is one code point of the one separator class are all here (32 single-code-point
+  // names plus 'ThickSpace', the one multi-code-point name whose every code point is a class member:
+  // U+205F U+200A, named by its first member, which is the same evidence). A name outside the table
   // is left as the text it is, and the derivation is re-runnable: the commit that added these rows
-  // carries the command. '&ThickSpace;' is the one multi-codepoint name whose every code point is a
-  // class member (U+205F U+200A); it is named by its first member, which is the same evidence.
-  af: '\u2061', applyfunction: '\u2061', emsp13: '\u2004', emsp14: '\u2005',
-  ic: '\u2063', it: '\u2062', negativeverythinspace: '\u200b',
-  negativethinspace: '\u200b', negativemediumspace: '\u200b', negativethickspace: '\u200b',
+  // carries the command.
+  af: '\u2061', ApplyFunction: '\u2061', emsp13: '\u2004', emsp14: '\u2005',
+  ic: '\u2063', it: '\u2062', NegativeVeryThinSpace: '\u200b',
+  NegativeThinSpace: '\u200b', NegativeMediumSpace: '\u200b', NegativeThickSpace: '\u200b',
 };
 
 // A numeric character reference may name a code point that does not exist
@@ -2884,10 +2943,14 @@ function charOrReplacement(n) {
 }
 
 export function decodeEntities(s) {
+  // CASE-SENSITIVE FOR NAMED REFERENCES (Batch 105; verify F45-2): the table is HTML5's own
+  // spellings, so '&amp;' and '&AMP;' resolve and '&AMP' (no semicolon) does not, exactly as HTML5
+  // reads them. The hex branch keeps the case-insensitivity HTML itself has: '&#x'/'&#X' and either
+  // case of the digits.
   return String(s)
-    .replace(/&#x([0-9a-f]+);/gi, (_, h) => charOrReplacement(parseInt(h, 16)))
+    .replace(/&#[xX]([0-9a-fA-F]+);/g, (_, h) => charOrReplacement(parseInt(h, 16)))
     .replace(/&#(\d+);/g, (_, d) => charOrReplacement(Number(d)))
-    .replace(/&([a-z]+);/gi, (m, n) => NAMED[n.toLowerCase()] ?? m);
+    .replace(/&([A-Za-z][A-Za-z0-9]*);/g, (m, n) => NAMED[n] ?? m);
 }
 
 // THE SEPARATOR-CLASS ENTITY SPELLING, READ AS THE SEPARATOR IT NAMES (Batch 101; F42-5). The
@@ -2926,15 +2989,22 @@ export function decodeEntities(s) {
 // '&shyabc;' is '&shy' followed by the text 'abc;' -- the longer non-name is not swallowed whole.
 // The other 104 legacy names resolve to characters outside this class and are left as the text they
 // are, which is the reach '&amp;' has always had (an ordinary reference must not move).
+// THE NAMES ARE CASE-SENSITIVE, exactly as HTML5 reads them (Batch 105; verify F45-2): '&nbsp'
+// and '&shy' are legacy names, '&NBSP' and '&SHY' are not, and the previous revision read the
+// upper-case spellings as separators where Python's html.unescape leaves them literal.
 const NAMED_NAMES_ALT = Object.keys(NAMED).sort((a, b) => b.length - a.length).join('|');
 // A legacy no-semicolon reference for the two class names, or any named reference WITH its semicolon.
-// The named branch is tried first, so a semicolon spelling always wins over its legacy prefix.
+// The named branch is tried first, so a semicolon spelling always wins over its legacy prefix. The
+// named and legacy branches are CASE-SENSITIVE (Batch 105; verify F45-2): the pattern carries no 'i'
+// flag and the table is looked up with the spelling as written, so '&NBSP;' and '&SHY;' -- which
+// HTML5 leaves literal -- are left literal here too. The numeric branches are case-insensitive only
+// where HTML is: the 'x' may be 'X' and the hex digits may be either case.
 const ENTITY_REFERENCE = new RegExp(
-  '&(?:#x([0-9a-f]+);?|#(\\d+);?|(' + NAMED_NAMES_ALT + ');|(nbsp|shy))', 'gi');
+  '&(?:(?:#[xX])([0-9a-fA-F]+);?|#(\\d+);?|(' + NAMED_NAMES_ALT + ');|(nbsp|shy))', 'g');
 function resolvedReference(hex, dec, name) {
   if (hex !== undefined) return charOrReplacement(parseInt(hex, 16));
   if (dec !== undefined) return charOrReplacement(Number(dec));
-  return NAMED[String(name).toLowerCase()] ?? null;
+  return NAMED[name] ?? null;
 }
 export function decodeSeparatorEntities(s) {
   return String(s).replace(ENTITY_REFERENCE, (match, hex, dec, name, legacy) => {
@@ -3324,10 +3394,14 @@ export function plainText(raw, limit) {
   // space, so the answer at every one of these bytes is LF's own answer.
   // THE INFORMATION IS KEPT NOW (Batch 101): a control byte that is not an ordinary word gap, and a
   // non-ordinary whitespace spelling, become the SEPARATOR MARK rather than a space, so the shape
-  // rules can tell a split from a word gap. The published byte is unchanged -- the mark renders as a
-  // space at every redaction entry point -- and an incoming mark is normalised to a space here first,
-  // so no input can forge one. The run collapse below keeps a single mark for a run that carried one,
-  // which is the same collapsing the whitespace run always got.
+  // rules can tell a split from a word gap. The published byte is unchanged for a CONTROL byte it
+  // already spaced, but NOT for a non-ordinary WHITESPACE spelling: the notice path keeps the raw
+  // character and now renders it as the space the mark publishes as, where 3fcf85c published the
+  // character itself -- assembleNotice('rss', 'a<NBSP>b', [], 128) is 'rss: a b' here and
+  // 'rss: a<NBSP>b' there (the closing sweep's F45-4; the sentence this paragraph carried was false).
+  // An incoming mark is normalised to a space here first, so no input can forge one. The run collapse
+  // below keeps a single mark for a run that carried one, which is the same collapsing the whitespace
+  // run always got.
   const text = neutraliseMarkers(
     markSeparators(decodeEntities(
       decodeSeparatorEntities(neutraliseEntityTags(String(raw).replace(SEPARATOR_MARK_RE, ' ')))

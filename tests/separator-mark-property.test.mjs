@@ -285,7 +285,7 @@ test('the published bytes never carry the mark, the caps hold, and both passes a
 // accurate rather than implied: each is over-removal or a published fragment, none publishes a
 // whole credential, and the shipped pipeline redacts once. If one of these is ever fixed, the row
 // moves with the fix instead of passing silently.
-test('the recorded Low bounds: the candidate re-redaction, the early-stop tail, the bare stamp', () => {
+test('the recorded Low bounds: the candidate re-redaction, the bare stamp, and the early-stop tail CLOSED', () => {
   const ZWSP = String.fromCodePoint(0x200b);
   const MSP = String.fromCodePoint(0x205f);
   // F43-2 (Low, over-removal on a re-redaction): the candidate pass is not a fixed point here --
@@ -297,13 +297,15 @@ test('the recorded Low bounds: the candidate re-redaction, the early-stop tail, 
     'the first candidate pass moved: the recorded F43-2 reach is stale');
   assert.equal(candidate(candidate(f432)), '[redacted]',
     'the second candidate pass no longer over-removes: the recorded F43-2 reach is stale');
-  // F43-3 (Low, a published fragment): the multi-run join stops at the first accepting prefix, so
-  // the split's tail stays. It is a fragment, not the credential: the whole value is not present
-  // and cannot be recovered from the published text.
+  // F43-3 (Low in Batch 103; CLOSED in Batch 105): the multi-run join stopped at the first
+  // accepting prefix, so the split's tail stayed published. The acceptances are now read to the end
+  // of the run (the closing sweep's F45-1, where the Basic-side tail decoded to the password), so the
+  // whole body is removed and no fragment of it publishes. This row pins the CLOSURE: re-introducing
+  // the early stop leaves 'ijklmnop' and fails here.
   const f433 = 'a commit carried ghp_ab' + ZWSP + 'cd' + ZWSP + 'efgh' + ZWSP + 'ijklmnop end';
   for (const [surface, text] of [['candidate', candidate(f433)], ['notice', notice(f433)]]) {
     assert.ok(!PUBLISHED(text, CLASSIC), surface + ' published the whole credential behind the early stop');
-    assert.ok(text.includes('ijklmnop'), surface + ' no longer leaves the recorded tail: the F43-3 reach is stale');
+    assert.ok(!text.includes('ijklmnop'), surface + ' still leaves the early-stop tail (F43-3 was closed in Batch 105)');
   }
   // F43-4 (Low, pre-existing, over-removal only): the diagnostic-stamp exemption is read where an
   // ordinary word gap is crossed by a value the rule could not match as it stands, so a BARE stamp

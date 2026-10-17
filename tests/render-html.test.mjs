@@ -58,6 +58,25 @@ test('F44-3: the internal characters do not reach the .html, and strip rather th
     'a digest carrying U+0000 is no longer refused');
 });
 
+test('F45-3: C1 controls and the invisible class do not reach the .html either', () => {
+  // The Batch 104 fix spaced the three internal characters and C0/DEL. The class one position over --
+  // C1 controls (the module's own CONTROL_CHARACTERS includes U+0080-U+009F) and the invisible/
+  // default-ignorable class -- still reached the .html while the gate PASSed (closing sweep F45-3).
+  // A digest that quotes a source carrying one must not publish it, and the character is spaced
+  // rather than eating the text around it.
+  const chars = [
+    ['a C1 control', '\u0080'], ['NEL', '\u0085'], ['CSI', '\u009B'], ['APC', '\u009F'],
+    ['ZWSP', '\u200B'], ['SHY', '\u00AD'], ['FEFF', '\uFEFF'], ['WJ', '\u2060'],
+    ['LS', '\u2028'], ['PS', '\u2029'], ['LRM', '\u200E'], ['the Hangul filler', '\u3164'],
+    ['a tag character', '\u{E0000}'], ['a variation selector', '\u{E0100}'],
+  ];
+  for (const [label, ch] of chars) {
+    const html = render(md.replace('cap not hit', 'cap not hit' + ch + 'probe'), config);
+    assert.ok(!html.includes(ch), label + ' reached the .html deliverable');
+    assert.match(html, /probe/, label + ' was removed with its text instead of being rendered as a space');
+  }
+});
+
 test('render links the cited URL and escapes the headline', () => {
   const html = render(md, config);
   assert.match(html, /href="https:\/\/huggingface\.co\/blog\/x"/);
