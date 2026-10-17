@@ -64,7 +64,12 @@ test('plainText strips tags and bounds the result', () => {
 // the pool and stderr. \s+ collapses none of ESC, NUL, BS or DEL: an ESC sequence that
 // survived into a terminal notice redrew the operator's line, which is the defect this
 // pins.
-test('plainText drops C0, DEL and C1 controls instead of passing them through', () => {
+// Batch 93 (closing sweep F39-1) widened this row's second claim. No control byte SURVIVES -- the
+// terminal-safety property this row was written for, and it is unchanged -- but a control byte is
+// now the word separator it is in the text the surface wrote, not a deletion: a deletion glues the
+// words it stood between, and the words a candidate can carry are a credential keyword and its
+// value. The printable text around each control is still there and the words stay separate.
+test('plainText drops no control code point into the published text, and spaces where it stood', () => {
   const hostile = 'a\u001b[2Kb\u0000c\u0008d\u007f e\u009ff';
   const out = plainText(hostile, 200);
   const offenders = [...out].filter((ch) => {
@@ -72,7 +77,9 @@ test('plainText drops C0, DEL and C1 controls instead of passing them through', 
     return cp < 0x20 || (cp >= 0x7f && cp <= 0x9f);
   });
   assert.deepEqual(offenders, [], 'control code points survived: ' + JSON.stringify(out));
-  assert.match(out, /a\[2Kbcd/, 'the printable text around each control is still there');
+  assert.equal(out, 'a [2Kb c d e f',
+    'a control byte no longer keeps the words it stood between apart: ' + JSON.stringify(out));
+  assert.match(out, /a \[2Kb c d e f/, 'the printable text around each control is still there');
 });
 
 // Closing sweep F38-1 (Medium, Batch 88), the upstream half of the same class. U+0085 is a
@@ -94,9 +101,15 @@ test('plainText spaces a NEL exactly as it spaces LF, so a keyword keeps its dis
   assert.equal(plainText(shape(NEL), 200), 'auth=Basic ' + B64,
     'the NEL is not the space LF is');
 });
-test('plainText still drops every other C1 control beside the NEL it now spaces', () => {
+// Batch 93 (closing sweep F39-1): the C1 controls beside a NEL are the same class the NEL was in,
+// so they answer the way it does -- one space each, LF's own answer. The row used to pin the drop
+// as intended behaviour; the drop was the defect (see the row above and the property test in
+// tests/control-separator-property.test.mjs).
+test('plainText spaces every other C1 control beside the NEL it also spaces', () => {
   const out = plainText('a\u009b' + 'b' + String.fromCharCode(0x85) + 'c\u009fd', 200);
-  assert.equal(out, 'ab cd', 'the C1 controls beside the NEL are no longer dropped: ' + JSON.stringify(out));
+  assert.equal(out, 'a b c d', 'a C1 control still glued the words it stood between: ' + JSON.stringify(out));
+  assert.equal(out, plainText('a\n' + 'b' + String.fromCharCode(10) + 'c\nd', 200),
+    'a C1 control does not answer as LF does');
 });
 
 // Regression test: the length bound must survive the character-class rule, so a

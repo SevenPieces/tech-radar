@@ -16,7 +16,7 @@ import {
   fetchText, hostOf, isDiscoveryOnly, splitItems, field, atomLink, plainText, redactUrl,
   neutraliseMarkers, neutraliseLinkSeams, noticePreservingRewrites, neutraliseUrl, redactSecrets,
   requestSecrets, requestSecretSets, neutraliseTagSpans, neutraliseEntityTags, repriceShapedError,
-  redactCredentialShapes, NOTICE_SEPARATOR, NO_DETAIL_REASON,
+  redactCredentialShapes, NOTICE_SEPARATOR, NO_DETAIL_REASON, CONTROL_CHARACTERS,
 } from './lib/net.mjs';
 
 // The collector must work from any working directory, so the default configuration
@@ -44,20 +44,18 @@ const GITHUB_API = 'https://api.github.com';
 // known from configuration before the first request, because the redaction is also part of what
 // the cap is priced with: a notice priced against a smaller set than it is published under can
 // only be lengthened by the difference, and a lengthened notice loses its tail (TR-168).
-const NOTICE_CONTROLS = /[\u0000-\u001f\u007f-\u009f]/g;
-// A NEL IS A LINE END HERE TOO (Batch 91). The rule above is the design's own: a whitespace control
-// becomes a space, every other C1 byte is dropped. U+0085 is White_Space=Yes -- the same fact the
-// module states where it declares the five line terminators a header's value ends at (net.mjs
-// AUTH_LINE_TERMINATORS) and the same one Batch 88 read when it stopped plainText dropping it --
-// but JavaScript's \s does not match it, so this test DROPPED it and glued a keyword to the value
-// behind it: 'authorization:' + NEL + '<token>' was published as one word no rule can read, where
-// LF, CR, CRLF, LS and PS each leave the space that lets the rule remove the credential, and a
-// NEL therefore ends a line here as it does in every other boundary the module reads. Measured on
-// the assembled notice at caps 128/402/1000: the rows that change are exactly the ones carrying a
-// NEL (36 of 126 in the matrix; 0 of the rows carrying no NEL change), and none of them loses its
-// source, its status or its cause. Spacing is also the only direction that can remove: a space can
-// never publish a credential an LF would have removed.
-const NOTICE_SPACE_CONTROL = /[\t\n\v\f\r \u001c-\u001f\u0085\u00a0\u1680\u2000-\u200a\u2028\u2029\u202f\u205f\u3000\ufeff]/;
+// THE SAME CONTROL CLASS plainText READS, BY NAME (Batch 93; closing sweep F39-1). The range
+// stands once, in net.mjs, because the two sites share one rule: a control byte standing between
+// two words in published text becomes the space that keeps them apart. Batch 91 taught this pass
+// that a NEL ends a line here too and spaced it; the rule it wrote is not about the NEL, and every
+// other byte the old predicate dropped glues exactly what the NEL glued -- 'authorization:' + CSI +
+// '<token>' was published as one word no rule can read, where LF, CR, CRLF, LS, PS and NEL each
+// leave the space that lets the rule remove the credential. This pass now spaces the whole class,
+// as plainText does, so the candidate field and the assembled notice answer identically at every
+// byte. Spacing is also the only direction that can remove: a space can never publish a credential
+// its own line end would have removed, and the notice matrix at caps 128/402/1000 was re-measured
+// for the whole class (Batch 93) with no row losing its source, its status or its cause.
+const NOTICE_CONTROLS = new RegExp('[' + CONTROL_CHARACTERS + ']', 'g');
 // The notice cap has a usable range, not merely a type. Below the floor an assembled notice
 // cannot carry its source, the separator and even the shortest diagnosis; above the ceiling the
 // value bounds nothing an assembled notice could contain -- every part of one is bounded already
@@ -237,7 +235,7 @@ function requireNoticeLimit(value) {
 // (TR-122, TR-123).
 export function neutraliseNoticeText(text) {
   const spaced = neutraliseTagSpans(neutraliseEntityTags(
-    String(text).replace(NOTICE_CONTROLS, (ch) => (NOTICE_SPACE_CONTROL.test(ch) ? ' ' : '')),
+    String(text).replace(NOTICE_CONTROLS, ' '),
   ));
   // The markdown link seam belongs to this path and not to the neutraliser a candidate field
   // uses: a notice is published verbatim in the Coverage note, while a release body's links are

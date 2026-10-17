@@ -305,24 +305,35 @@ test('F27-5 residual: the assembly\u2019s own reason survives a value that spell
     'the reason protection leaked into ordinary prose');
 });
 
-test('a NEL is a line end in notice text: it is spaced, never dropped', () => {
-  // A NEL (U+0085) is White_Space=Yes and one of the five line terminators the module reads, but
-  // JavaScript's \s does not match it, so the notice control pass used to DROP it while spacing LF,
-  // CR, CRLF, LS, PS and TAB. Dropping it glued a keyword to the value behind it -- one word no
-  // removal rule can read -- so 'authorization:' + NEL + '<token>' was published as a single word
-  // where every other line end leaves the space that lets the rule remove the credential.
+// Batch 91 closed this for one byte; Batch 93 (closing sweep F39-1) closed the class. The rule the
+// notice control pass applies is not an exception for the NEL: a control byte standing between two
+// words becomes the space that keeps them apart, because a dropped byte glues a keyword to the value
+// behind it -- one word no removal rule can read. Measured end to end (tests/
+// control-separator-property.test.mjs drives the shipped collector over 0x00-0xFF): 'authorization:'
+// + CSI + '<token>' was published as a single word before Batch 93, exactly as the NEL spelling was
+// before Batch 91.
+test('a control byte is a separator in notice text: it is spaced, never dropped', () => {
   const NEL = '\u0085';
   assert.equal(neutraliseNoticeText('a' + NEL + 'b'), 'a b',
     'a NEL is a line end and becomes a space, not nothing');
   assert.equal(neutraliseNoticeText('a' + '\n' + 'b'), neutraliseNoticeText('a' + NEL + 'b'),
     'a NEL answers exactly as LF does');
-  for (const cap of [128, 402, 1000]) {
-    const notice = assembleNotice('rss', 'authorization:' + NEL + 'tok_9f3a2c7d1e5b', [], cap);
-    assert.ok(!notice.includes('tok_9f3a2c7d1e5b'),
-      'the credential behind a NEL was published at cap ' + cap + ': ' + JSON.stringify(notice));
-    assert.ok(notice.startsWith('rss: '), 'the notice lost its source: ' + JSON.stringify(notice));
+  // Every control byte, not the NEL alone: the notice pass reads the same named class plainText
+  // does (net.mjs CONTROL_CHARACTERS), so the assembled notice and the candidate field cannot
+  // answer differently at any byte.
+  for (let cp = 0x00; cp <= 0x9f; cp += 1) {
+    if (cp >= 0x20 && cp <= 0x7e) continue; // printable: not this class
+    const ch = String.fromCharCode(cp);
+    assert.equal(neutraliseNoticeText('a' + ch + 'b'), neutraliseNoticeText('a\nb'),
+      'a control byte at U+' + cp.toString(16).padStart(4, '0') + ' is not spaced as LF is');
   }
-  // The other C1 controls keep the rule this one is the exception to: a non-whitespace C1 control
-  // is dropped, not spaced.
-  assert.equal(neutraliseNoticeText('a\u0000b'), 'ab', 'a non-whitespace C1 control is still dropped');
+  for (const cap of [128, 402, 1000]) {
+    for (const sep of [NEL, '\u009b', '\u0000', '\u007f', '\u0080', '\u009f']) {
+      const notice = assembleNotice('rss', 'authorization:' + sep + 'tok_9f3a2c7d1e5b', [], cap);
+      assert.ok(!notice.includes('tok_9f3a2c7d1e5b'),
+        'the credential behind U+' + sep.codePointAt(0).toString(16) + ' was published at cap ' + cap
+        + ': ' + JSON.stringify(notice));
+      assert.ok(notice.startsWith('rss: '), 'the notice lost its source: ' + JSON.stringify(notice));
+    }
+  }
 });

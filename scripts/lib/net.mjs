@@ -2177,7 +2177,20 @@ export function splitItems(xml) {
 // on a published card: a marker's bracket and colon become spaces, and a status token's
 // hash becomes a space rather than being deleted. Markdown link syntax is the same class
 // of trusted text, so the seam below is spaced here too. The length bound is applied last.
+// THE CONTROL BYTES, NAMED AND EXPORTED SO ONE RULE HAS ONE SOURCE (Batch 93; closing sweep
+// F39-1). Every site that normalises control bytes in text the pipeline PUBLISHES reads this same
+// class: plainText below (a candidate field), and neutraliseNoticeText in collect.mjs (an assembled
+// notice). The rule the two sites share is that words keep their separation: a control byte standing
+// between two words becomes the space that keeps them apart, and NONE is dropped, because a dropped
+// byte glues a credential keyword to its value at a gap every keyword rule requires at least one
+// character to fill. The class stands here three times for three read shapes -- the global replace,
+// the plain string class a caller can compose, and a non-global test -- and all three are the one
+// range 0x00-0x1F plus 0x7F-0x9F. A site that needs the rule reads one of these names rather than
+// writing the range again, which is what let the F38-1 class close one byte at a time (Batch 88
+// spaced U+0085 here and in the notice pass while the rest of the range kept gluing).
 const CONTROLS = /[\u0000-\u001f\u007f-\u009f]/g;
+export const CONTROL_CHARACTERS = '\u0000-\u001f\u007f-\u009f';
+export const CONTROL_PATTERN = /[\u0000-\u001f\u007f-\u009f]/;
 // A whole marker, opener and closer together, with a plausible body after the opener: a
 // bracketed span that reads like a label rather than a sentence. Both brackets and the colon
 // become spaces and the body keeps its words, so 'Rust 1.90 [prov:preprint] notes' reads
@@ -2480,20 +2493,25 @@ export function plainText(raw, limit) {
   // the digest is written from, and a GitHub release body is Markdown by construction, so its
   // links are the normal case rather than a hostile spelling. The notice rewriting that ends the
   // seam belongs to notice text alone (TR-112, TR-165).
-  // U+0085 NEXT LINE is a whitespace control by Unicode (White_Space=Yes) and one of the five line
-  // ends the module reads (AUTH_LINE_TERMINATORS), but JavaScript's \s -- the predicate this line
-  // used -- is every other whitespace character and NOT it, so the NEL fell into the DROP branch
-  // instead of the SPACE branch. Dropping it glues the words it separated, and the words it separated
-  // are exactly a credential keyword and its value: 'auth=Basic' + NEL + <base64> reached the pool as
-  // the single word 'auth=Basic<base64>', which no rule can read, because every keyword gap requires
-  // at least one character. Measured on the shipped collector with an RSS title (Batch 88; closing
-  // sweep F38-1): LF, CR, CRLF, LS, PS, SP and TAB were all removed and the NEL spelling published
-  // byte for byte, at 87bddfd and with the wider keyword rules alone. Spacing it here is LF's own
-  // answer -- this pass already collapses every whitespace run to one space -- and it is the
-  // documented rule for a whitespace control ('so words keep their separation').
+  // EVERY CONTROL BYTE IS A WORD SEPARATOR HERE (Batch 93; closing sweep F39-1, the whole-class
+  // closing of the F38-1 fix Batch 88 applied to U+0085 alone). The rule is a statement about what
+  // published text is, not about one character: a byte that stands between two words in the text an
+  // upstream surface wrote is a word separator, and the pipeline has to keep the words as separate
+  // as the surface spelled them. Batch 88 spaced U+0085 because dropping it glued 'auth=Basic' to
+  // its base64 value and every keyword gap requires at least one character. EVERY OTHER byte this
+  // line used to drop is the same byte: U+0000-08, U+000E-1F, U+007F and U+0080-84/U+0086-9F are
+  // all dropped by the old predicate, and each of them glues exactly what the NEL glued. Measured
+  // on the shipped keyless candidate pass with the suite's own stubbed transport (Batch 93; the
+  // p15 matrix over 0x00-0x9F at six shapes, then end to end): 'auth=Basic' + U+009B + <base64> and
+  // 'Bearer' + U+009B + <token> were published byte for byte in the pool title, and so were the
+  // U+0080 and U+009F spellings, where LF, CR, CRLF, LS, PS, NEL, SP and TAB all removed them --
+  // identically at 87bddfd, so the class is pre-existing rather than one Batch 88 opened. Spacing
+  // is also the only direction that can remove: a space can never publish a credential its own
+  // line end would have removed, and this pass already collapses every whitespace run to one
+  // space, so the answer at every one of these bytes is LF's own answer.
   const text = neutraliseMarkers(
     decodeEntities(neutraliseEntityTags(String(raw)).replace(/<[^>]*>/g, ' '))
-      .replace(CONTROLS, (ch) => (/\s/.test(ch) || ch === '\u0085' ? ' ' : '')),
+      .replace(CONTROLS, ' '),
   )
     .replace(/\s+/g, ' ').trim();
   return text.length > bound ? text.slice(0, bound) : text;
