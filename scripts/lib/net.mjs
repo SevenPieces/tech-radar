@@ -354,6 +354,20 @@ export const INVISIBLE_SEPARATOR_PATTERN = /\p{Default_Ignorable_Code_Point}/u;
 // 656 now (all at ordinary word gaps). ZERO cells leak behind a control byte, a default-ignorable, a
 // non-ordinary whitespace spelling or an entity spelling.
 //
+// THE ENTITY FAMILY IS THE WHOLE HTML5 FAMILY NOW (Batch 103; the Gate's F43-1). The measurement
+// above read 17 entity spellings, and Batch 102's table named 22 of the 32 HTML5 names that resolve
+// to a member of this class; ten were outside it (the two U+2061 names, the invisible comma and
+// times names, the two em-spaces and the four Negative*Space spellings) and the semicolon-less
+// numeric reference was not read. A reader decoded every one, so the value behind one published: measured on the derived
+// family -- the 32 named spellings and 16 numeric spellings x 4 surfaces (candidate, notice, two
+// pool fields through the shipped keyless collectAll), 192 cells -- 96 leaking cells / 24 spellings
+// at 92bd0f3, 0 now. The semicolon-less numeric read has a measured corpus price, stated rather
+// than hidden: 3 lines of the tracked corpus move on both passes, all three the '&#0' control-byte
+// spelling in the suite's own entity-seam fixtures (tests/reprice-and-seam-regression.test.mjs), a
+// reference an HTML reader resolves to U+0000 exactly as this module now does; no shipped document
+// line moves, and 50 ordinary entity prose rows ('&amp;', '&mdash;', '&lt;', '&copy;', '&nbsp;',
+// '&hellip;', ...) are byte-identical on both passes -- the direction that keeps prose.
+//
 // THE PRICE OF THE ORDINARY WORD GAP, measured in both directions rather than assumed. Closing the
 // remaining cells -- treating a space or a line end as split evidence -- was run as a variant of
 // this exact model: it takes the matrix to 0 and the shipped pool to 0 of 44,928, and it reaps 28
@@ -2732,6 +2746,20 @@ const NAMED = {
   // (an ordinary '&amp;' must not move), which is the stated reach of the decoding.
   zerowidthjoiner: '\u200d', zerowidthnonjoiner: '\u200c', verythinspace: '\u200a',
   invisibleplus: '\u2064', nobreakspace: '\u00a0', thickspace: '\u205f',
+  // THE FAMILY IS DERIVED, NOT SAMPLED (Batch 103; the Gate's F43-1). Batch 102 claimed the table was
+  // the whole HTML5 spelling set and it was not: ten names that resolve to a member of this class
+  // were outside it, and a reference a Markdown/HTML reader decodes published the value behind it --
+  // measured through the shipped keyless collectAll, a PAT body split by '&af;' came back byte for
+  // byte in the pool title AND summary. The table is now DERIVED from the WHATWG list: of
+  // the 2,125 named references Python's html.entities.html5 carries (offline, the HTML5 table), the
+  // 32 whose value is exactly one code point of the one separator class are all here. The ten Batch
+  // 102 missed are the ones below; the other 22 were already named above. A name outside the table
+  // is left as the text it is, and the derivation is re-runnable: the commit that added these rows
+  // carries the command. '&ThickSpace;' is the one multi-codepoint name whose every code point is a
+  // class member (U+205F U+200A); it is named by its first member, which is the same evidence.
+  af: '\u2061', applyfunction: '\u2061', emsp13: '\u2004', emsp14: '\u2005',
+  ic: '\u2063', it: '\u2062', negativeverythinspace: '\u200b',
+  negativethinspace: '\u200b', negativemediumspace: '\u200b', negativethickspace: '\u200b',
 };
 
 // A numeric character reference may name a code point that does not exist
@@ -2760,7 +2788,19 @@ export function decodeEntities(s) {
 // mark rather than the byte, so an entity can never put a control back into a published text.
 // A non-ordinary separator resolves to itself: it is split evidence the rules already read, and the
 // published text keeps it as the surface wrote it (the spaced view).
-const ENTITY_REFERENCE = /&(?:#x([0-9a-f]+);|#(\d+);|([a-z][a-z0-9]*);)/gi;
+//
+// THE NUMERIC REFERENCE NEEDS NO SEMICOLON HERE EITHER (Batch 103; the Gate's F43-1, the same reading
+// AUTH_COLON has taken since Batch 81). HTML resolves a numeric character reference whose semicolon is
+// missing -- a parse error the spec still resolves -- so '&#8203', '&#x200B', '&#9', '&#32', '&#160' and
+// '&#8288' reach every reader that decodes the text except this one, and a value split by one published
+// byte for byte in the pool (measured through the shipped keyless collectAll). The semicolon is optional
+// for the decimal and the hexadecimal spelling alike. The digit guard is the longest-match rule the HTML
+// spec itself uses -- the whole digit run is consumed -- so a reference that continues into another
+// character is NOT misread: '&#82030' is U+1406E and '&#x200B1' is U+200B1, neither a separator, and both
+// are left as the text they are. The named reference still requires its semicolon: HTML resolves no named
+// reference without one unless it is in its legacy list, and no class name is (the same bound AUTH_COLON
+// records for '&colon').
+const ENTITY_REFERENCE = /&(?:#x([0-9a-f]+);?|#(\d+);?|([a-z][a-z0-9]*);)/gi;
 function resolvedReference(hex, dec, name) {
   if (hex !== undefined) return charOrReplacement(parseInt(hex, 16));
   if (dec !== undefined) return charOrReplacement(Number(dec));

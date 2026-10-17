@@ -44,10 +44,24 @@ const ORDINARY_GAPS = [0x0a, 0x0d, 0x20, 0x85, 0x2028, 0x2029];
 const EVIDENCE_CHARS = [0x00, 0x01, 0x07, 0x08, 0x09, 0x0b, 0x0c, 0x1b, 0x1f, 0x7f, 0x9b, 0x9f,
   0xad, 0x34f, 0x61c, 0x115f, 0x180e, 0x200b, 0x200c, 0x200d, 0x2060, 0x2061, 0x3164, 0xfe00,
   0xfeff, 0xa0, 0x1680, 0x2000, 0x2007, 0x202f, 0x205f, 0x3000, 0xe0001, 0xe0020, 0xe007f, 0xe0100];
+// THE WHOLE HTML5 FAMILY OF THE CLASS, DERIVED AND PINNED (Batch 103; the Gate's F43-1). The ten
+// names below the original list are what Batch 102 claimed the table already carried and did not;
+// the 32-name list is the derivation -- every HTML5 named reference whose value is one code point
+// of the one separator class -- so a name dropped from the table fails this file at its own
+// spelling. The numeric no-semicolon spellings are the form HTML resolves and the module now reads.
 const ENTITY_SPELLINGS = ['&#8203;', '&#x200B;', '&ZeroWidthSpace;', '&shy;', '&InvisibleTimes;',
   '&NoBreak;', '&zwnj;', '&zwj;', '&lrm;', '&#0;', '&#31;', '&#127;', '&#32;', '&nbsp;', '&#8288;',
   '&ZeroWidthJoiner;', '&ZeroWidthNonJoiner;', '&VeryThinSpace;', '&InvisiblePlus;', '&InvisibleComma;',
-  '&NoBreakSpace;', '&ThickSpace;', '&ensp;', '&emsp;', '&thinsp;'];
+  '&NoBreakSpace;', '&ThickSpace;', '&ensp;', '&emsp;', '&thinsp;',
+  '&af;', '&ApplyFunction;', '&emsp13;', '&emsp14;', '&ic;', '&it;', '&NegativeVeryThinSpace;',
+  '&NegativeThinSpace;', '&NegativeMediumSpace;', '&NegativeThickSpace;',
+  '&#8203', '&#x200B', '&#9', '&#160', '&#8288', '&#173', '&#xAD'];
+// The derivation's own 32 named spellings, for the completeness row in the anti-vacuity test.
+const HTML5_CLASS_NAMES = ['af', 'ApplyFunction', 'InvisibleComma', 'InvisibleTimes', 'MediumSpace',
+  'NegativeMediumSpace', 'NegativeThickSpace', 'NegativeThinSpace', 'NegativeVeryThinSpace',
+  'NewLine', 'NoBreak', 'NonBreakingSpace', 'Tab', 'ThinSpace', 'VeryThinSpace', 'ZeroWidthSpace',
+  'emsp13', 'emsp14', 'emsp', 'ensp', 'hairsp', 'ic', 'it', 'lrm', 'nbsp', 'numsp', 'puncsp',
+  'rlm', 'shy', 'thinsp', 'zwj', 'zwnj'];
 
 const escapeChar = (ch) => ch.replace(/[.*+?^$(){}|[\]\\]/g, '\\$&');
 const RECOVER = (value) => new RegExp([...value].map(escapeChar).join(SCHEME_GAP + '*'), 'u');
@@ -55,12 +69,22 @@ const NAMED_READER = { shy: '\u00ad', zerowidthspace: '\u200b', zwnj: '\u200c', 
   lrm: '\u200e', rlm: '\u200f', nobreak: '\u2060', invisibletimes: '\u2062', invisiblecomma: '\u2063',
   nbsp: ' ', ensp: '\u2002', emsp: '\u2003', thinsp: '\u2009', hairspace: '\u200a',
   zerowidthjoiner: '\u200d', zerowidthnonjoiner: '\u200c', verythinspace: '\u200a',
-  invisibleplus: '\u2064', nobreakspace: '\u00a0', thickspace: '\u205f' };
+  invisibleplus: '\u2064', nobreakspace: '\u00a0', thickspace: '\u205f',
+  // The ten names Batch 102 was missing, and the rest of the derived 32-name family.
+  af: '\u2061', applyfunction: '\u2061', emsp13: '\u2004', emsp14: '\u2005', ic: '\u2063',
+  it: '\u2062', negativeverythinspace: '\u200b', negativethinspace: '\u200b',
+  negativemediumspace: '\u200b', negativethickspace: '\u200b',
+  newline: '\n', tab: '\t', thinspace: '\u2009', nonbreakingspace: '\u00a0', numsp: '\u2007',
+  puncsp: '\u2008', mediumspace: '\u205f' };
 // A credential is PUBLISHED when it is present whole, or readable back with only class separators
 // between its characters -- read in a READER's view, so an entity spelling is decoded first.
+// A reader resolves a numeric reference whether or not its semicolon is there (HTML's own rule),
+// and the longest digit run is the reference -- the same reading the module takes (Batch 103).
+const codePointOrReplacement = (n) => (n > 0x10ffff || (n >= 0xd800 && n <= 0xdfff) ? '\uFFFD'
+  : String.fromCodePoint(n));
 const readerView = (text) => String(text)
-  .replace(/&#x([0-9a-f]+);/gi, (m, h) => String.fromCodePoint(parseInt(h, 16)))
-  .replace(/&#(\d+);/g, (m, d) => String.fromCodePoint(Number(d)))
+  .replace(/&#x([0-9a-f]+);?/gi, (m, h) => codePointOrReplacement(parseInt(h, 16)))
+  .replace(/&#(\d+);?/g, (m, d) => codePointOrReplacement(Number(d)))
   .replace(/&([a-z][a-z0-9]*);/gi, (m, n) => NAMED_READER[String(n).toLowerCase()] ?? m);
 const PUBLISHED = (text, value) => text.includes(value) || RECOVER(value).test(readerView(text));
 
@@ -115,6 +139,28 @@ test('anti-vacuity: plainText records the separator, and the class membership is
     const ch = String.fromCodePoint(cp);
     assert.equal(plainText('a' + ch + 'b', 100), 'a b',
       u(cp) + ' is an ordinary word gap and was recorded as evidence');
+  }
+  // THE ENTITY TABLE IS THE DERIVED FAMILY, not a sample (Batch 103; the Gate's F43-1): every one
+  // of the 32 HTML5 names whose value is a class member is read as the separator it names. A name
+  // dropped from the table leaves its reference as text, the reader below decodes it, and the
+  // matrix test's row for that spelling then publishes -- the two rows pin the family together.
+  for (const name of HTML5_CLASS_NAMES) {
+    assert.equal(plainText('a&' + name + ';b', 100), 'a' + MARK + 'b',
+      '&' + name + '; is not read as the separator it names: the table is not the derived family');
+  }
+  // The numeric reference without its semicolon is the form HTML resolves, and the module reads it
+  // the same way (Batch 103): the class member it names is the reference's evidence.
+  for (const ref of ['&#8203', '&#x200B', '&#9', '&#32', '&#160', '&#8288']) {
+    // A following '!' rather than a letter: the hex spelling consumes every hex digit after it, the
+    // way HTML does, so a 'b' would be part of the reference (see the digit-guard row below).
+    assert.equal(plainText('a' + ref + '!b', 100), 'a' + MARK + '!b',
+      ref + ' (no semicolon) is not read as the separator it names');
+  }
+  // THE DIGIT GUARD: the whole digit run is the reference, so a longer numeric reference is not
+  // misread as a class member followed by text. These are real code points and are left alone.
+  for (const [ref, cp] of [['&#82030', 0x1406e], ['&#x200B1', 0x200b1], ['&#320', 0x140], ['&#1600', 0x640]]) {
+    assert.equal(plainText('a' + ref + '!b', 100), 'a' + ref + '!b',
+      ref + ' was misread as a class member plus trailing text (it is ' + u(cp) + ')');
   }
   // The NOTICE control pass records the same evidence, through the same normaliser: a notice text
   // that names a control byte carries the mark until the assembly renders it. Without this the pass
@@ -229,4 +275,41 @@ test('the published bytes never carry the mark, the caps hold, and both passes a
       assert.ok(assembled.startsWith('rss: '), 'a notice lost its source and separator: ' + JSON.stringify(assembled));
     }
   }
+});
+
+// THE RECORDED LOWS AT THIS REVISION (Batch 103). Three measured bounds, pinned so the record is
+// accurate rather than implied: each is over-removal or a published fragment, none publishes a
+// whole credential, and the shipped pipeline redacts once. If one of these is ever fixed, the row
+// moves with the fix instead of passing silently.
+test('the recorded Low bounds: the candidate re-redaction, the early-stop tail, the bare stamp', () => {
+  const ZWSP = String.fromCodePoint(0x200b);
+  const MSP = String.fromCodePoint(0x205f);
+  // F43-2 (Low, over-removal on a re-redaction): the candidate pass is not a fixed point here --
+  // the first pass renders the separator as the space it publishes as, and a SECOND pass no longer
+  // sees the evidence and reads the header. No credential is published; the shipped pipeline runs
+  // the pass once. Recorded, not closed: the evidence cannot survive the published view.
+  const f432 = 'authorization: token' + MSP + 'buildtoken';
+  assert.equal(candidate(f432), 'authorization: token buildtoken',
+    'the first candidate pass moved: the recorded F43-2 reach is stale');
+  assert.equal(candidate(candidate(f432)), '[redacted]',
+    'the second candidate pass no longer over-removes: the recorded F43-2 reach is stale');
+  // F43-3 (Low, a published fragment): the multi-run join stops at the first accepting prefix, so
+  // the split's tail stays. It is a fragment, not the credential: the whole value is not present
+  // and cannot be recovered from the published text.
+  const f433 = 'a commit carried ghp_ab' + ZWSP + 'cd' + ZWSP + 'efgh' + ZWSP + 'ijklmnop end';
+  for (const [surface, text] of [['candidate', candidate(f433)], ['notice', notice(f433)]]) {
+    assert.ok(!PUBLISHED(text, CLASSIC), surface + ' published the whole credential behind the early stop');
+    assert.ok(text.includes('ijklmnop'), surface + ' no longer leaves the recorded tail: the F43-3 reach is stale');
+  }
+  // F43-4 (Low, pre-existing, over-removal only): the diagnostic-stamp exemption is read where an
+  // ordinary word gap is crossed by a value the rule could not match as it stands, so a BARE stamp
+  // directly after the keyword is still reaped -- at both revisions before this one, and here.
+  assert.equal(candidate('Bearer 2026-10-15 is now available'), '[redacted] is now available',
+    'the bare-stamp price moved on the candidate pass');
+  assert.equal(notice('Bearer 2026-10-15 is now available'), '[redacted] is now available',
+    'the bare-stamp price moved on the notice pass');
+  // The same sentence with a word between the keyword and the stamp is KEPT (Batch 101's exemption),
+  // which is the direction that shows the price is this one position and not the stamp class.
+  assert.equal(candidate('Bearer version 2026-10-15 is now available'),
+    'Bearer version 2026-10-15 is now available', 'the stamp exemption regressed');
 });
