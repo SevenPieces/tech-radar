@@ -45,13 +45,17 @@ const EVIDENCE_CHARS = [0x00, 0x01, 0x07, 0x08, 0x09, 0x0b, 0x0c, 0x1b, 0x1f, 0x
   0xad, 0x34f, 0x61c, 0x115f, 0x180e, 0x200b, 0x200c, 0x200d, 0x2060, 0x2061, 0x3164, 0xfe00,
   0xfeff, 0xa0, 0x1680, 0x2000, 0x2007, 0x202f, 0x205f, 0x3000, 0xe0001, 0xe0020, 0xe007f, 0xe0100];
 const ENTITY_SPELLINGS = ['&#8203;', '&#x200B;', '&ZeroWidthSpace;', '&shy;', '&InvisibleTimes;',
-  '&NoBreak;', '&zwnj;', '&zwj;', '&lrm;', '&#0;', '&#31;', '&#127;', '&#32;', '&nbsp;', '&#8288;'];
+  '&NoBreak;', '&zwnj;', '&zwj;', '&lrm;', '&#0;', '&#31;', '&#127;', '&#32;', '&nbsp;', '&#8288;',
+  '&ZeroWidthJoiner;', '&ZeroWidthNonJoiner;', '&VeryThinSpace;', '&InvisiblePlus;', '&InvisibleComma;',
+  '&NoBreakSpace;', '&ThickSpace;', '&ensp;', '&emsp;', '&thinsp;'];
 
 const escapeChar = (ch) => ch.replace(/[.*+?^$(){}|[\]\\]/g, '\\$&');
 const RECOVER = (value) => new RegExp([...value].map(escapeChar).join(SCHEME_GAP + '*'), 'u');
 const NAMED_READER = { shy: '\u00ad', zerowidthspace: '\u200b', zwnj: '\u200c', zwj: '\u200d',
   lrm: '\u200e', rlm: '\u200f', nobreak: '\u2060', invisibletimes: '\u2062', invisiblecomma: '\u2063',
-  nbsp: ' ', ensp: '\u2002', emsp: '\u2003', thinsp: '\u2009', hairspace: '\u200a' };
+  nbsp: ' ', ensp: '\u2002', emsp: '\u2003', thinsp: '\u2009', hairspace: '\u200a',
+  zerowidthjoiner: '\u200d', zerowidthnonjoiner: '\u200c', verythinspace: '\u200a',
+  invisibleplus: '\u2064', nobreakspace: '\u00a0', thickspace: '\u205f' };
 // A credential is PUBLISHED when it is present whole, or readable back with only class separators
 // between its characters -- read in a READER's view, so an entity spelling is decoded first.
 const readerView = (text) => String(text)
@@ -174,6 +178,17 @@ test('the prose direction: the rows the pair named are the pre-Batch-100 answer,
   ]) {
     assert.ok(candidate(raw).includes(keep), 'the candidate pass reaped prose after a complete value: ' + JSON.stringify(candidate(raw)));
     assert.ok(notice(raw).includes(keep), 'the notice pass reaped prose after a complete value: ' + JSON.stringify(notice(raw)));
+  }
+  // F42-4, BOTH DIRECTIONS: the pre-colon gap reads the class, so the leak it closed is closed and
+  // the prose price it costs is this row -- a line that merely NAMES the header with an invisible
+  // separator before its colon is consumed whole, exactly as its plain-space spelling already was at
+  // the pre-Batch-100 revision. The control-byte spelling answers the same way.
+  for (const sep of ['\u200b', '\u00ad', '\u0000']) {
+    const leak = 'the answer said authorization' + sep + ': ' + CRED16 + ' end';
+    assert.ok(!PUBLISHED(candidate(leak), CRED16), 'F41-2 reopened: the pre-colon gap published the value');
+    assert.ok(!PUBLISHED(notice(leak), CRED16), 'F41-2 reopened on the notice path');
+    assert.equal(candidate('authorization' + sep + ': see 2026-10-15 notes'), '[redacted]',
+      'the recorded pre-colon price moved (F42-4)');
   }
   // THE RECORDED PRICE, at the one position the model cannot tell apart: the fragment before the
   // separator at a bare vendor prefix is EMPTY, so a surface's own split and an ordinary word gap

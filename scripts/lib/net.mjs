@@ -635,6 +635,16 @@ const AUTHORIZATION_KEYWORD = new RegExp('(?<![\\w\\/])(?:proxy-)?' + AUTH_NAME 
 const AUTHORIZATION_KEYWORD_BRITISH = new RegExp('(?<![\\w\\/])' + AUTH_NAME_BRITISH + '["\']?' + SCHEME_GAP + '*' + AUTH_COLON + SCHEME_GAP + '*', 'giu');
 const AUTHORIZATION_KEYWORD_UNDERSCORED = new RegExp('(?<![\\w.\\/-])(?:[A-Za-z0-9]+_)+(?:proxy-)?'
   + AUTH_NAME_UNDERSCORED + '["\']?' + SCHEME_GAP + '*' + AUTH_COLON + SCHEME_GAP + '*', 'giu');
+// THE PRICE OF THAT WIDENING, measured and recorded (Batch 102; the FINAL42 pair's F42-4). The gap
+// was AUTH_BRIDGE_SPACE for a reason that was never about the leak: a line that merely NAMES the
+// header with an invisible separator before its colon becomes a header once the gap reads the class,
+// and a header's value is the line (Batch 67), so 'authorization' + ZWSP + ': see 2026-10-15 notes'
+// is consumed whole -- '[redacted]' -- where the pre-Batch-100 revision kept it, and the control-byte
+// spelling answers the same way. With a PLAIN space the line was already consumed at 4266f3a, so the
+// widening adds only the invisible and control spellings of an already-recorded price: the direction
+// is over-removal (no credential is published) and the alternative is publishing the header's value
+// (F41-2, High). Both halves are pinned in tests/separator-mark-property.test.mjs so neither can
+// drift.
 // THE AUTHORIZATION KEYWORD'S OWN GAP READS THE SAME CLASS NOW (Batch 100; FINAL41's F41-2). The
 // gap BETWEEN THE NAME AND ITS COLON was still AUTH_BRIDGE_SPACE -- the inline space and the five
 // line ends -- while the name's letters, the gap after the colon and both generic scheme gaps read
@@ -2716,6 +2726,12 @@ const NAMED = {
   invisiblecomma: '\u2063', invisibleseparator: '\u2063', ensp: '\u2002', emsp: '\u2003',
   thinsp: '\u2009', thinspace: '\u2009', hairsp: '\u200a', numsp: '\u2007', puncsp: '\u2008',
   mediumspace: '\u205f', nonbreakingspace: '\u00a0', tab: '\t', newline: '\n',
+  // The rest of the HTML5 spellings that name a member of this class, so the table is the family and
+  // not a sample of it: the two legacy ZWJ/ZWNJ names, the thin/hair spaces, the invisible plus and
+  // the no-break and thick spellings. A named reference outside this table is left as the text it is
+  // (an ordinary '&amp;' must not move), which is the stated reach of the decoding.
+  zerowidthjoiner: '\u200d', zerowidthnonjoiner: '\u200c', verythinspace: '\u200a',
+  invisibleplus: '\u2064', nobreakspace: '\u00a0', thickspace: '\u205f',
 };
 
 // A numeric character reference may name a code point that does not exist
