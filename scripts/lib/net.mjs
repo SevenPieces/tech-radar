@@ -283,37 +283,73 @@ const AUTH_BRIDGE_SPACE = '[' + AUTH_INLINE_SPACE + AUTH_LINE_TERMINATORS + ']';
 export const INVISIBLE_SEPARATOR = '\\p{Default_Ignorable_Code_Point}';
 export const INVISIBLE_SEPARATOR_PATTERN = /\p{Default_Ignorable_Code_Point}/u;
 // THE ONE SEPARATOR CLASS (Batch 98; closing sweep F40-1, the mirror of Batch 96's widening). The
-// rule, stated once and read by every matcher below: A REMOVABLE CONTROL BYTE OR AN INVISIBLE
-// SEPARATOR THAT STANDS INSIDE A KEYWORD, OR INSIDE A CURATED SECRET SHAPE, DOES NOT BREAK IT -- THE
-// SHAPE IS READ THROUGH THOSE SEPARATORS, WHILE THE PUBLISHED TEXT KEEPS THE SPACED FORM BATCH 93
-// ESTABLISHED. A keyword is its letters with optional separators between them; a curated shape is the
-// same. Batch 93 replaced DROPPING a control byte with SPACING it, because a dropped byte glued a
-// keyword to its value; the drop's gluing was load-bearing for the other position, and spacing
-// un-glued it: 'Bear' + NUL + 'er tok_...', 'Ba' + NUL + 'sic <b64>', 'authoriz' + NUL + 'ation: ',
-// 'gh' + NUL + 'p_...' and 'github' + NUL + '_pat_...' were published in the shipped keyless pool
-// title and summary where the pre-93 revision removed them (measured on the real collectAll with the
-// stub transport, in the closing sweep's p42/p49/p51). The class is the bridge below PLUS the
-// default-ignorable property PLUS every control byte, so the gap and the interior read ONE set: the
-// separator between a keyword and its value and the separator inside it are the same character
-// doing the same thing, and no later fix can close one position without the other.
+// class is the bridge below PLUS the default-ignorable property PLUS every control byte. Every
+// matcher below reads it, at every position of every shape, through THE ONE NORMALISATION MODEL
+// (Batch 100; FINAL41's F41-1/F41-2).
 //
-// Four directions are held at once, and the property test drives all four:
-//   (a) a keyword or shape split by a separator is still recognised and removed (this class);
-//   (b) a keyword glued to its value by a dropped byte is still handled -- every control byte is a
-//       separator in the published text (Batch 93's own rule, unchanged);
-//   (c) an invisible separator between a keyword and its value is still a gap (Batch 96, unchanged --
-//       the class only widened);
-//   (d) ordinary prose is not reaped: the widened class only adds alternative spellings of the SAME
-//       keyword, and every rule still requires its value (a credential-shaped token, a base64 pair, a
-//       shape body) before anything is removed. A text with no separator at an interior position
-//       matches exactly as it did before, which is why the tracked corpus differential is 0.
+// THE ONE NORMALISATION MODEL: TWO VIEWS, ONE CLASS, ONE MAPPING.
 //
-// WHAT IS READ THROUGH AND WHAT IS NOT. The interior read covers the KEYWORD (Bearer, Basic, the
-// authorization name) and the FIXED PREFIX of the two curated shapes ('gh' + [pousr] + '_' and
-// 'github_pat_'). It does not extend the VALUE run: a token split inside its own characters is
-// ambiguous with two words, so the run still stops at the separator and the by-value half (looseValue
-// below) is what removes the run's own value through it. The bound and its measurement are recorded
-// in tests/interior-separator-property.test.mjs.
+//   THE RECOGNITION VIEW IS THE GLUED VIEW. It is the text with a run of the separator class
+//   deleted, and every shape rule is recognised there: the KEYWORD, the FIXED PREFIX of a curated
+//   shape, the GAP, and the VALUE RUN. A separator standing anywhere inside a shape, between a
+//   shape and its value, or inside the value run, is the same character doing the same thing -- so
+//   a shape split at any position by any member of the class is the shape it spells. This is the
+//   behaviour the pre-Batch-93 DROP had, generalised: the drop glued the two halves of a keyword,
+//   and the same gluing is what makes the two halves of a value run one value.
+//
+//   THE PUBLISHED VIEW IS THE SPACED VIEW Batch 93 established: every control byte spaced, the
+//   invisible separators left as the surface wrote them. The recognition view is never published.
+//
+//   THE REMOVAL MAPS BACK. A recognised span is removed from the SPACED text, from its first
+//   recognised character to its last, so every separator standing inside the span -- the surface's
+//   own split, whatever class member it is -- is removed with it: a span that spans separators is
+//   removed across them. The published bytes are therefore exactly the spaced text with the
+//   recognised spans removed, and both entry points publish the same text.
+//
+// THE GLUE AT THE VALUE RUN IS BOUNDED TO ONE SEPARATOR RUN, and that bound is the prose guard.
+// A value run the spaced text carries that ALREADY satisfies the rule is complete: it is recognised
+// and removed as it stands, and it is NOT extended across a separator, so the word after a real
+// token survives ('Bearer tok_9f3a2c7d1e5b and this sentence' keeps 'and this sentence'). A value
+// run that does NOT satisfy the rule on its own -- the position FINAL41's F41-1 measured, where the
+// fragment before the split was below the rule's own minimum and NOTHING was removed -- continues
+// across AT MOST ONE separator run into the next run of the rule's own value characters, and the
+// span (both runs and the separators between them) is removed whole. The next run must itself be a
+// value run by the rule's own test, so an ordinary word cannot pull the prose after it into a
+// removal. That is why 'ghp_abc' + SEP + 'defghijklmnop', a Basic payload split inside
+// its base64, a PAT body split below its twentieth character and a token split inside its own
+// characters all remove as one credential, while an ordinary sentence keeps its words.
+//
+// WHAT THE MODEL MEASURES, in both directions:
+//   (a) every shape (Basic, Bearer, the authorization family and both curated shapes) split at
+//       EVERY position -- inside the keyword, inside the prefix, inside the body, at the boundary,
+//       at the gap -- by EVERY separator of the class, removes on both entry points, in the
+//       assembled notice at 128/402/1000 and in the shipped keyless collectAll: nothing of the
+//       credential is published, whole or recoverable with separators between its characters;
+//   (b) no published byte moves for an input with no separator at a shape position: the tracked
+//       corpus differential is 0 (the glue is only taken where the spaced run cannot match), both
+//       entry points are the same text, and the caps and the fixed points hold;
+//   (c) the authorization keyword's gap BEFORE its colon reads this same class, like its letters,
+//       its British and underscored spellings and the gap after the colon.
+// The matrix that drives all of it, through the shipped pipeline, is
+// tests/glued-value-run-property.test.mjs; the shipped-keyless half is that file's surface row, and
+// tests/interior-separator-property.test.mjs keeps the keyword/prefix rows and the one-run bound.
+//
+// The bound is measured, not assumed. A separator the published text keeps as a SPACE is
+// indistinguishable from a word boundary, so gluing an already-complete run across it WOULD reap
+// the word after a real token -- which is why the glue is taken only for a run the rule cannot
+// match as it stands, and only across one separator run. The two entry points agree because the
+// class (not the byte a particular surface wrote) is what decides.
+//
+// THE PRICE AT THE PREFIX/BODY BOUNDARY, measured and stated rather than hidden. At that one
+// position the fragment before the separator is EMPTY, so the surface's own split and an ordinary
+// word gap are the same shape, and no local test can tell them apart: 'ghp_' + space + a word the
+// rule's own minimum accepts ('strip the token prefix') is read as the split body and removed. The
+// alternative is publishing the whole credential at that boundary, which is the leak the model
+// exists to stop, and the module already owns this trade on the header path (Batch 67's 'a rule
+// that cannot tell a credential from prose cannot both consume the credential and keep the
+// prose'). No shipped text carries the spelling (the tracked corpus differential over every
+// shipped file is 0), and the word has to reach the rule's own minimum directly after a bare
+// vendor prefix -- an ordinary sentence never does.
 const SEPARATOR_CHARACTERS = CONTROL_CHARACTERS + AUTH_INLINE_SPACE + AUTH_LINE_TERMINATORS
   + INVISIBLE_SEPARATOR;
 // THE GAP THE TWO GENERIC SCHEME RULES READ is now the whole separator class above. It is a
@@ -339,18 +375,79 @@ const AUTH_NAME_UNDERSCORED = joinThroughSeparators([
   '(?:' + nameCharacter('s') + '|' + nameCharacter('z') + ')',
   keywordName('ation'),
 ]);
-// THE TWO CURATED SHAPES, read through the separator class (Batch 98; closing sweep F40-1): the
-// shape's FIXED PREFIX is its characters with optional separators between them, so 'gh' + NUL + 'p_...'
-// and 'github' + NUL + '_pat_...' are the shapes they spell. The BODY stays one run -- see the class
-// statement above for why a body that crossed separators would reap the words after a real token --
-// and it is the by-value half that removes a body the surface split inside itself.
-const SHAPE_CLASSIC_TOKEN = new RegExp('\\b' + throughSeparators('gh') + SCHEME_GAP + '*'
-  + '[pousr]' + SCHEME_GAP + '*' + '_' + '[A-Za-z0-9]{6,}\\b', 'gu');
-const SHAPE_FINE_GRAINED_PAT = new RegExp('\\b' + throughSeparators('github_pat_')
-  + '[A-Za-z0-9_]{20,}\\b', 'gu');
-const SECRET_SHAPES = [
-  SHAPE_CLASSIC_TOKEN,
-  SHAPE_FINE_GRAINED_PAT,
+// THE VALUE RUN'S OWN RUNS (Batch 100; the one normalisation model above). A value run is a maximal
+// run of the rule's own value characters. The glue crosses AT MOST ONE separator run, so these two
+// scans are all the model needs: where the run stops, where the next run after one separator run
+// starts, and the rule's own test on a run's text. 'isRunChar' is the rule's value class as a
+// predicate on ONE character; 'accepts' is the rule's own acceptance test on a run (the curated
+// body's minimum, the credential-shaped token test, a decodable base64 pair).
+// Read by CODE POINT, not by UTF-16 unit: the class carries supplementary-plane members (the tag
+// characters U+E0000..U+E007F and the variation selectors U+E0100..U+E01EF), and a scan over
+// 'text[end]' sees their surrogate halves, which are not the property (FINAL41's matrix measured
+// exactly those four as the survivors of a fix that scanned by unit).
+const codePointAt = (text, at) => {
+  const cp = text.codePointAt(at);
+  return cp === undefined ? undefined : String.fromCodePoint(cp);
+};
+const isSeparatorChar = (ch) => ch !== undefined && SCHEME_GAP_PATTERN.test(ch);
+function valueRunEnd(text, from, isRunChar) {
+  let end = from;
+  while (end < text.length) {
+    const ch = codePointAt(text, end);
+    if (!isRunChar(ch)) break;
+    end += ch.length;
+  }
+  return end;
+}
+// The index AFTER the maximal run of separator-class characters starting at 'from'. A separator run
+// is what the surface split the shape with: a single byte, or a run of them (a split ' \0 ').
+function separatorRunEnd(text, from) {
+  if (from >= text.length) return -1;
+  let end = from;
+  while (end < text.length) {
+    const ch = codePointAt(text, end);
+    if (!isSeparatorChar(ch)) break;
+    end += ch.length;
+  }
+  return end === from ? -1 : end;
+}
+// THE GLUED VALUE RUN, mapped back (Batch 100). 'from' is where the value run starts in the SPACED
+// text and 'runEnd' is where its first maximal run stops. Returns the SPACED end index of the span
+// to remove when the first run does NOT satisfy the rule, the run after ONE separator run DOES, and
+// the two runs joined -- the recognition view, with the separator run deleted -- satisfy it too.
+// Returns null in every other case, which includes the case the prose guard needs: an already
+// acceptable run is complete and is never extended (tests/glued-value-run-property.test.mjs
+// asserts that bound with a token followed by prose).
+function gluedContinuation(text, from, runEnd, isRunChar, accepts, acceptsSecond = accepts) {
+  if (accepts(text.slice(from, runEnd))) return null;
+  const afterSeparator = separatorRunEnd(text, runEnd);
+  if (afterSeparator === -1) return null;
+  const secondEnd = valueRunEnd(text, afterSeparator, isRunChar);
+  if (secondEnd === afterSeparator) return null;
+  const first = text.slice(from, runEnd);
+  const second = text.slice(afterSeparator, secondEnd);
+  if (!acceptsSecond(second)) return null;
+  if (!accepts(first + second)) return null;
+  return secondEnd;
+}
+// A word boundary in the published text, for a shape whose pattern ended with '\b': the character
+// after the span is not a word character (the end of the text is a boundary).
+const wordBoundaryAfter = (text, end) => end >= text.length || !/[A-Za-z0-9_]/.test(text[end]);
+// THE TWO CURATED SHAPES, read on the one normalisation model: the FIXED PREFIX is its characters
+// with optional separators between them ('gh' + NUL + 'p_...' and 'github' + NUL + '_pat_...' are
+// the shapes they spell), and the BODY is the rule's value run -- one maximal run of body
+// characters, or, when that run does not reach the rule's minimum, one run joined across a single
+// separator run (gluedContinuation above). The body is no longer 'a positive class that stops at a
+// separator': that reading published the WHOLE credential when the fragment before the split was
+// below the minimum, on the shipped keyless pool (FINAL41 F41-1, measured).
+const SHAPE_CLASSIC_PREFIX = new RegExp('\\b' + throughSeparators('gh') + SCHEME_GAP + '*'
+  + '[pousr]' + SCHEME_GAP + '*' + '_', 'gu');
+const SHAPE_FINE_GRAINED_PREFIX = new RegExp('\\b' + throughSeparators('github_pat_'), 'gu');
+const isClassicBodyChar = (ch) => ch !== undefined && /[A-Za-z0-9]/.test(ch);
+const isFineGrainedBodyChar = (ch) => ch !== undefined && /[A-Za-z0-9_]/.test(ch);
+const CURATED_SHAPES = [
+  { prefix: SHAPE_CLASSIC_PREFIX, isBody: isClassicBodyChar, minimum: 6 },
+  { prefix: SHAPE_FINE_GRAINED_PREFIX, isBody: isFineGrainedBodyChar, minimum: 20 },
 ];
 // The gap as a RUN, for the two GENERIC keyword rules (Batch 88; closing sweep F38-1, widened whole
 // in Batch 96; closing sweep F40-1). Those two rules -- the Basic keyword's own gap and BEARER_VALUE's
@@ -365,7 +462,7 @@ const SCHEME_GAP_RUN = new RegExp('^' + SCHEME_GAP + '+', 'u');
 // keyword's gap (Batch 88; closing sweep F38-1).
 const SCHEME_GAP_RUN_OPTIONAL = new RegExp('^' + SCHEME_GAP + '*([A-Za-z0-9+/]+={0,2})', 'u');
 
-const AUTHORIZATION_KEYWORD = new RegExp('(?<![\\w\\/])(?:proxy-)?' + AUTH_NAME + '["\']?' + AUTH_BRIDGE_SPACE + '*' + AUTH_COLON + AUTH_BRIDGE_SPACE + '*', 'giu');
+const AUTHORIZATION_KEYWORD = new RegExp('(?<![\\w\\/])(?:proxy-)?' + AUTH_NAME + '["\']?' + SCHEME_GAP + '*' + AUTH_COLON + SCHEME_GAP + '*', 'giu');
 // Sweep F31-4's neighbour rows: the keyword was that one spelling with a word boundary on each
 // side, so two header NAMES a real surface writes were read by nothing. 'authorisation' is the
 // British spelling of the same header - the colon and the value after it are identical, only the
@@ -377,9 +474,17 @@ const AUTHORIZATION_KEYWORD = new RegExp('(?<![\\w\\/])(?:proxy-)?' + AUTH_NAME 
 // prefix through. The underscore matcher is the one deliberate exception, and it is the shape a
 // dump writes ('HTTP_AUTHORIZATION', 'X_AUTHORIZATION', 'HTTP_X_AUTHORIZATION'); it keeps the same
 // lookbehind for '/', so the notice seam ('.../authorization: HTTP 503') is still refused.
-const AUTHORIZATION_KEYWORD_BRITISH = new RegExp('(?<![\\w\\/])' + AUTH_NAME_BRITISH + '["\']?' + AUTH_BRIDGE_SPACE + '*' + AUTH_COLON + AUTH_BRIDGE_SPACE + '*', 'giu');
+const AUTHORIZATION_KEYWORD_BRITISH = new RegExp('(?<![\\w\\/])' + AUTH_NAME_BRITISH + '["\']?' + SCHEME_GAP + '*' + AUTH_COLON + SCHEME_GAP + '*', 'giu');
 const AUTHORIZATION_KEYWORD_UNDERSCORED = new RegExp('(?<![\\w.\\/-])(?:[A-Za-z0-9]+_)+(?:proxy-)?'
-  + AUTH_NAME_UNDERSCORED + '["\']?' + AUTH_BRIDGE_SPACE + '*' + AUTH_COLON + AUTH_BRIDGE_SPACE + '*', 'giu');
+  + AUTH_NAME_UNDERSCORED + '["\']?' + SCHEME_GAP + '*' + AUTH_COLON + SCHEME_GAP + '*', 'giu');
+// THE AUTHORIZATION KEYWORD'S OWN GAP READS THE SAME CLASS NOW (Batch 100; FINAL41's F41-2). The
+// gap BETWEEN THE NAME AND ITS COLON was still AUTH_BRIDGE_SPACE -- the inline space and the five
+// line ends -- while the name's letters, the gap after the colon and both generic scheme gaps read
+// the one separator class. 'authorization' + ZWSP/SHY/WJ/ZWJ/tag + ': <token>' was therefore read by
+// no rule and published the token in the shipped keyless pool, in both entry points and in the
+// assembled notice at every cap (measured). The module's own sentence -- that the gap and the
+// interior read ONE set -- was false at this one position; it is true here now, so the pre-colon gap
+// is the class, and the class stays ONE source.
 const AUTHORIZATION_KEYWORDS = [AUTHORIZATION_KEYWORD, AUTHORIZATION_KEYWORD_BRITISH, AUTHORIZATION_KEYWORD_UNDERSCORED];
 // The atoms a header VALUE is built from (see 'readAuthorizationValue' below): a quoted string --
 // double or single, an escaped quote inside it read as one character, or a quote that is never
@@ -436,7 +541,7 @@ function authorizationValueRefused(rest) {
 // "TOKEN9f3a2c7d"'), and it used to be read by nobody -- the token class excluded both quote
 // characters, so the scheme was consumed and the credential inside the quotes was published byte
 // for byte on both paths (sweep F31-3).
-const NEXT_AUTH_TOKEN = new RegExp('^' + AUTH_BRIDGE_SPACE + '+(' + AUTH_ATOM + ')');
+const NEXT_AUTH_TOKEN = new RegExp('^' + SCHEME_GAP + '+(' + AUTH_ATOM + ')');
 // THE WHITESPACE A VALUE CARRIES (Batch 76; closing sweep F35-1). Every character JavaScript's
 // \s class matches EXCEPT the four line terminators, which is the class those characters stand in
 // for: a header value is one line, and what separates two atoms on that line, or indents the wrapped
@@ -665,7 +770,7 @@ const FOLD_SEPARATOR = /[,;]/;
 // cost seconds (closing sweep F34-7). Each read is sticky and anchored by lastIndex instead, and the
 // leading '^' is dropped for that reason: with the 'y' flag it would match only at index 0.
 const AUTH_ATOM_AT_STICKY = new RegExp(AUTH_ATOM, 'y');
-const NEXT_AUTH_TOKEN_AT = new RegExp(AUTH_BRIDGE_SPACE + '+(' + AUTH_ATOM + ')', 'y');
+const NEXT_AUTH_TOKEN_AT = new RegExp(SCHEME_GAP + '+(' + AUTH_ATOM + ')', 'y');
 const AUTH_SEPARATED_ATOM_AT = new RegExp('[' + AUTH_INLINE_SPACE + AUTH_LINE_TERMINATORS
   + ']*[,;][' + AUTH_INLINE_SPACE + AUTH_LINE_TERMINATORS + ']*(' + AUTH_ATOM + ')', 'y');
 const AUTH_WHITESPACE_RUN_AT = new RegExp('[' + AUTH_INLINE_SPACE + ']+', 'y');
@@ -703,6 +808,33 @@ function authorizationValueLineEndsAt(source, end) {
 // guess: the atom one gap in, arithmetic on commas, a wrap, a refusal. A line that names a
 // credential header is a credential header, so the guess is gone from the consuming path and the
 // only thing left to guess about is a line the module declines to call a header at all.
+// THE GLUED VALUE RUN OF A HEADER (Batch 100; FINAL41's F41-1 at the authorization family). The
+// reader below stops its first atom where the SPACED text stops it. When that atom is not a
+// credential-shaped run, the value continues across AT MOST ONE separator run into the next atom
+// when BOTH that atom and the two atoms joined (the recognition view) are credential-shaped. The
+// returned end is the SPACED end of the second atom, so the whole value is then consumed by the
+// accepted branch and nothing of it publishes. Prose is guarded twice: the first atom has to fail
+// the shape test (so a complete credential-shaped atom is never extended), and the second atom has
+// to pass it on its own (so 'required' + line end + '7 days' can never be read as one value).
+function gluedAuthorizationValue(source, from, runEnd) {
+  const afterSeparator = separatorRunEnd(source, runEnd);
+  if (afterSeparator === -1) return -1;
+  AUTH_ATOM_AT_STICKY.lastIndex = afterSeparator;
+  const next = AUTH_ATOM_AT_STICKY.exec(source);
+  if (next === null) return -1;
+  const secondEnd = afterSeparator + next[0].length;
+  const first = source.slice(from, runEnd);
+  const second = next[0];
+  // The value's own grammar and refusals decide before the glue is taken: a prose word is not a
+  // continuation, and the URL seam / the transport seam are the assembly's own diagnosis, never a
+  // credential fragment (the same two refusals the whitespace-gap reading applies). Without this a
+  // 'see https://a.example/v2' value became a header value and the whole line was consumed.
+  if (!authorizationAtomContinuesValue(second)) return -1;
+  if (!authorizationAtomIsShaped(second)) return -1;
+  if (!authorizationAtomIsShaped(first + second)) return -1;
+  return secondEnd;
+}
+
 function readAuthorizationValue(source, at) {
   // Every read below is anchored at a position with lastIndex rather than on a slice of the
   // remainder: the atom run walks a value one atom at a time, so slicing made a long value quadratic
@@ -761,6 +893,10 @@ function readAuthorizationValue(source, at) {
     if (next === null || !authorizationAtomContinuesValue(next[0])) break;
     end = nextAt + next[0].length;
     if (authorizationAtomIsShaped(next[0])) accepted = true;
+  }
+  if (!accepted && firstText !== null) {
+    const glued = gluedAuthorizationValue(source, at, end);
+    if (glued !== -1) return { end: glued, accepted: true };
   }
   return { end: authorizationValueLineEndsAt(source, end), accepted };
 }
@@ -1156,6 +1292,38 @@ function decodedBasicToken(text) {
   }
   return null;
 }
+// The Basic payload's own run characters: the base64 alphabet, its padding included. The PAYLOAD
+// is a value run of the one normalisation model (Batch 100).
+const isBasicRunChar = (ch) => ch !== undefined && /[A-Za-z0-9+/=]/.test(ch);
+// THE GLUED BASE64 PAYLOAD, MAPPED BACK (Batch 100; FINAL41's F41-1 at Basic). The separated view
+// reads the payload as one run of base64 characters; a surface that split the payload inside its
+// own base64 left two runs and the tokenisation found nothing that decodes to 'user:password' --
+// measured: 9 of the 27 split positions of a 32-character payload removed NOTHING and the whole
+// credential published, the tail decoding to the password on its own, on the shipped keyless pool,
+// in both entry points and in the assembled notice. The recognition view is the two runs JOINED
+// (the separator run deleted), the rule's own decode test decides, and the removal maps back to the
+// spaced text: the span runs from the first base64 character to the last one the decode accepted,
+// across the separator run. Returns the SPACED end index, or -1 when no token is recognised. A
+// token the separated view already accepted is never extended: the caller reads it first, and the
+// word after a complete payload survives (the one-run bound stated at the class statement).
+function gluedBasicTokenEnd(raw, absoluteStart) {
+  // The quoted spelling is read whole or not at all (see decodedBasicToken): a quote cannot stand
+  // inside a run, so the glue is not taken for it.
+  if (raw.startsWith('"') || raw.startsWith("'")) return -1;
+  const firstEnd = valueRunEnd(raw, 0, isBasicRunChar);
+  const secondStart = separatorRunEnd(raw, firstEnd);
+  if (secondStart === -1) return -1;
+  const secondEnd = valueRunEnd(raw, secondStart, isBasicRunChar);
+  if (secondEnd === secondStart) return -1;
+  const joined = raw.slice(0, firstEnd) + raw.slice(secondStart, secondEnd);
+  const token = decodedBasicToken(joined);
+  if (token === null) return -1;
+  if (token.length <= firstEnd) return absoluteStart + token.length;
+  const intoSecond = token.length - firstEnd;
+  if (intoSecond > secondEnd - secondStart) return -1;
+  return absoluteStart + secondStart + intoSecond;
+}
+
 function redactBasicCredentials(text) {
   // Only the TOKEN is replaced, in place: the keyword and its whitespace stay, so a caller that
   // publishes the line reads exactly what it read before and the rule composes with every other
@@ -1202,10 +1370,13 @@ function redactBasicCredentials(text) {
     if (space === null) continue;
     const tokenStart = idx + match[0].length + space[0].length;
     if (tokenStart < at) continue;
-    const token = decodedBasicToken(after.slice(space[0].length));
-    if (token === null) continue;
+    const payload = after.slice(space[0].length);
+    const token = decodedBasicToken(payload);
+    // The separated view first; the GLUED view only when it read nothing (Batch 100; F41-1).
+    const tokenEnd = token !== null ? tokenStart + token.length : gluedBasicTokenEnd(payload, tokenStart);
+    if (tokenEnd === -1) continue;
     out += source.slice(at, tokenStart) + REDACTION_SENTINEL;
-    at = tokenStart + token.length;
+    at = tokenEnd;
     resumeAt = at;
   }
   return out + source.slice(at);
@@ -1644,8 +1815,8 @@ export function redactSecrets(text, secrets) {
 // paths: 'The bearer credential held by the gateway is rotated weekly' is ordinary advisory prose,
 // and the two entry points may not disagree about what a Bearer value is -- the wider spelling used
 // to run on the notice path alone, so the same sentence was '[redacted]' there and byte-identical
-// in the credential-free pool. 'Bearer credential held' is prose; 'Bearer
-// abcdefghijklmnopqrstuvwxyz012345' is a value. A Bearer value standing in an authorization header
+// in the credential-free pool. 'Bearer credential held' is prose; a Bearer value of thirty
+// characters ('abcdefghijklmnopqrstuvwxyz012345') is a value. A Bearer value in an authorization header
 // is not read by this rule at all: it is the header's own scheme, and the header rule consumes the
 // whole value (whatever it spells) because the header says it is one.
 // The gap reads SCHEME_GAP -- the bridge PLUS the invisible separator class -- and the value run
@@ -1656,11 +1827,35 @@ export function redactSecrets(text, secrets) {
 // where LF stopped it. Both positions now answer exactly as LF does, and the gap also reads every
 // character that carries no visible content (ZWSP, SHY, WJ, MVS, U+3164, ZWNJ, ZWJ and the rest of the
 // default-ignorable class), which is a shape no reader can tell from 'Bearer <value>'.
-const BEARER_VALUE = new RegExp('\\b' + throughSeparators('Bearer') + SCHEME_GAP + '+('
-  + AUTH_TOKEN_CHARS + ')', 'giu');
+// The value run of a Bearer value is the reader's own token class, per character.
+const isBearerTokenChar = (ch) => ch !== undefined && /[^\s,;"'\u0085]/.test(ch);
+// The keyword and its gap; the token is read by the scanner below, not by the pattern, because a
+// value run the separated view cannot accept continues across ONE separator run (Batch 100). The
+// gap reads SCHEME_GAP as it did in Batch 96/98; only the value run is new.
+const BEARER_KEYWORD = new RegExp('\\b' + throughSeparators('Bearer') + SCHEME_GAP + '+', 'giu');
 function redactBearerValues(text) {
-  return String(text).replace(BEARER_VALUE, (m, token) => (
-    credentialShapedToken(token) ? REDACTION_SENTINEL : m));
+  const source = String(text);
+  let out = '';
+  let at = 0;
+  for (const match of source.matchAll(BEARER_KEYWORD)) {
+    const tokenStart = match.index + match[0].length;
+    if (tokenStart < at) continue;
+    const runEnd = valueRunEnd(source, tokenStart, isBearerTokenChar);
+    let removeEnd = -1;
+    if (credentialShapedToken(source.slice(tokenStart, runEnd))) {
+      removeEnd = runEnd;
+    } else {
+      // The fragment before the split is below the rule's own shape test: read the run in the
+      // GLUED view, across one separator run, and remove the mapped span whole (F41-1).
+      const glued = gluedContinuation(source, tokenStart, runEnd, isBearerTokenChar,
+        credentialShapedToken);
+      if (glued !== null) removeEnd = glued;
+    }
+    if (removeEnd === -1) continue;
+    out += source.slice(at, match.index) + REDACTION_SENTINEL;
+    at = removeEnd;
+  }
+  return out + source.slice(at);
 }
 
 // THE ONE SHAPE PIPELINE (Batch 61): the curated vendor shapes, the one Bearer rule and the one
@@ -1669,9 +1864,44 @@ function redactBearerValues(text) {
 // the set is empty) and then applies the Basic rule; redactCredentialShapes calls it and applies
 // the Basic rule. With an empty value set the two entry points publish the same text for every
 // input, which is the property the two used to break.
+// THE CURATED SHAPES' SCAN (Batch 100; the one normalisation model). Each shape is its FIXED
+// PREFIX (already read through the separator class) followed by a VALUE RUN: the maximal run of the
+// shape's body characters, or -- when that run is below the shape's own minimum -- one run joined
+// across a single separator run, read in the GLUED view and removed from the SPACED text across the
+// separator. The rule's minimum is what makes the body a body: reading the run as a positive class
+// that simply stopped at a separator published the WHOLE credential when the fragment before the
+// split was below it (FINAL41 F41-1). A body run at or above the minimum is complete and is never
+// extended, which is the prose guard: a complete body followed by ' and prose' keeps it.
+function redactCuratedShapes(text) {
+  let out = text;
+  for (const shape of CURATED_SHAPES) {
+    const source = out;
+    let built = '';
+    let at = 0;
+    for (const match of source.matchAll(shape.prefix)) {
+      const start = match.index;
+      if (start < at) continue;
+      const bodyStart = start + match[0].length;
+      const runEnd = valueRunEnd(source, bodyStart, shape.isBody);
+      let removeEnd = -1;
+      if (runEnd - bodyStart >= shape.minimum) {
+        removeEnd = runEnd;
+      } else {
+        const glued = gluedContinuation(source, bodyStart, runEnd, shape.isBody,
+          (run) => run.length >= shape.minimum, (run) => run !== '');
+        if (glued !== null) removeEnd = glued;
+      }
+      if (removeEnd === -1 || !wordBoundaryAfter(source, removeEnd)) continue;
+      built += source.slice(at, start) + REDACTION_SENTINEL;
+      at = removeEnd;
+    }
+    out = built + source.slice(at);
+  }
+  return out;
+}
+
 function redactShapeRules(input) {
-  let out = input;
-  for (const shape of SECRET_SHAPES) out = out.replace(shape, REDACTION_SENTINEL);
+  let out = redactCuratedShapes(input);
   out = redactBearerValues(out);
   return redactAuthorizationShapes(out);
 }

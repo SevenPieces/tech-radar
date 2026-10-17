@@ -28,13 +28,18 @@
 // notice class names (128/402/1000) and the shipped keyless collectAll, over the whole separator range
 // at every position the finding names.
 //
-// THE ONE BOUND THIS FILE RECORDS RATHER THAN CLOSES (the equivalent of Batch 94's recorded class): the
-// interior read covers the keyword and the FIXED PREFIX of a curated shape, not the VALUE RUN. A value
-// the surface split inside its own characters is ambiguous with two words once the separator has been
-// spaced, so reading it through would reap the prose after a real token ('Bearer tok_1 and this
-// sentence' would lose its tail). The by-value half has the value and removes it through the same
-// separators at both entry points; the keyless shape pass leaves the run's TAIL after the first
-// separator, and that is pinned as a bound below so a later change that closes it moves this row.
+// THE VALUE RUN'S BOUND, CORRECTED (Batch 100; the final verification's F41-1/F41-2). This file used
+// to record the bound as 'the keyless shape pass leaves the run's TAIL after the first separator'. The
+// measurement says that statement is true only where the run BEFORE the separator already satisfies
+// the rule's own minimum: where it does not, NOTHING matched and the WHOLE credential published,
+// visually intact -- the prefix, the separator and the body -- on the shipped keyless pool title and
+// summary, on both entry points and in the assembled notice. The record here is corrected to the
+// measured form, and the below-minimum position is closed by the one normalisation model (net.mjs
+// states it; tests/glued-value-run-property.test.mjs drives the whole shape x position x separator
+// matrix): a value run that cannot satisfy the rule as it stands continues across ONE separator run
+// into the next run of the rule's own value characters, and the span is removed whole. What is still
+// a bound, and is pinned below, is the prose guard: a run that ALREADY satisfies the rule is
+// complete and is NOT extended, so the word after a real token survives.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import {
@@ -236,14 +241,17 @@ test('ordinary prose is not reaped, and a separator outside the shape changes no
   }
 });
 
-test('THE RECORDED BOUND: the interior read covers the keyword and the shape prefix, not the value run', () => {
-  // Not a gap this batch claims to close -- the trade-off, measured. Once the separator is spaced it is
-  // indistinguishable from a real word boundary, so a VALUE split inside its own characters cannot be
-  // read through without reaping the prose that follows a real token ('Bearer tok_1 and this sentence'
-  // would lose its tail). The by-value half KNOWS the value and removes it through every separator at
-  // both entry points; the keyless shape pass removes the keyword and the run up to the separator and
-  // leaves the tail. Both halves of this statement are pinned, so a later change either way moves this
-  // row rather than passing silently.
+test('THE RECORDED BOUND, CORRECTED: a complete run is not extended, and a run below the rule minimum is removed across the separator', () => {
+  // The prose guard, measured: once a separator has been SPACED it is indistinguishable from a word
+  // boundary, so a run that already satisfies the rule cannot be read through without reaping the
+  // prose after a real token ('Bearer tok_1 and this sentence' would lose its tail). The by-value half
+  // KNOWS the value and removes it through every separator at both entry points; the keyless shape
+  // pass removes the keyword and the run up to the separator and leaves the tail. Both halves of this
+  // statement are pinned, so a later change either way moves this row rather than passing silently.
+  // THE BELOW-MINIMUM HALF IS NOT THIS BOUND ANY MORE (Batch 100; the verification's F41-1): the old
+  // record generalised the tail to every split position, and at a first run below the rule's own
+  // minimum NOTHING was removed and the whole credential published. Those positions are asserted
+  // closed at the bottom of this row, on both entry points, for every separator.
   const union = [CRED, SECRET];
   const separated = (ch) => 'the answer said the token is ' + CRED.slice(0, 12) + ch + CRED.slice(12) + ' and prose';
   for (const [label, ch] of SEPARATORS) {
@@ -280,5 +288,54 @@ test('THE RECORDED BOUND: the interior read covers the keyword and the shape pre
       + 'ijklmnop end', 400));
     assert.ok(!body.includes(TOK.slice(0, 10)), label + ': the keyless pass did not remove the shape');
     assert.ok(body.includes('ijklmnop'), label + ': the recorded shape-body tail bound moved: ' + JSON.stringify(body));
+    // THE CLOSED HALF: a run below the rule's own minimum. The credential is the WHOLE thing here --
+    // nothing of it may publish, on either entry point or in the assembled notice.
+    const below = {
+      'Basic payload (first run 4)': 'release: Basic ' + B64.slice(0, 4) + ch + B64.slice(4) + ' and prose',
+      'ghp_ body (first run 3)': 'a commit carried ' + TOK.slice(0, 7) + ch + TOK.slice(7) + ' end',
+      'PAT body (first run 6)': 'a commit carried ' + PAT.slice(0, 17) + ch + PAT.slice(17) + ' end',
+    };
+    for (const [what, text] of Object.entries(below)) {
+      assert.ok(!ANY_CREDENTIAL(redactCredentialShapes(plainText(text, 400))),
+        label + ': the below-minimum position published ' + what + ': '
+          + JSON.stringify(redactCredentialShapes(plainText(text, 400))));
+      assert.ok(!ANY_CREDENTIAL(neutraliseNoticeText(redactSecrets(text, union))),
+        label + ': the below-minimum position published ' + what + ' through the notice pass');
+      assert.ok(!ANY_CREDENTIAL(assembleNotice('rss', text, union, 1000)),
+        label + ': the below-minimum position published ' + what + ' in the assembled notice');
+    }
   }
+});
+
+// THE JOIN INSIDE 'gh' IS EXERCISED (Batch 100; the closing sweep's F41-4). The shape rows above put the
+// separator only BETWEEN the two literal parts ('gh'|'p_'), so replacing throughSeparators' own join
+// with the literal 'gh' left the suite green. These rows split INSIDE each literal, at every
+// internal offset, so the join is load-bearing.
+test('every internal offset of a literal keyword or prefix is read through the class', () => {
+  const rows = [];
+  const splitEverywhere = (name, literal, build, value) => {
+    for (let k = 1; k < literal.length; k += 1) {
+      rows.push([name + ' at ' + k, String.fromCodePoint(0x7f), () => build(literal.slice(0, k), literal.slice(k)), value]);
+    }
+  };
+  splitEverywhere('classic token keyword', 'gh', (a, b) => 'a commit carried ' + a + '\u007f' + b + 'p_abcdefghijklmnop end', TOK);
+  splitEverywhere('github_pat_ prefix', 'github_pat_', (a, b) => 'a commit carried ' + a + '\u007f' + b
+    + 'abcdefghijklmnopqrst end', PAT);
+  splitEverywhere('Bearer keyword', 'Bearer', (a, b) => 'release: ' + a + '\u007f' + b + ' ' + CRED + ' end', CRED);
+  splitEverywhere('Basic keyword', 'Basic', (a, b) => 'release: ' + a + '\u007f' + b + ' ' + B64 + ' end', B64);
+  splitEverywhere('authorization keyword', 'authorization', (a, b) => 'the answer said ' + a + '\u007f' + b
+    + ': ' + CRED + ' end', CRED);
+  const leaks = [];
+  for (const [name, ch, build, value] of rows) {
+    const raw = build();
+    const shown = raw.replace(ch, String.fromCodePoint(0x200b));
+    if (ANY_CREDENTIAL(redactCredentialShapes(plainText(raw, 400)))
+      || ANY_CREDENTIAL(neutraliseNoticeText(redactSecrets(raw, [])))
+      || ANY_CREDENTIAL(assembleNotice('rss', raw, [], 1000))) {
+      leaks.push(name + ' -> ' + JSON.stringify(shown));
+    }
+    void value;
+  }
+  assert.deepEqual(leaks, [], 'a literal keyword/prefix was not read through its own join: '
+    + leaks.slice(0, 8).join('; '));
 });
