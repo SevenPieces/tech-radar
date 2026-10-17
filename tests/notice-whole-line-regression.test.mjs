@@ -196,6 +196,12 @@ const COMPOSE_PIECES = ['', ':', ': ', 'ab', 'cd', 'x', '<a href=x', 'y>', '](',
 const COMPOSE_VALUES = ['ab: cd', ': ', 'x: ', ': x', 'abcdefgh', 'Bearer abcdefghij',
   '[redacted]', 'redacted]'];
 
+// The scope of this row, stated so it is not read as wider than it is (closing sweep F39-2): every
+// detail here is ONE piece, and no value in COMPOSE_VALUES is a strict substring of the marker, so
+// the matrix cannot build the F38-4 case -- a bare marker fragment ('[') left beside a complete
+// marker, where the re-redaction rewrites the fragment and grows the notice past its cap by nine.
+// That class is pinned separately in tests/f38-4-marker-substring-bound.test.mjs; this row's claim is
+// its own 10,584 compositions and it holds for every one of them.
 test('F27-5 residual: every notice the p3-compose matrix builds is a fixed point inside its cap', () => {
   let checked = 0;
   for (const cap of [128, 129, 402, 1000]) {

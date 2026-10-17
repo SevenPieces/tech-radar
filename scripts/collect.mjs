@@ -610,11 +610,19 @@ function rowsSecrets(rows, headers) {
 
 // The notices as they are published: each one redacted against the union above, which the push
 // already applied when it priced the notice, so this is the confirmation that the collection has
-// no value the run's own output still carries. The pass is a fixed point -- a marker it wrote is a
-// span no later pass reads, so re-applying it changes nothing, not even when a collected value is
-// a substring of the marker itself -- and the notice keeps the host and the reason it exists, so it
-// stays diagnosable. It stays because a caller can reach this module's collectors without
-// collectAll, and the source's own rows are then the union the push priced against.
+// no value the run's own output still carries. The pass is a fixed point of every value a shipped
+// run can collect -- a COMPLETE marker it wrote is a span no later pass reads -- with one recorded
+// exception (F38-4; closing sweep F39-2, pinned in tests/f38-4-marker-substring-bound.test.mjs): a
+// value that is a strict SUBSTRING of the marker ('[', 'redacted]') is not carried through
+// removeMarkerBearingValues (net.mjs reads only a value that CONTAINS the whole marker), so such a
+// value rewrites a bare marker fragment into a full marker and grows the notice by exactly nine
+// characters -- a breach for a re-redacted notice already at its cap. The shipped configuration
+// cannot collect such a value (config/watchlist.md and config/sources.md carry no '?' and no '@',
+// measured: 0 of each), which is why the pass is a confirmation in every shipped run; a caller that
+// supplies one at this seam does breach, at 621 of the 873 accepted caps 128..1000. The notice keeps
+// the host and the reason it exists, so it stays diagnosable. It stays because a caller can reach
+// this module's collectors without collectAll, and the source's own rows are then the union the push
+// priced against.
 function redactNotices(notices, secrets, limit) {
   const out = [];
   for (const notice of notices) pushNotice(out, notice, secrets, limit);
@@ -1713,9 +1721,14 @@ export async function collectAll(config, opts) {
   // The union pass TR-99 asks for: every notice the run produced, from every source and every
   // row, is redacted once more against every value of every request the run issued. Every notice
   // was already priced against the configuration-wide superset of this set (runSecrets above), and
-  // the redaction is a fixed point, so the pass is a confirmation rather than a rewrite: it cannot
-  // change a notice the push published, and in particular cannot lengthen one after its cap was
-  // applied, which is the seam TR-168 closes.
+  // the redaction is a fixed point of every value the shipped configuration can collect, so the pass
+  // is a confirmation rather than a rewrite: it cannot change a notice the push published, and in
+  // particular cannot lengthen one after its cap was applied, which is the seam TR-168 closes. The
+  // exception is recorded rather than asserted away (F38-4; closing sweep F39-2): a union value that
+  // is a strict SUBSTRING of the marker rewrites a bare marker fragment into a full one and grows the
+  // notice past the cap it was priced at by exactly nine characters. No shipped run can have such a
+  // value (the two configuration tables carry no query value and no userinfo, measured); the class,
+  // its bound and its reach are pinned in tests/f38-4-marker-substring-bound.test.mjs.
   const union = [...issuedSecrets];
   const credentialUnion = [...issuedCredentialSecrets];
   const notices = [];
