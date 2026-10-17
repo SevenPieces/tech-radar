@@ -34,12 +34,15 @@ first run, not an error. update merges the run's items into the state and
 advances the watermarks of the domains the run covered. A run that is already
 recorded for the same date and domains is refused rather than merged twice.
 
-Exit codes: 0 OK, 1 fatal, 2 state, items or config not found or unreadable,
-an invalid --date, an invalid settings value, the run is already recorded, --out
-naming an existing file other than --state, or another update holds the lock on
-the state or the output (a lock whose holder is gone is reclaimed); 3 the items
-file is not an array or an item failed validation; 4 the output could not be
-written.`;
+Exit codes: 0 OK, 2 state, items or config not found or unreadable, an invalid
+--date, an invalid settings value, the run is already recorded, --out naming an
+existing file other than --state, or another update holds the lock on the state or
+the output (a lock whose holder is gone is reclaimed); 3 the items file is not an
+array or an item failed validation; 4 the output could not be written. No code path
+returns 1: every failure this tool reports is 2, 3 or 4, and an error it does not
+name is mapped to 2 ('err.exitCode ?? 2'). Only an exception that escapes main
+altogether exits 1, as it does for any Node process; the collector's usage reserves
+its own 1 for that same case.`;
 
 // An error that carries the exit code the CLI should return for it.
 function fail(message, exitCode) {
