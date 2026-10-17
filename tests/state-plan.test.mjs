@@ -1,9 +1,10 @@
 // tests/state-plan.test.mjs
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync } from 'node:fs';
+import { copyFileSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { emptyState, planWindows, stamp, main, parseArgs } from '../scripts/update-state.mjs';
 
 const config = {
@@ -11,6 +12,7 @@ const config = {
   settings: { timezone: 'Asia/Shanghai', window_cap_weeks: 4, first_run_days: 7 },
 };
 const NOW = new Date('2026-09-23T09:00:00Z');
+const SKILL_CONFIG = fileURLToPath(new URL('../config/', import.meta.url));
 
 test('stamp renders a date in the configured zone', () => {
   assert.equal(stamp(new Date('2026-09-23T09:00:00Z'), 'Asia/Shanghai'), '2026-09-23 17:00');
@@ -281,3 +283,93 @@ test('plan rejects an empty --domains list instead of printing an epoch window',
   assert.match(errs.join('\n'), /invalid --domains: expected at least one domain key/);
   assert.doesNotMatch(errs.join('\n'), /1970/);
 });
+
+// Regression test: planWindows computed since = max(declared, capFloor) and never
+// compared the start with now, so --since could name a floor AFTER the run's own until
+// and print a window whose since is after its until, with a label the digest must repeat
+// verbatim. collect refuses that very window, so the plan was unusable and the digest it
+// labelled was unbuildable.
+test('plan refuses a --since floor later than now instead of printing an inverted window', () => {
+  const state = emptyState(['ai-llm', 'quantum']);
+  const future = new Date(NOW.getTime() + 90 * 864e5).toISOString();
+  assert.throws(
+    () => planWindows(config, state, NOW, null, future),
+    (err) => {
+      assert.equal(err.exitCode, 2, 'the refusal is the documented configuration exit');
+      assert.match(err.message, /after/i, 'the message says the floor is after now: ' + err.message);
+      return true;
+    },
+  );
+});
+
+test('the plan CLI exits 2 for a --since floor later than now', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'tech-radar-future-floor-'));
+  const future = new Date(Date.now() + 365 * 864e5).toISOString().slice(0, 10);
+  const errs = [];
+  const logs = [];
+  const origErr = console.error;
+  const origLog = console.log;
+  console.error = (...a) => errs.push(a.join(' '));
+  console.log = (...a) => logs.push(a.join(' '));
+  let code;
+  try {
+    code = main(['plan', '--state', join(dir, 'state.json'), '--since', future]);
+  } finally {
+    console.error = origErr;
+    console.log = origLog;
+    process.exitCode = 0;
+  }
+  assert.equal(code, 2, 'the inverted window is refused, not printed: ' + logs.join('\n'));
+  assert.match(errs.join('\n'), /after/i);
+  assert.doesNotMatch(logs.join('\n'), /"since"/, 'no plan JSON is printed for an unusable window');
+  assert.equal(logs.join('').includes(future), false, 'the unusable floor is not published as a plan');
+});
+
+// The configuration directory a timezone case plans against: the shipped configuration with
+// its timezone row removed, or replaced by the value given, at the same place in the table.
+function configDirWithTimezone(dir, value) {
+  mkdirSync(join(dir, 'config'), { recursive: true });
+  for (const name of ['domains.md', 'sources.md', 'watchlist.md']) {
+    copyFileSync(join(SKILL_CONFIG, name), join(dir, 'config', name));
+  }
+  const lines = readFileSync(join(SKILL_CONFIG, 'settings.md'), 'utf8').split('\n');
+  const at = lines.findIndex((line) => /^\|\s*timezone\s*\|/.test(line));
+  assert.notEqual(at, -1, 'the shipped settings table carries the timezone row');
+  const replaced = value === undefined ? [] : ['| timezone | ' + value + ' | probe |'];
+  writeFileSync(join(dir, 'config', 'settings.md'), lines.slice(0, at).concat(replaced, lines.slice(at + 1)).join('\n'));
+  return join(dir, 'config');
+}
+
+// Regression test: timezone was the one settings row update-state consumes that nothing
+// validated, so a settings file without it planned happily and published the label
+// "Covering ... to ... (undefined)" - a value the gate accepts because it only checks that
+// the digest repeats the label. An unusable value failed too, but with a zone-library
+// message that named no settings row. The value is configuration and is validated like
+// every other one.
+test('a settings file with no usable timezone is a named exit 2, not a label with undefined', () => {
+  for (const [what, value] of [['missing', undefined], ['unusable', 'Not/AZone']]) {
+    const dir = mkdtempSync(join(tmpdir(), 'tech-radar-timezone-'));
+    const cfg = configDirWithTimezone(dir, value);
+    const errs = [];
+    const logs = [];
+    const origErr = console.error;
+    const origLog = console.log;
+    console.error = (...a) => errs.push(a.join(' '));
+    console.log = (...a) => logs.push(a.join(' '));
+    let code;
+    try {
+      code = main(['plan', '--state', join(dir, 'state.json'), '--config', cfg]);
+    } finally {
+      console.error = origErr;
+      console.log = origLog;
+      process.exitCode = 0;
+    }
+    const message = errs.join('\n');
+    assert.equal(code, 2, what + ': the settings row is a configuration error: ' + message + logs.join('\n'));
+    assert.match(message, /timezone/, what + ': the refused settings row is named: ' + message);
+    assert.doesNotMatch(message, /undefined/, what + ': no undefined value is reported: ' + message);
+    assert.doesNotMatch(logs.join('\n'), /\(undefined\)/, what + ': no label with an undefined zone is published');
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+

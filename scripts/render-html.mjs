@@ -2,10 +2,16 @@
 // scripts/render-html.mjs
 // Markdown digest -> one self-contained HTML file. Zero dependencies.
 // Inline CSS and JS only; the result opens correctly from file:// offline.
-import { readFileSync, writeFileSync } from 'node:fs';
+import { randomBytes } from 'node:crypto';
+import {
+  accessSync, chmodSync, constants, existsSync, lstatSync, readFileSync, readlinkSync,
+  realpathSync, renameSync, statSync, unlinkSync, writeFileSync,
+} from 'node:fs';
+import { dirname, isAbsolute, resolve } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
-import { readDomains } from './lib/mdtable.mjs';
+import { readDomains, readSettings, shortCap } from './lib/mdtable.mjs';
 import { externalAssets } from './lib/assets.mjs';
+import { INVISIBLE_SEPARATOR } from './lib/net.mjs';
 
 // The configuration ships with the skill, so the default is the config directory
 // beside this script, spelled exactly as collect.mjs spells it: the documented
@@ -23,7 +29,7 @@ const USAGE = `usage: render-html.mjs <input.md> --out <path> [--config <dir>]
 Exit codes: 0 OK, 2 input or config not found or unreadable, 4 the output could
 not be written, 5 the rendered document would reference an external asset.`;
 
-export function esc(text) {
+function esc(text) {
   return String(text)
     .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
     .replace(/"/g, '&quot;').replace(/'/g, '&#39;');
@@ -37,9 +43,17 @@ export function esc(text) {
 // leaving the tail of the destination in the prose. One level of nesting is supported,
 // which covers the URLs a digest cites.
 const URL_PART = '(?:[^()\\s]|\\([^()\\s]*\\))';
+// A status flag is a token: its '#' must not be glued to a word character, so it opens the text
+// or follows whitespace or punctuation. Without a boundary a spelling the collector's neutraliser
+// deliberately preserves - 'C#new async patterns' - drew a status tag here, so the renderer and
+// the neutraliser disagreed about what a flag is. A whitespace-only boundary would go too far the
+// other way: the shipped example's legend writes '#new' between backticks to show the tag the
+// vocabulary draws, and that tag is part of the frozen artifact. Every flag scan below uses this
+// same boundary, and the neutraliser uses it too.
+const FLAG_BOUNDARY = '(?<!\\w)#';
 const TOKEN = new RegExp('\\[src:([^\\]]+?)\\]\\((https?:\\/\\/' + URL_PART + '+)\\)'
   + '|\\[alt:([^\\]]+?)\\]\\((https?:\\/\\/' + URL_PART + '+)\\)'
-  + '|\\[prov:([a-z-]+)\\]|#(new|followup|developing|watch)\\b|\\*\\*([^*\\n]+?)\\*\\*', 'g');
+  + '|\\[prov:([a-z-]+)\\]|' + FLAG_BOUNDARY + '(new|followup|developing|watch)\\b|\\*\\*([^*\\n]+?)\\*\\*', 'g');
 
 export function linkify(text) {
   return esc(text).replace(TOKEN, (match, srcLabel, srcUrl, altLabel, altUrl, prov, flag, strong) => {
@@ -55,6 +69,37 @@ export function linkify(text) {
 // heading and no item, so the renderer normalises before it splits.
 function normalizeNewlines(md) {
   return String(md ?? '').replace(/\r\n?/g, '\n');
+}
+// THE INTERNAL CHARACTERS DO NOT REACH THE DELIVERABLE (Batch 104; the final sweep's F44-3). The
+// module keeps three characters that are not text: the separator mark U+E001 (the published view of
+// a split separator), the scaffold mask U+E000 and the removal sentinel U+FFFF. The pool, the
+// candidate, the notice and the assembly are clean by construction, but the renderer is a
+// publication point a caller may hand a digest it wrote or quoted from a source that carries one,
+// and it copied every non-escaped code point straight into the .html while check-quality accepted
+// the digest. They are rendered as the spaces they stand in for here, exactly as
+// renderSeparatorMarks renders the mark at every redaction entry point, and a C0 control that is not
+// Markdown's own whitespace (tab, LF, CR are kept; U+0000 is refused below) is spaced the same way.
+//
+// THE CLASS IS THE ONE THE MODULE NORMALISES, NOT THREE CHARACTERS (Batch 105; the closing sweep's
+// F45-3). Batch 104 spaced U+E000/U+E001/U+FFFF and C0/DEL and left the position right beside it
+// open: C1 controls (U+0080-U+009F, the class CONTROL_CHARACTERS already names) and the invisible
+// separator class -- ZWSP, SHY, FEFF, WJ, the bidi and line/paragraph separators, the tag characters
+// U+E0000-U+E007F and the variation selectors -- reached the .html byte for byte while the gate
+// PASSed (measured). They are spaced here as well, so the deliverable cannot carry a character no
+// reader can see or a control a reader cannot render. The price is stated: a digest that writes a
+// variation selector beside an emoji keeps the emoji and gets the space in the selector's place; no
+// shipped example carries one, and the shipped example still renders byte-identically.
+const INTERNAL_DIGEST_CHARS = /[\u0001-\u0008\u000B\u000C\u000E-\u001F\u007F-\u009F\u00AD\u061C\u180E\u200B-\u200F\u202A-\u202E\u2028\u2029\u2060-\u2064\u2066-\u206F\u3164\uFE00-\uFE0F\uFEFF\uFFF0-\uFFF8\uE000\uE001\uFFFF\u{E0000}-\u{E007F}\u{E0100}-\u{E01EF}]/gu;
+// THE CLASS IS THE MODULE'S CLASS, NOT A HAND LIST (Batch 107). The list above is written by hand and
+// is not the class the module normalises: the Default_Ignorable members it omits -- U+034F, U+115F,
+// U+1160, U+17B4..U+17B5, U+180B..U+180D, U+1BCA0..U+1BCA3, U+1D173..U+1D17A, U+2065 and U+FFA0 --
+// were copied into the .html while the quality gate answered PASS, which is the sentence above ('the
+// deliverable cannot carry a character no reader can see') being false at 22 assigned members. The
+// property below is the module's own (INVISIBLE_SEPARATOR, \p{Default_Ignorable_Code_Point}), the
+// one every shape rule reads, so the class is closed whole instead of one character at a time.
+const INVISIBLE_DIGEST_CHARS = new RegExp(INVISIBLE_SEPARATOR, 'gu');
+function stripInternalChars(md) {
+  return String(md ?? '').replace(INTERNAL_DIGEST_CHARS, ' ').replace(INVISIBLE_DIGEST_CHARS, ' ');
 }
 
 const CSS = [
@@ -157,6 +202,11 @@ const JS = [
   '})();',
 ].join('\n');
 
+// A digest carrying the substitution sentinel (U+0000) in authored text is the one input
+// this renderer cannot turn into a document. The refusal carries its own type so run() can
+// answer it at the documented exit 2 instead of letting it escape main() as exit 1.
+class SentinelInDigestError extends Error {}
+
 export function render(md, config) {
   const domainOf = (name) => config.domains.find((d) => d.domain === name);
   // A chip label is a shortcut, so it must stay short. A catalogue without the column
@@ -166,15 +216,28 @@ export function render(md, config) {
   // A chip is a shortcut: the reader caps an authored one, and a catalogue without the
   // column falls back to a clause of the name clipped at a word boundary, so the cap holds
   // wherever the label comes from.
+  // The cap is configuration, never a literal here: it travels with the catalogue, and a
+  // caller that carries no settings gets it from the settings file the reader resolves.
+  const chipCap = shortCap(config);
   const clipChip = (label) => {
     const text = String(label).trim();
-    if (text.length <= 18) return text;
-    const cut = text.slice(0, 18);
+    if (text.length <= chipCap) return text;
+    const cut = text.slice(0, chipCap);
     const at = cut.lastIndexOf(' ');
     return (at > 0 ? cut.slice(0, at) : cut).trim();
   };
   const chipOf = (row) => clipChip(shortOf[row.domain] || row.domain.split(/,|\s*\(|\s+and\s+/)[0]);
-  const lines = normalizeNewlines(md).split('\n');
+  const digest = stripInternalChars(normalizeNewlines(md));
+  // The count and card placeholders are replaced before the document is returned, so the
+  // token has to be one no digest can write. A digest is Markdown text, so a control
+  // character is the one thing it cannot legitimately contain; a digest that does carry
+  // one is refused rather than allowed to rewrite authored prose.
+  const SENTINEL = '\u0000';
+  if (digest.includes(SENTINEL)) {
+    throw new SentinelInDigestError('the digest contains the renderer substitution sentinel (U+0000)');
+  }
+  const mark = (key) => `${SENTINEL}${key}${SENTINEL}`;
+  const lines = digest.split('\n');
   // The header block is the title plus the leading underscore lines. The shipped
   // example carries two of them - an illustrative disclaimer and the real window
   // line - so the meta is the last one, the one adjacent to the content; taking the
@@ -223,17 +286,50 @@ export function render(md, config) {
     return seen === 1 ? base : `${base}-${seen}`;
   };
 
-  const SRC = new RegExp('\\[src:([^\\]]+?)\\s+(\\d{4}-\\d{2}-\\d{2}[^\\]]*)\\]\\((https?:\\/\\/' + URL_PART + '+)\\)');
-  const ALT = new RegExp('\\[alt:([^\\]]+?)\\]\\((https?:\\/\\/' + URL_PART + '+)\\)');
   const ITEM = /^\*\*(.+?)\*\*\s+—\s+([\s\S]*)$/;
-  const stripCitations = (text) => String(text)
+  // Two readings of the same text. The link grammar (the one linkify draws with) decides
+  // which citations become pills; a slightly more permissive one decides what lies *inside a
+  // destination*. A URL's own query string can hold '[prov:vendor-claim]' or a nested
+  // '[alt:...](...)', and reading either forged a provenance dot, a provenance badge and an
+  // alternative-source pill pointing wherever the destination said. A hostile link can carry
+  // a space, which the link grammar rejects, so the permissive reading is what keeps a marker
+  // inside such a destination from becoming the item's own marker; the destination itself is
+  // still used, untouched, to build the link it belongs to.
+  const CITATION_DEST = '(?:[^()\\n]|\\([^()\\n]*\\))+';
+  const CITATION_SOURCE = '\\[(src|alt):([^\\]]+?)\\]\\((https?:\\/\\/' + URL_PART + '+)\\)';
+  const SPAN_SOURCE = '\\[(src|alt):[^\\]]*\\]\\(' + CITATION_DEST + '\\)';
+  const citationSpans = (text) => [...String(text).matchAll(new RegExp(SPAN_SOURCE, 'g'))]
+    .map((m) => [m.index, m.index + m[0].length]);
+  // The citations the item carries: a citation the link grammar accepts, unless it sits inside
+  // a destination of the permissive reading. A nested one is part of the link, not a marker.
+  const citationsIn = (text) => {
+    const spans = citationSpans(text);
+    return [...String(text).matchAll(new RegExp(CITATION_SOURCE, 'g'))]
+      .filter((m) => !spans.some(([start, end]) => m.index > start && m.index < end));
+  };
+  // The form the marker scans read: every citation span removed, read permissively. The
+  // published prose is never built from this form - linkify draws the citation itself.
+  const withoutMarkerSources = (text) => String(text)
+    .replace(new RegExp('\\[src:[^\\]]*\\]\\(' + CITATION_DEST + '\\)', 'g'), ' ')
+    .replace(new RegExp('\\[alt:[^\\]]*\\]\\(' + CITATION_DEST + '\\)', 'g'), ' ');
+  const withoutCitations = (text) => String(text)
     .replace(new RegExp('\\[src:[^\\]]*\\]\\(' + URL_PART + '+\\)', 'g'), ' ')
-    .replace(new RegExp('\\[alt:[^\\]]*\\]\\(' + URL_PART + '+\\)', 'g'), ' ')
-    .replace(/\[prov:[a-z-]+\]/g, ' ');
+    .replace(new RegExp('\\[alt:[^\\]]*\\]\\(' + URL_PART + '+\\)', 'g'), ' ');
+  const stripCitations = (text) => withoutCitations(text).replace(/\[prov:[a-z-]+\]/g, ' ');
+  // The origin pill repeats the citation's own label and date as the prose grammar writes
+  // them: a labelled citation whose label carries no date draws no pill, exactly as before.
+  const srcPill = (citations) => {
+    for (const c of citations) {
+      if (c[1] !== 'src') continue;
+      const parts = /^([\s\S]+?)\s+(\d{4}-\d{2}-\d{2}[^\]]*)$/.exec(c[2]);
+      if (parts) return { url: c[3], label: `${parts[1]} ${parts[2]}` };
+    }
+    return null;
+  };
   // The summary keeps the prose only; the status scan keeps the flags, because a
   // #new inside a citation URL is part of an href and a #new in prose is not the
   // item's flag - the trailing token is.
-  const stripMarkers = (text) => stripCitations(text).replace(/#(?:new|followup|developing|watch)\b/g, ' ');
+  const stripMarkers = (text) => stripCitations(text).replace(new RegExp(FLAG_BOUNDARY + '(?:new|followup|developing|watch)\\b', 'g'), ' ');
   // Removing a marker leaves the space it occupied, which lands before the punctuation the
   // author wrote after it ("citations and ." from "citations and [prov:primary] .").
   const tidyProse = (text) => String(text).replace(/\s+([.,;:!?])/g, '$1').replace(/\s+/g, ' ').trim();
@@ -242,7 +338,7 @@ export function render(md, config) {
   // item's provenance: the same marker that is drawn as a pill on the badge row, so the
   // colour tells a reader at a glance how the item is sourced.
   const dotFor = (text, missing = 'No provenance marker') => {
-    const prov = /\[prov:([a-z-]+)\]/.exec(text);
+    const prov = /\[prov:([a-z-]+)\]/.exec(withoutMarkerSources(text));
     return prov
       ? `<span class="prov prov-${esc(prov[1])}" title="Provenance: ${esc(prov[1])}"></span>`
       : `<span class="prov prov-default" title="${esc(missing)}"></span>`;
@@ -253,17 +349,23 @@ export function render(md, config) {
   // citation is never part of a sentence.
   const badgeRow = (text) => {
     const bits = [];
-    const src = SRC.exec(text);
+    const citations = citationsIn(text);
     // The origin and the alternatives are pills that open the page; only the provenance
     // marker and the status tag are not links, because they name something this document
     // decided, not a page.
-    if (src) bits.push(`<a class="badge src" href="${esc(src[3])}" target="_blank" rel="noopener">${esc(`${src[1]} ${src[2]}`)}</a>`);
-    const alt = ALT.exec(text);
-    if (alt) bits.push(`<a class="badge alt" href="${esc(alt[2])}" target="_blank" rel="noopener">${esc(alt[1])}</a>`);
-    for (const m of text.matchAll(/\[prov:([a-z-]+)\]/g)) {
+    const src = srcPill(citations);
+    if (src) bits.push(`<a class="badge src" href="${esc(src.url)}" target="_blank" rel="noopener">${esc(src.label)}</a>`);
+    const alt = citations.find((c) => c[1] === 'alt');
+    if (alt) bits.push(`<a class="badge alt" href="${esc(alt[3])}" target="_blank" rel="noopener">${esc(alt[2])}</a>`);
+    // A provenance marker inside a citation destination is part of the link, not the item's
+    // own marker: the scan reads the text with every citation removed.
+    for (const m of withoutMarkerSources(text).matchAll(/\[prov:([a-z-]+)\]/g)) {
       bits.push(`<span class="badge prov-${esc(m[1])}">${esc(m[1])}</span>`);
     }
-    const status = [...stripCitations(text).matchAll(/#(new|followup|developing|watch)\b/g)];
+    // The status tag is the item's new-or-follow-up state, which the gate and the state
+    // merge both read as the last #new|#followup token. An additive flag such as
+    // #developing does not decide it, wherever the author wrote it.
+    const status = [...stripCitations(text).matchAll(new RegExp(FLAG_BOUNDARY + '(new|followup)\\b', 'g'))];
     if (status.length) {
       const flag = status[status.length - 1][1];
       bits.push(`<span class="tag t-${flag}">${flag}</span>`);
@@ -287,10 +389,10 @@ export function render(md, config) {
       const summary = tidyProse(stripMarkers(m[2]));
       // The headline is the primary link, as it is on a briefing story card; a headline
       // with no citation to point at stays a span rather than a dead link.
-      const link = SRC.exec(m[2]);
+      const link = srcPill(citationsIn(m[2]));
       const headline = link
-        ? `<a class="hl" href="${esc(link[3])}" target="_blank" rel="noopener">${linkify(m[1])}</a>`
-        : `<span class="hl">${linkify(m[1])}</span>`;
+        ? `<a class="hl" href="${esc(link.url)}" target="_blank" rel="noopener">${linkify(stripMarkers(m[1]))}</a>`
+        : `<span class="hl">${linkify(stripMarkers(m[1]))}</span>`;
       out.push(`<li class="story"><div class="hlrow">${dotFor(m[2])}${headline}</div>`
         + (summary ? `<p class="sum">${linkify(summary)}</p>` : '')
         + `${badgeRow(m[2])}</li>`);
@@ -310,7 +412,7 @@ export function render(md, config) {
   const closeFeatured = () => {
     if (featuredOpen === null) return;
     featuredCards.push(featuredOpen);
-    out.push(`%%BADGES-${featuredOpen.key}%%</li></ul>`);
+    out.push(`${mark(`BADGES-${featuredOpen.key}`)}</li></ul>`);
     featuredOpen = null;
   };
 
@@ -350,7 +452,7 @@ export function render(md, config) {
         featuredSeq += 1;
         const key = 'f' + featuredSeq;
         featuredOpen = { key, title: label, prose: [] };
-        out.push(`<ul class="stories"><li class="story featured"><div class="hlrow">%%PROV-${key}%%%%HL-${key}%%</div>`);
+        out.push(`<ul class="stories"><li class="story featured"><div class="hlrow">${mark(`PROV-${key}`)}${mark(`HL-${key}`)}</div>`);
         continue;
       }
       const name = label.split('·')[0].trim();
@@ -368,7 +470,7 @@ export function render(md, config) {
         const tierBadge = row ? `<span class="tier ${esc(row.tier)}">${esc(row.tier)}</span>` : '';
         out.push(`<details class="aspect" id="${key}"${row ? ` data-cluster="${esc(row.cluster)}"` : ''} open>`
           + `<summary><span class="ah">${esc(label)}</span>`
-          + `<span class="badges">${tierBadge}<span class="count">%%${key}%%</span></span></summary>`
+          + `<span class="badges">${tierBadge}<span class="count">${mark(key)}</span></span></summary>`
           + '<div class="aspect-body">');
         openDetails = true;
         currentKey = key;
@@ -411,19 +513,26 @@ export function render(md, config) {
   for (const card of featuredCards) {
     const text = card.prose.join(' ');
     const dot = dotFor(text, 'No provenance marker: the deep dive names its sources in the prose');
-    const link = SRC.exec(text);
+    const link = srcPill(citationsIn(text));
     const headline = link
-      ? `<a class="hl" href="${esc(link[3])}" target="_blank" rel="noopener">${esc(card.title)}</a>`
+      ? `<a class="hl" href="${esc(link.url)}" target="_blank" rel="noopener">${esc(card.title)}</a>`
       : `<span class="hl">${esc(card.title)}</span>`;
-    body = body.replaceAll(`%%PROV-${card.key}%%`, dot)
-      .replaceAll(`%%HL-${card.key}%%`, headline)
-      .replaceAll(`%%BADGES-${card.key}%%`, badgeRow(text));
+    body = body.replaceAll(mark(`PROV-${card.key}`), dot)
+      .replaceAll(mark(`HL-${card.key}`), headline)
+      .replaceAll(mark(`BADGES-${card.key}`), badgeRow(text));
   }
   // A card's count is known only after its items are read, so the summary carries a
   // placeholder that is filled in here once every card has been read.
   for (const [key, n] of counts) {
-    body = body.replaceAll(`%%${key}%%`, `${n} item${n === 1 ? '' : 's'}`);
+    body = body.replaceAll(mark(key), `${n} item${n === 1 ? '' : 's'}`);
   }
+  // A provenance style is emitted only for a provenance value this document actually
+  // carries. An artifact then spells the vocabulary of the badges it drew and no other,
+  // so text that merely mimics a marker stays inert in the stylesheet as well as in prose.
+  const css = CSS.split('\n').filter((rule) => {
+    const m = /^\.(?:badge\.)?prov-(primary|secondary|preprint|vendor-claim)\{/.exec(rule);
+    return m === null || body.includes(`prov-${m[1]}`);
+  }).join('\n');
   const nav = navLinks.join('');
   return `<!doctype html>
 <html lang="en">
@@ -432,7 +541,7 @@ export function render(md, config) {
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <title>${esc(title)}</title>
 <style>
-${CSS}
+${css}
 </style>
 </head>
 <body id="top">
@@ -476,13 +585,81 @@ export function parseArgs(argv) {
   return out;
 }
 
+// The file the write lands on, with a symlinked destination followed to its target. The
+// rename below replaces an inode, so renaming over the spelling the operator gave replaces the
+// link itself: the link becomes a regular file holding the new digest while the file it pointed
+// at keeps the old one, and a digest kept on another volume behind a link - or aimed at through
+// one - quietly goes stale. Resolving rather than refusing keeps the operator's link and
+// publishes the deliverable where they aimed it.
+//
+// realpathSync answers for a link whose target is there. A link whose final target is not there
+// yet has no real path, so the chain is walked by hand to the name it points at, which the write
+// then creates exactly as a plain write to a fresh destination would. A chain that never
+// terminates is refused rather than guessed at, before any temp file exists, so the failure
+// leaves nothing behind. This mirrors the state and collector writers, which resolve the same
+// way.
+function resolveWriteTarget(out) {
+  try { return realpathSync(out); } catch { /* absent, or a link to a path that is not there */ }
+  let current = out;
+  let stats;
+  try { stats = lstatSync(current); } catch { return current; }
+  for (let hop = 0; stats.isSymbolicLink(); hop += 1) {
+    if (hop >= 32) throw new Error(`${out} is a symlink chain that does not resolve to a file`);
+    const target = readlinkSync(current);
+    current = isAbsolute(target) ? target : resolve(dirname(current), target);
+    try { stats = lstatSync(current); } catch { return current; }
+  }
+  return current;
+}
+
+// The mode the replacement carries. The rename replaces the inode, so an existing
+// destination keeps its own permissions only if the temp is born with them: a temp created
+// with the process default silently widened a deliverable the operator had protected - a
+// 0600 HTML came back 0664. A fresh (absent) destination has no mode to keep, so it is left
+// at the mode the create itself gave it - 0666 masked by the process umask - exactly what
+// the plain write this replaced produced, so a newly rendered digest is not owner-only.
+// The state writer resolves the same way, so the three writers agree on the rule.
+function destinationMode(path) {
+  try { return statSync(path).mode & 0o777; } catch { return null; }
+}
+
+// A replacement is published by a rename, so a refused or interrupted write leaves the
+// previous deliverable intact rather than truncated. The temp name is unique and created
+// exclusively, so a pre-planted path is never followed, and it is removed on every failure.
+// A destination that exists but is not writable is refused before the rename: the rename
+// itself needs only the directory, so without this check a read-only deliverable the
+// operator protected was silently replaced. The state writer refuses the same way, so the
+// three writers really do agree on the rule the comment above claims for them.
+function writeAtomic(path, text) {
+  // Everything below names the resolved destination, not the spelling the operator gave: the
+  // temp has to be born beside the inode the rename replaces, or a symlinked destination on
+  // another volume would fail the rename with EXDEV, and the rename itself has to name that
+  // inode rather than the link.
+  const destination = resolveWriteTarget(path);
+  const mode = destinationMode(destination);
+  const tmp = `${destination}.${process.pid}.${randomBytes(6).toString('hex')}.tmp`;
+  try {
+    writeFileSync(tmp, text, { flag: 'wx', mode: mode ?? 0o666 });
+    // chmod after the create, because the umask would otherwise clear bits the destination
+    // held (a 0664 deliverable under a 022 umask is the common case). Only a destination
+    // that already existed is pinned: a fresh deliverable keeps the create's own
+    // 0666 & ~umask, so a newly rendered digest is not owner-only.
+    if (mode !== null) chmodSync(tmp, mode);
+    if (existsSync(destination)) accessSync(destination, constants.W_OK);
+    renameSync(tmp, destination);
+  } catch (err) {
+    try { unlinkSync(tmp); } catch { /* the temp was never created */ }
+    throw err;
+  }
+}
+
 // io is a test seam: the CLI is exercised with an injected renderer so that the
 // write/no-write decision on a self-containment failure is observable.
 export function run(argv, io = {}) {
   const readFile = io.readFile ?? ((p) => readFileSync(p, 'utf8'));
   const readDomainsOf = io.readDomains ?? ((path) => readDomains(path));
   const renderFn = io.render ?? render;
-  const writeFile = io.writeFile ?? ((p, s) => writeFileSync(p, s));
+  const writeFile = io.writeFile ?? writeAtomic;
   const log = io.log ?? ((m) => console.log(m));
   const error = io.error ?? ((m) => console.error(m));
 
@@ -517,7 +694,20 @@ export function run(argv, io = {}) {
     error(`render-html: cannot read config ${opts.config}: ${err.message}`);
     return 2;
   }
-  const html = renderFn(md, { domains });
+  // The chip cap travels with the catalogue it clips. A settings file that cannot be read
+  // leaves the reader's own resolution, so the renderer still has a configured cap.
+  let shortMax = null;
+  try { shortMax = readSettings(`${opts.config}/settings.md`).short_max_chars; } catch { shortMax = null; }
+  let html;
+  try {
+    html = renderFn(md, { domains, short_max_chars: shortMax });
+  } catch (err) {
+    // An unusable input takes the documented exit 2 with one named line and no output
+    // file; anything else is unexpected and still propagates.
+    if (!(err instanceof SentinelInDigestError)) throw err;
+    error(`render-html: ${err.message}`);
+    return 2;
+  }
   // Checked before the write: a self-containment failure must not leave a
   // deliverable on disk that breaks when it is opened from file://.
   if (externalAssets(html)) {
@@ -534,7 +724,7 @@ export function run(argv, io = {}) {
   return 0;
 }
 
-export function main(argv = process.argv.slice(2)) {
+function main(argv = process.argv.slice(2)) {
   const code = run(argv);
   if (code) process.exitCode = code;
   return code;

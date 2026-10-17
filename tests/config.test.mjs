@@ -26,7 +26,8 @@ const SETTINGS_KEYS = [
   'github_rate_limit_reserve',
   'github_org_repos', 'github_tags_per_repo', 'arxiv_max_results', 'ghsa_page_size',
   'nvd_severity', 'request_timeout_ms', 'title_max_chars', 'summary_max_chars',
-  'error_snippet_max_chars', 'discovery_hosts', 'user_agent', 'runs_history_max',
+  'error_snippet_max_chars', 'notice_max_chars', 'discovery_hosts', 'user_agent',
+  'runs_history_max', 'short_max_chars',
 ];
 
 const config = readConfig(CONFIG_DIR);
@@ -219,14 +220,47 @@ test('the GitHub watchlist floor fits inside the anonymous hourly allowance', ()
   assert.ok(floor <= available, 'the GitHub watchlist floor exceeds the anonymous hourly allowance: ' + detail);
 });
 
-test('config/settings.md declares all twenty-eight keys the code reads', () => {
+// The settings table is the whole configuration surface, so the keys the skill reads (the list
+// above) and the rows the table declares must be one and the same set. The expectation is derived
+// from the file, never from a count: the literal that used to sit here agreed with the list rather
+// than with the file, so notice_max_chars could be added to the table while this case still passed.
+// Both directions are checked, so a key the skill reads that the table omits and a row the table
+// declares that the skill never reads each fail here.
+test('config/settings.md declares exactly the settings keys the skill reads', () => {
   const settings = readSettings(CONFIG_DIR + 'settings.md');
-  assert.equal(SETTINGS_KEYS.length, 28, 'the documented settings key count');
+  const declared = Object.keys(settings);
   assert.ok('watchlist_retention_weeks' in settings, 'watchlist_retention_weeks present');
   const missing = SETTINGS_KEYS.filter((k) => !(k in settings));
-  assert.deepEqual(missing, [], 'missing settings keys: ' + missing.join(', '));
+  assert.deepEqual(missing, [], 'settings keys the skill reads but settings.md never declares: ' + missing.join(', '));
+  const unread = declared.filter((k) => !SETTINGS_KEYS.includes(k));
+  assert.deepEqual(unread, [], 'settings.md rows the skill never reads: ' + unread.join(', '));
   const blank = SETTINGS_KEYS.filter((k) => settings[k] === '');
   assert.deepEqual(blank, [], 'settings keys with an empty value: ' + blank.join(', '));
+});
+
+// The rule takes the upstream answer's text out of every notice. error_snippet_max_chars is kept
+// and re-purposed: it bounds the shaped error text, which is the redacted request URL. The note
+// must say that and must not promise a quoted server body -- the old wording named the longest
+// server text quoted in the notice, which is exactly what the rule forbids.
+test('the error-snippet setting is documented as a bound on the notice text, never a body quote', () => {
+  const row = readFileSync(CONFIG_DIR + 'settings.md', 'utf8')
+    .split('\n').find((line) => line.startsWith('| error_snippet_max_chars'));
+  assert.ok(row, 'the setting row is present');
+  const note = row.split('|').slice(3).join('|');
+  assert.doesNotMatch(note, /server text quoted|quoted in the notice/i,
+    'the note still promises a quoted server body: ' + note);
+  assert.match(note, /body/i, 'the note names the body it refuses: ' + note);
+  assert.match(note, /never[^|]*quote/i, 'the note states the upstream body is never quoted: ' + note);
+});
+
+// Regression test: the 18-character chip cap was a literal in scripts/lib/mdtable.mjs and
+// a second literal in scripts/render-html.mjs, existed in no config file, and could drift
+// between the two copies. R3 says every count and cap is configuration, so the cap is a
+// positive integer setting the reader consumes.
+test('the chip cap is a positive integer setting, not a literal', () => {
+  const settings = readSettings(CONFIG_DIR + 'settings.md');
+  assert.ok(Number.isInteger(settings.short_max_chars), 'short_max_chars must be an integer, got ' + JSON.stringify(settings.short_max_chars));
+  assert.ok(settings.short_max_chars > 0, 'short_max_chars must be positive');
 });
 
 // A stray line is a non-blank line that is neither a heading, prose inside the

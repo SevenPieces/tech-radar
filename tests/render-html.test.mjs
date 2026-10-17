@@ -1,13 +1,15 @@
 // tests/render-html.test.mjs
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { existsSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
+import { chmodSync, existsSync, lstatSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync, symlinkSync, writeFileSync } from 'node:fs';
+import { spawnSync } from 'node:child_process';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { render, run, linkify, parseArgs as renderArgs } from '../scripts/render-html.mjs';
 import { readDomains } from '../scripts/lib/mdtable.mjs';
 import { externalAssets } from '../scripts/lib/assets.mjs';
+import { collectFeeds } from '../scripts/collect.mjs';
 
 const config = {
   domains: [
@@ -37,6 +39,42 @@ test('render produces a complete document with no external assets', () => {
   assert.doesNotMatch(html, /<link\b/i);
   assert.doesNotMatch(html, /@import/i);
   assert.doesNotMatch(html, /\burl\(\s*["']?https?:/i);
+});
+
+test('F44-3: the internal characters do not reach the .html, and strip rather than eat the text', () => {
+  // The module keeps three characters that are not text -- the separator mark U+E001, the scaffold
+  // mask U+E000, the removal sentinel U+FFFF -- and U+0001 is a C0 control no Markdown reads. The
+  // renderer is a publication point a caller may hand a digest that carries one; at 0063439 it
+  // copied every one into the deliverable and check-quality PASSed the digest.
+  for (const [label, ch] of [['the separator mark', '\uE001'], ['the scaffold mask', '\uE000'],
+    ['the removal sentinel', '\uFFFF'], ['a C0 control', '\u0001']]) {
+    const html = render(md.replace('cap not hit', 'cap not hit' + ch + 'probe'), config);
+    assert.ok(!html.includes(ch), label + ' reached the .html deliverable');
+    assert.match(html, /probe/, label + ' was removed with its text instead of being rendered as a space');
+  }
+  // U+0000 is still refused rather than normalised: one input the renderer cannot turn into a
+  // document keeps its own refusal (exit 2), and this normalisation must not swallow it.
+  assert.throws(() => render(md + '\u0000', config), /substitution sentinel/,
+    'a digest carrying U+0000 is no longer refused');
+});
+
+test('F45-3: C1 controls and the invisible class do not reach the .html either', () => {
+  // The Batch 104 fix spaced the three internal characters and C0/DEL. The class one position over --
+  // C1 controls (the module's own CONTROL_CHARACTERS includes U+0080-U+009F) and the invisible/
+  // default-ignorable class -- still reached the .html while the gate PASSed (closing sweep F45-3).
+  // A digest that quotes a source carrying one must not publish it, and the character is spaced
+  // rather than eating the text around it.
+  const chars = [
+    ['a C1 control', '\u0080'], ['NEL', '\u0085'], ['CSI', '\u009B'], ['APC', '\u009F'],
+    ['ZWSP', '\u200B'], ['SHY', '\u00AD'], ['FEFF', '\uFEFF'], ['WJ', '\u2060'],
+    ['LS', '\u2028'], ['PS', '\u2029'], ['LRM', '\u200E'], ['the Hangul filler', '\u3164'],
+    ['a tag character', '\u{E0000}'], ['a variation selector', '\u{E0100}'],
+  ];
+  for (const [label, ch] of chars) {
+    const html = render(md.replace('cap not hit', 'cap not hit' + ch + 'probe'), config);
+    assert.ok(!html.includes(ch), label + ' reached the .html deliverable');
+    assert.match(html, /probe/, label + ' was removed with its text instead of being rendered as a space');
+  }
 });
 
 test('render links the cited URL and escapes the headline', () => {
@@ -193,6 +231,27 @@ test('two headings that slug alike get distinct anchors and their own counts', (
   assert.equal(new Set(ids).size, ids.length, 'no duplicate id in the document');
   assert.match(html, /id="d-ai-llm"[\s\S]*?<span class="count">3 items<\/span>/, 'the first card keeps its own count');
   assert.match(html, /id="d-ai-llm-2"[\s\S]*?<span class="count">1 item<\/span>/, 'the second card counts its own items');
+});
+
+// Found in review: the count fill ran over the whole assembled document using a delimiter
+// that authored prose may legally contain, so an item that spelled its own domain's
+// placeholder lost the sentence it wrote and silently gained a count. The fill must use a
+// token prose cannot produce, so text the author wrote survives as written.
+test('authored prose that spells a count placeholder is rendered verbatim', () => {
+  const spelled = md.replace('Why it matters.', 'The lead said %%d-ai-llm%% verbatim.');
+  const html = render(spelled, config);
+  assert.match(html, /<p class="sum">The lead said %%d-ai-llm%% verbatim\.<\/p>/,
+    'the authored sentence survives character for character');
+  assert.doesNotMatch(html, /<p class="sum">The lead said \d+ items? verbatim\.<\/p>/,
+    'the count fill must never rewrite an authored sentence');
+});
+
+// The guard on the other side: a clean digest must still show its real counts, so the fix
+// cannot pass the case above by turning counting off.
+test('a clean digest still fills in its real item counts', () => {
+  const html = render(md, config);
+  assert.match(html, /<span class="count">1 item<\/span>/, 'the domain card keeps its real count');
+  assert.doesNotMatch(html, /%%/, 'every placeholder the renderer emitted is filled in');
 });
 
 // Found in review: the header scan's skip rule was applied to the whole
@@ -391,6 +450,95 @@ test('externalAssets flags real asset contexts and nothing else', () => {
     'prose and citation links are not assets',
   );
   assert.equal(externalAssets(render(md, config)), false, 'the rendered digest stays self-contained');
+});
+
+// Regression test: the predicate used ad-hoc regexes that did not model HTML
+// tokenisation ('/' is a valid separator between attributes, a value need not be quoted)
+// and knew only src/data/srcset, so a document that fetches remote resources was judged
+// self-contained and the gate reported QUALITY: PASS for an artifact that breaks the
+// moment it is opened from disk. Each case names the fetch it hides.
+test('externalAssets sees the evasions the tokenisation permits', () => {
+  const cases = [
+    ['/ as the attribute separator', '<img/src="https://cdn.example.com/a.png">'],
+    ['an unquoted style attribute', '<div style=background:url(https://cdn.example.com/a.png)>x</div>'],
+    ['the video poster attribute', '<video poster="https://cdn.example.com/a.jpg"></video>'],
+    ['a link rel=preload', '<link rel="preload" href="https://cdn.example.com/a.js" as="script">'],
+    ['a link rel=icon', '<link rel="icon" href="https://cdn.example.com/a.ico">'],
+    ['a meta refresh', '<meta http-equiv="refresh" content="0;url=https://example.com/x">'],
+    ['an SVG image href', '<svg><image href="https://cdn.example.com/a.svg"></image></svg>'],
+    ['an SVG use href', '<svg><use href="https://cdn.example.com/a.svg#icon"></use></svg>'],
+    ['the legacy body background', '<body background="https://cdn.example.com/a.png">x</body>'],
+    ['a script with the separator form', '<script/src="https://cdn.example.com/a.js"></script>'],
+  ];
+  for (const [what, html] of cases) {
+    assert.equal(externalAssets(html), true, what + ' must count as an external asset');
+  }
+  for (const inline of [
+    '<img src="data:image/png;base64,AAAA">',
+    '<video poster="data:image/jpeg;base64,AAAA"></video>',
+    '<link rel="preload" href="data:text/css,a{}" as="style">',
+  ]) {
+    assert.equal(externalAssets(inline), false, 'a data: URI is still self-contained: ' + inline);
+  }
+});
+
+// Regression test: the tag tokeniser treated a quoted attribute value as opaque, so markup
+// nested in an iframe srcdoc was never scanned; attribute values were compared without
+// entity decoding, so an encoded meta refresh hid; the CSS vocabulary knew url() and
+// @import but not image-set(); and any non-empty href on use/image counted as remote
+// although a bare fragment is in the document. Reachability is a hand-edited or
+// third-party HTML passed to --html, the same reachability the earlier evasions were
+// filed under.
+test('externalAssets sees an srcdoc, an encoded refresh and image-set, and not a bare fragment', () => {
+  const evasions = [
+    ['iframe srcdoc hiding a remote image', '<iframe srcdoc="<img src=\'https://cdn.example.com/a.png\'>"></iframe>'],
+    ['an entity-encoded meta refresh', '<meta http-equiv="&#114;efresh" content="0;url=https://example.com/x">'],
+    ['image-set in a style attribute', '<div style="background:image-set(\'https://cdn.example.com/a.png\' 1x)">x</div>'],
+    ['image-set in a style element', '<style>body{background-image:image-set("https://cdn.example.com/a.png" 1x)}</style>'],
+  ];
+  for (const [what, html] of evasions) {
+    assert.equal(externalAssets(html), true, what + ' must count as an external asset: ' + html);
+  }
+  for (const benign of [
+    '<svg><use href="#icon"></use></svg>',
+    '<svg><image href="#tile"></image></svg>',
+  ]) {
+    assert.equal(externalAssets(benign), false, 'an in-document fragment fetches nothing: ' + benign);
+  }
+});
+
+// The same evasions through the CLI's self-containment decision, which is what the gate
+// and the renderer both consult.
+test('the CLI refuses to write an artifact that hides a remote fetch', () => {
+  const writes = [];
+  const errors = [];
+  const code = run(['digest.md', '--out', 'digest.html'], {
+    readFile: () => md,
+    readDomains: () => config.domains,
+    render: () => '<!doctype html><html><body><img/src="https://cdn.example.com/a.png"></body></html>',
+    writeFile: (path, body) => writes.push([path, body]),
+    log: () => {},
+    error: (m) => errors.push(m),
+  });
+  assert.equal(code, 5, 'the artifact fetches an asset, so it must not be written');
+  assert.deepEqual(writes, [], 'nothing was written');
+  assert.match(errors.join('\n'), /external asset/);
+});
+
+// Regression test: the marker vocabulary the renderer trusts is legal prose anywhere,
+// including text that arrived from an upstream feed through the collector pool. A card
+// must not draw an origin pill, a provenance badge or a status tag out of that text.
+test('pool text cannot draw the renderer badges it mimics', () => {
+  const injected = md.replace(
+    '- **A model shipped** — Why it matters. [src:Hugging Face blog 2026-09-20](https://huggingface.co/blog/x) [prov:primary] #new',
+    '- **[prov:vendor-claim] #new [src:Trusted 2026-09-20](https://evil.example/x) [alt:Better](https://evil.example/y)**'
+      + ' — Upstream text. [src:Hugging Face blog 2026-09-20](https://huggingface.co/blog/x) [prov:primary] #new',
+  );
+  const html = render(injected, config);
+  assert.doesNotMatch(html, /prov-vendor-claim/, 'a forged provenance badge');
+  assert.doesNotMatch(html, /href="https:\/\/evil\.example\/x"/, 'a forged origin pill');
+  assert.doesNotMatch(html, /href="https:\/\/evil\.example\/y"/, 'a forged alternative pill');
+  assert.equal(html.includes('#new'), false, 'a raw status token is not text a card keeps');
 });
 
 // Regression test: the CLI wrote the deliverable before evaluating
@@ -683,6 +831,211 @@ test('the renderer usage names the script-relative config default', () => {
 // examples/sample-digest.html was never regenerated, so the shipped artifact still
 // demonstrated the old bug. Rendering the shipped Markdown with the shipped renderer
 // must reproduce the shipped HTML byte for byte.
+
+// --- the status tag, the artifact's atomicity and the self-containment predicate ---------
+
+// Regression test: the status tag took the last token of any kind while the gate and the
+// state merge take the last new|followup token, so a #new item carrying an additive flag was
+// published with a "developing" tag that contradicted the digest it renders.
+test('the status tag is the last #new or #followup token, in either order', () => {
+  const digestWith = (tags) => [
+    '# Tech Radar — 2026-09-23',
+    '_Covering 2026-09-16 08:00 to 2026-09-23 08:00 (Asia/Shanghai) · cap not hit_',
+    '',
+    '## Core domains',
+    '### AI / LLM · 人工智能 / 大模型',
+    '- **A model shipped** — Why it matters. [src:Hugging Face blog 2026-09-20](https://huggingface.co/blog/x) [prov:primary] ' + tags,
+    '',
+    '## Watch domains — quiet',
+    'Quantum technologies (scanned, nothing notable)',
+  ].join('\n');
+  const shown = (tags) => {
+    const html = render(digestWith(tags), config);
+    return { fresh: /class="tag t-new"/.test(html), developing: /class="tag t-developing"/.test(html) };
+  };
+  const additiveAfter = shown('#new #developing');
+  assert.equal(additiveAfter.fresh, true, 'a #new item keeps its new tag');
+  assert.equal(additiveAfter.developing, false, 'an additive flag does not win the tag');
+  const additiveBefore = shown('#developing #new');
+  assert.equal(additiveBefore.fresh, true, 'the flag resolves the same in either order');
+  assert.equal(additiveBefore.developing, false, 'an additive flag does not win the tag');
+});
+
+// Regression test: the renderer wrote its deliverable in place, so a failed or interrupted
+// write destroyed the previous digest - the atomic temp-then-rename the state writer uses had
+// never reached this writer. A replacement is published by a rename, and a refused write
+// leaves the previous artifact intact with no temp behind.
+test('the renderer replaces its deliverable atomically', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'tech-radar-atomic-render-'));
+  const quiet = { log: () => {}, error: () => {} };
+  try {
+    const input = join(dir, 'digest.md');
+    const out = join(dir, 'digest.html');
+    writeFileSync(input, md);
+    writeFileSync(out, 'the previous deliverable\n');
+    const before = statSync(out).ino;
+    assert.equal(run([input, '--out', out], quiet), 0, 'the render succeeds');
+    assert.notEqual(statSync(out).ino, before,
+      'the deliverable is published by a rename, not truncated in place');
+    const published = readFileSync(out, 'utf8');
+    chmodSync(out, 0o444);
+    try {
+      const refused = run([input, '--out', out], quiet);
+      if (refused !== 0) {
+        assert.equal(refused, 4, 'a refused write is the documented output exit');
+        assert.equal(readFileSync(out, 'utf8'), published, 'the previous deliverable survives intact');
+      }
+    } finally {
+      chmodSync(out, 0o644);
+    }
+    const leftovers = readdirSync(dir).filter((name) => name !== 'digest.md' && name !== 'digest.html');
+    assert.deepEqual(leftovers, [], 'no temp file is left behind: ' + leftovers.join(', '));
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+// TR-80 regression test: the deliverable writer publishes by renaming, and a rename needs only
+// the destination directory - so a digest the operator had protected with a cleared write bit
+// was replaced anyway, where the state writer refuses exactly that. The refusal is the
+// documented output exit and the previous artifact keeps its bytes.
+test('the renderer refuses a write-protected deliverable and leaves it byte-identical', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'tech-radar-protected-render-'));
+  const quiet = { log: () => {}, error: () => {} };
+  try {
+    const input = join(dir, 'digest.md');
+    const out = join(dir, 'digest.html');
+    writeFileSync(input, md);
+    const published = 'the previous deliverable\n';
+    writeFileSync(out, published);
+    chmodSync(out, 0o444);
+    let refused;
+    try {
+      refused = run([input, '--out', out], quiet);
+    } finally {
+      chmodSync(out, 0o644);
+    }
+    assert.equal(refused, 4, 'a protected deliverable is the documented output exit');
+    assert.equal(readFileSync(out, 'utf8'), published, 'the previous deliverable survives byte-identically');
+    const leftovers = readdirSync(dir).filter((name) => name !== 'digest.md' && name !== 'digest.html');
+    assert.deepEqual(leftovers, [], 'no temp file is left behind: ' + leftovers.join(', '));
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+// Regression test: an absent deliverable is not a protected one. The atomic writer resolved
+// a missing destination to 0600, so a first render produced an owner-only digest under the
+// usual umask - narrower than the plain write it replaced, and the digest is meant to be
+// forwarded and opened. A fresh destination must be born with the mode a plain write would
+// give it. The control file is written plainly by this same process, so the assertion holds
+// under whatever umask the run inherits rather than pinning one value.
+test('the renderer gives a fresh deliverable the mode a plain write would', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'tech-radar-mode-render-fresh-'));
+  const quiet = { log: () => {}, error: () => {} };
+  try {
+    const input = join(dir, 'digest.md');
+    const out = join(dir, 'digest.html');
+    const control = join(dir, 'control.txt');
+    writeFileSync(input, md);
+    writeFileSync(control, 'a plain write by this process\n');
+    assert.equal(run([input, '--out', out], quiet), 0, 'the render succeeds');
+    assert.equal(statSync(out).mode & 0o777, statSync(control).mode & 0o777,
+      'a fresh deliverable is created with the process default, not an owner-only 0600: '
+      + (statSync(out).mode & 0o777).toString(8));
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+// Regression test: the atomic deliverable writer created its temp with the process default
+// and renamed it over the destination, so an HTML the operator had tightened came back at
+// the umask's 0664 - the mode loss the state writer had already been fixed for. A
+// replacement must carry the mode of the file it replaces.
+test('the renderer keeps the mode of the deliverable it replaces', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'tech-radar-mode-render-'));
+  const quiet = { log: () => {}, error: () => {} };
+  try {
+    const input = join(dir, 'digest.md');
+    const out = join(dir, 'digest.html');
+    writeFileSync(input, md);
+    writeFileSync(out, 'the previous deliverable\n');
+    chmodSync(out, 0o600);
+    assert.equal(run([input, '--out', out], quiet), 0, 'the render succeeds');
+    assert.equal(statSync(out).mode & 0o777, 0o600,
+      'the deliverable keeps the mode it was protected with, not the umask: '
+      + (statSync(out).mode & 0o777).toString(8));
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+// TR-100 regression test: the deliverable writer names the path the operator gave it, so a
+// rename replaces a symlink's inode rather than the file it points at - the defect the state
+// writer and the collector's pool writer were fixed for. The link becomes a regular file holding
+// the new digest while the file it pointed at keeps the old one, so the operator's link is gone
+// and the digest they aimed at is stale. Either the digest lands on the link's target or the run
+// refuses; the target is never abandoned.
+test('a symlinked render destination is written through, not replaced', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'tech-radar-symlink-render-'));
+  const errors = [];
+  const quiet = { log: () => {}, error: (m) => errors.push(String(m)) };
+  const previous = 'the previous deliverable\n';
+  try {
+    const input = join(dir, 'digest.md');
+    writeFileSync(input, md);
+    const target = join(dir, 'real.html');
+    writeFileSync(target, previous);
+    const link = join(dir, 'digest.html');
+    symlinkSync('real.html', link);
+    const code = run([input, '--out', link], quiet);
+    if (code === 0) {
+      assert.equal(lstatSync(link).isSymbolicLink(), true,
+        'the run exited 0 but replaced the link with a regular file: ' + errors.join(' '));
+      assert.match(readFileSync(target, 'utf8'), /^<!doctype html>/i,
+        'the render exited 0 but the file the link points at was not written');
+      assert.equal(readFileSync(link, 'utf8'), readFileSync(target, 'utf8'),
+        'the link and its target agree');
+    } else {
+      assert.equal(code, 4, 'a refusal is the documented output exit, got ' + code + ': ' + errors.join(' '));
+      assert.match(errors.join('\n'), /symlink|regular file|not written through/i,
+        'a refusal names the link it refuses: ' + errors.join(' '));
+      assert.equal(readFileSync(target, 'utf8'), previous,
+        'a refusal leaves the link target byte-identical');
+    }
+    const leftovers = readdirSync(dir).filter((n) => !['digest.md', 'real.html', 'digest.html'].includes(n));
+    assert.deepEqual(leftovers, [], 'no temp file is left behind: ' + leftovers.join(', '));
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+// Regression test: the tag regex stopped at the first '>', so a quoted attribute value
+// containing one hid every attribute after it; the rel list knew only stylesheet, preload and
+// icon; and an empty value was read as a URL. Each evasion must be seen, and an empty value
+// must not be - an empty URL fetches the document itself.
+test('externalAssets sees what a quoted value, a longer rel list and an empty value hide', () => {
+  const evasions = [
+    ['a quoted value containing ">" before src', '<img alt="x>" src="//evil.example/x.png">'],
+    ['a quoted value containing ">" before a script src', '<script data-x="a>b" src="//evil.example/a.js"></script>'],
+    ['rel=apple-touch-icon', '<link rel="apple-touch-icon" href="//evil.example/a.png">'],
+    ['rel=modulepreload', '<link rel="modulepreload" href="//evil.example/a.js">'],
+    ['rel=mask-icon', '<link rel="mask-icon" href="//evil.example/a.svg">'],
+    ['rel=manifest', '<link rel="manifest" href="//evil.example/a.webmanifest">'],
+  ];
+  for (const [what, html] of evasions) {
+    assert.equal(externalAssets(html), true, what + ' must count as an external asset: ' + html);
+  }
+  for (const benign of [
+    '<img src="" alt="x">',
+    '<img src alt="x">',
+    '<link rel="canonical" href="https://h.example/x">',
+    '<a class="src" href="https://h.example/x">a citation</a>',
+  ]) {
+    assert.equal(externalAssets(benign), false, 'an empty value or a citation is not an asset: ' + benign);
+  }
+});
+
 test('the shipped example renders byte for byte to the shipped artifact', () => {
   const writes = [];
   const errors = [];
@@ -703,4 +1056,341 @@ test('the shipped example renders byte for byte to the shipped artifact', () => 
     'examples/sample-digest.html is stale: regenerate it with scripts/render-html.mjs',
   );
   assert.equal(externalAssets(delivered), false, 'the shipped artifact stays self-contained');
+});
+
+// TR-37 regression test: the renderer refuses a digest that carries its substitution
+// sentinel -- a NUL byte in authored text could rewrite the document -- but the refusal was
+// a bare throw that escaped main(). The one input the renderer cannot render therefore
+// exited 1 with a raw stack trace, a code the exit table reserves as unreachable for this
+// script, while its documented answer for an input it cannot use is exit 2, one named line,
+// and no deliverable on disk.
+test('a digest carrying the substitution sentinel is refused at the documented exit 2', () => {
+  const nul = String.fromCharCode(0);
+  const digest = md.replace('A model shipped', 'A model ' + nul + 'shipped');
+  const dir = scratch();
+  const input = join(dir, 'digest.md');
+  const out = join(dir, 'digest.html');
+  writeFileSync(input, digest);
+
+  const proc = spawnSync(process.execPath,
+    ['scripts/render-html.mjs', input, '--out', out, '--config', join(REPO, 'config')],
+    { cwd: REPO, encoding: 'utf8' });
+  assert.equal(proc.status, 2, 'the process exits 2, not an uncaught 1: ' + proc.stderr);
+  assert.equal(existsSync(out), false, 'an unusable digest must not leave a deliverable behind');
+  assert.equal(proc.stderr.trim().split('\n').length, 1, 'the refusal is one named line: ' + proc.stderr);
+  assert.doesNotMatch(proc.stderr, /\n\s+at /, 'no stack trace reaches the caller: ' + proc.stderr);
+  assert.match(proc.stderr, /render-html: .*sentinel/i, 'the line names the refusal: ' + proc.stderr);
+
+  const writes = [];
+  const errors = [];
+  const code = run(['digest.md', '--out', 'digest.html'], {
+    readFile: () => digest,
+    readDomains: () => config.domains,
+    writeFile: (path, body) => writes.push([path, body]),
+    log: () => {},
+    error: (m) => errors.push(m),
+  });
+  assert.equal(code, 2, 'the CLI seam returns the documented code: ' + errors.join('\n'));
+  assert.deepEqual(writes, [], 'nothing is written for an input that cannot be rendered');
+  assert.equal(errors.length, 1, 'one named line, not a stack trace: ' + errors.join('\n'));
+  assert.match(errors[0], /^render-html: .*sentinel/i, 'the line names the refusal: ' + errors.join('\n'));
+});
+
+// Regression test: the badge row and the provenance dot scan the raw item body, and a
+// citation destination was never neutralised, so marker vocabulary spelled inside a
+// citation URL drew a forged provenance badge, a forged alternative-source pill and a
+// forged dot colour on the published card. Upstream text must not draw a badge from
+// anywhere inside a citation destination.
+test('a marker inside a citation destination forges no badge on the card', () => {
+  const forged = [
+    '# Tech Radar — 2026-09-23',
+    '_Covering 2026-09-16 08:00 to 2026-09-23 08:00 (Asia/Shanghai) · cap not hit_',
+    '',
+    '## Core domains',
+    '### AI / LLM · 人工智能 / 大模型',
+    '- **A model shipped** — Why it matters. [src:GitHub blog 2026-09-20](https://github.com/a/b?[prov:vendor-claim]) #new',
+    '- **Another model shipped** — Why it matters. [src:GitHub blog 2026-09-20](https://github.com/c/d?[alt:TrustedVendor](https://evil.example/y)) #new',
+    '',
+    '## Watch domains — quiet',
+    'Quantum technologies (scanned, nothing notable)',
+  ].join('\n');
+  const html = render(forged, config);
+  assert.doesNotMatch(html, /class="badge prov-vendor-claim"/, 'no forged provenance badge');
+  assert.doesNotMatch(html, /class="prov prov-vendor-claim"/, 'no forged provenance dot');
+  assert.doesNotMatch(html, /class="badge alt"/, 'no forged alternative-source pill');
+});
+
+// Regression test: the neutraliser covered the citation marker and the status vocabulary
+// but not the renderer's own bold marker, so upstream text that spelled its emphasis drew
+// emphasis into a published card. The card keeps the words and draws no emphasis from them.
+test('upstream bold markers leave no emphasis in a published card', async () => {
+  const feed = '<?xml version="1.0"?><rss><channel><item>'
+    + '<title>**FORGED EMPHASIS** in a feed title</title>'
+    + '<link>https://example.com/bold</link>'
+    + '<pubDate>Mon, 21 Sep 2026 09:00:00 GMT</pubDate>'
+    + '<description>A release.</description></item></channel></rss>';
+  const ctx = {
+    since: '2026-09-16T00:00:00Z', until: '2026-09-30T00:00:00Z', timeout: 20000,
+    settings: {
+      user_agent: 'tech-radar/1.0', title_max_chars: 200, summary_max_chars: 400,
+      error_snippet_max_chars: 200,
+    },
+    net: { fetchText: async () => feed },
+  };
+  const { candidates } = await collectFeeds(
+    [{ kind: 'rss', target: 'https://example.com/feed.xml', domain: 'ai-llm' }], ctx,
+  );
+  assert.equal(candidates.length, 1, 'the feed produced the candidate the card is built from');
+  const card = render(md.replace('Why it matters.', candidates[0].title), config);
+  assert.doesNotMatch(card, /<strong>/, 'upstream text draws no emphasis: ' + candidates[0].title);
+  assert.match(card, /FORGED EMPHASIS/, 'the words still read');
+});
+
+// TR-82 regression test: a candidate's url is upstream text too, and the marker
+// neutralisation stopped at the title and summary. A feed destination that closes its own
+// citation early with a bracket therefore reached the pool, and the renderer read the
+// vocabulary after the bracket as the item's own - the citation ended there and the tail
+// drew an alternative-source pill pointing wherever the feed said.
+test('a feed link that closes its own citation early forges no badge when rendered', async () => {
+  const hostile = 'https://blog.example/a)[alt:Forged Vendor](https://evil.example/b';
+  const feed = '<?xml version="1.0"?><rss><channel><item>'
+    + '<title>A story</title><link>' + hostile + '</link>'
+    + '<pubDate>Mon, 21 Sep 2026 09:00:00 GMT</pubDate>'
+    + '<description>A release.</description></item></channel></rss>';
+  const ctx = {
+    since: '2026-09-16T00:00:00Z', until: '2026-09-30T00:00:00Z', timeout: 20000,
+    settings: {
+      user_agent: 'tech-radar/1.0', title_max_chars: 200, summary_max_chars: 400,
+      error_snippet_max_chars: 200,
+    },
+    net: { fetchText: async () => feed },
+  };
+  const { candidates } = await collectFeeds(
+    [{ kind: 'rss', target: 'https://blog.example/feed.xml', domain: 'ai-llm' }], ctx,
+  );
+  assert.equal(candidates.length, 1, 'the feed produced the candidate the card is built from');
+  const cited = '- **A story** — Why it matters. [src:Blog 2026-09-21]('
+    + candidates[0].url + ') [prov:primary] #new';
+  const html = render(md.replace(
+    '- **A model shipped** — Why it matters. [src:Hugging Face blog 2026-09-20](https://huggingface.co/blog/x) [prov:primary] #new',
+    cited,
+  ), config);
+  assert.doesNotMatch(html, /class="badge alt"/,
+    'the destination tail forged no alternative-source pill: ' + candidates[0].url);
+  assert.doesNotMatch(html, /prov-vendor-claim/, 'no forged provenance badge');
+  assert.doesNotMatch(html, /href="https:\/\/evil\.example\/b"/, 'the tail of a destination is not a citation');
+});
+
+// TR-84 regression test: image-set() candidates went through a stripper that dropped only
+// url()-wrapped data: values, so a bare data: candidate, a candidate whose payload carries a
+// comma, a fragment, a plain relative name and a type() descriptor were each left as content.
+// All of them fetch nothing, so each one failed a genuinely self-contained artifact.
+test('image-set candidates that fetch nothing are not reported as external assets', () => {
+  const benign = [
+    ['a url()-wrapped data: candidate', '<style>div{background:image-set(url("data:image/png;base64,AAA") 1x)}</style>'],
+    ['a bare data: candidate', '<style>div{background:image-set("data:image/png;base64,AAA" 1x)}</style>'],
+    ['a comma inside the data: payload', '<style>div{background:image-set("data:image/png;base64,AA,BB" 1x)}</style>'],
+    ['a fragment candidate', '<style>div{background:image-set(url(#gradient) 1x)}</style>'],
+    ['a plain name', '<style>div{background:image-set("photo.png" 1x)}</style>'],
+    ['a type() descriptor', '<style>div{background:image-set(url("data:image/png;base64,AAA") type("image/png") 1x)}</style>'],
+  ];
+  for (const [what, html] of benign) {
+    assert.equal(externalAssets(html), false, what + ' fetches nothing: ' + html);
+  }
+  for (const [what, html] of [
+    ['a remote candidate', '<style>div{background:image-set("https://cdn.example.com/a.png" 1x)}</style>'],
+    ['a remote candidate after a data: one', '<style>div{background:image-set(url("data:image/png;base64,AAA") 1x, "https://cdn.example.com/a.png" 2x)}</style>'],
+  ]) {
+    assert.equal(externalAssets(html), true, what + ' is a fetch: ' + html);
+  }
+});
+
+// TR-87 regression test: character references were decoded for http-equiv and srcdoc only, so
+// an entity-encoded rel or style attribute was compared as raw text and the fetch behind it
+// was invisible; and every data: value counted as carried in the document, although a
+// data:text/html browsing context loads whatever its own markup names. These are the evasions
+// the gate must see.
+test('externalAssets sees an entity-encoded rel and style and a data: document that fetches', () => {
+  const evasions = [
+    ['an entity-encoded rel', '<link rel="st&#121;lesheet" href="https://cdn.example.com/a.css">'],
+    ['an entity-encoded style attribute', '<div style="background:&#117;rl(https://cdn.example.com/a.png)">x</div>'],
+    ['a data:text/html iframe carrying a remote image', '<iframe src="data:text/html,<img src=\'https://cdn.example.com/a.png\'>"></iframe>'],
+  ];
+  for (const [what, html] of evasions) {
+    assert.equal(externalAssets(html), true, what + ' is a fetch: ' + html);
+  }
+  for (const benign of [
+    '<div style="background:url(photo.png)">x</div>',
+    '<iframe src="data:text/html,<p>no fetch here</p>"></iframe>',
+  ]) {
+    assert.equal(externalAssets(benign), false, 'a name that fetches nothing stays self-contained: ' + benign);
+  }
+});
+
+// TR-88 regression test: the document bound answered "fetches" where it meant "stop
+// traversing", the image-set stripper kept a type() descriptor as content, and the srcdoc
+// worklist was fed from any element although only an iframe honours srcdoc. Three benign
+// documents were therefore reported as external assets and the gate failed a correct
+// artifact. (The same tokeniser's security half is pinned by the two tests above.)
+test('the predicate reports no fetch for benign nested, non-iframe and type() documents', () => {
+  const many = Array.from({ length: 70 },
+    (_, i) => '<iframe srcdoc="benign document ' + i + '"></iframe>').join('');
+  const cases = [
+    ['more than 64 benign nested srcdoc documents', many],
+    ['srcdoc on an element that does not honour it', '<div srcdoc="<img src=\'https://cdn.example.com/a.png\'>">x</div>'],
+    ['an image-set with a type() descriptor', '<style>div{background:image-set(url("data:image/png;base64,AAA") type("image/png") 1x)}</style>'],
+  ];
+  for (const [what, html] of cases) {
+    assert.equal(externalAssets(html), false, what + ' fetches nothing: ' + html.slice(0, 90));
+  }
+});
+
+// TR-91 regression test: the status scan read '#new' wherever it appeared, so an item whose own
+// text quotes an upstream spelling such as 'C#new async patterns' drew a status tag the item
+// never carried. A status flag is a token: at the start of the text or preceded by whitespace.
+test('a status-shaped word that is not a standalone token draws no status tag', () => {
+  const digest = (item) => [
+    '# T', '_m_', '', '## Core domains', '### AI / LLM · 人工智能 / 大模型', item,
+    '', '## Watch domains — quiet', 'Quantum technologies (scanned, nothing notable)', '',
+  ].join('\n');
+  const src = '[src:Hugging Face blog 2026-09-20](https://huggingface.co/blog/x) [prov:primary]';
+
+  // A grammar item whose own prose quotes the spelling: the trailing flag is what the grammar
+  // reserves for the status scan, and this text is not one.
+  const summary = render(digest('- **A model shipped** — The C#new async patterns landed. ' + src), config);
+  assert.doesNotMatch(summary, /class="tag t-/, 'a quoted C#new is not the item card status flag');
+
+  // A bullet the grammar does not describe: the whole text, title included, feeds the scan.
+  const title = render(digest('- C#new async patterns ' + src), config);
+  assert.doesNotMatch(title, /class="tag t-/, 'a title that spells C#new draws no status tag');
+
+  // Every other non-token spelling the boundary rule must leave alone.
+  for (const word of ['F# watch mode', '#newrelease', 'C#watch']) {
+    const html = render(digest('- **A model shipped** — The ' + word + ' story landed. ' + src), config);
+    assert.doesNotMatch(html, /class="tag t-/, word + ' is not a status flag: ' + html.match(/class="tag t-[^"]*"/));
+  }
+});
+
+// TR-91 regression test: the renderer's own marker stripper rewrote a status word wherever it
+// appeared, so a card quoting 'C#new async patterns' published 'C new async patterns'. The
+// boundary rule keeps the characters on the card, headline and prose alike.
+test('a card keeps the characters of a status-shaped word it quotes', () => {
+  const digest = (item) => [
+    '# T', '_m_', '', '## Core domains', '### AI / LLM · 人工智能 / 大模型', item,
+    '', '## Watch domains — quiet', 'Quantum technologies (scanned, nothing notable)', '',
+  ].join('\n');
+  const src = '[src:Hugging Face blog 2026-09-20](https://huggingface.co/blog/x) [prov:primary]';
+  const html = render(digest('- **C#new async patterns** — The F# watch mode story landed. ' + src), config);
+
+  assert.match(html, /C#new async patterns/, 'the headline keeps the characters of C#new');
+  assert.match(html, /The F# watch mode story landed\./, 'the prose keeps the characters of F#');
+  assert.doesNotMatch(html, /C\s+new async patterns/, 'the hash of C#new is not rewritten to a space');
+  assert.doesNotMatch(html, /F\s+watch mode/, 'the hash of F# is not rewritten to a space');
+
+  const named = render(digest('- **A model shipped** — The #newrelease shipped. ' + src), config);
+  assert.match(named, /#newrelease/, 'a hash that opens a longer word keeps every character');
+});
+
+// The other half of TR-91: bounding the scan must not drop the tag the grammar does expect. An
+// authored standalone flag -- after a space or at the start of the item text -- still becomes
+// the card's status tag, and the additive flags still do not decide it.
+test('an authored standalone status flag still draws its tag', () => {
+  const digest = (item) => [
+    '# T', '_m_', '', '## Core domains', '### AI / LLM · 人工智能 / 大模型', item,
+    '', '## Watch domains — quiet', 'Quantum technologies (scanned, nothing notable)', '',
+  ].join('\n');
+  const src = '[src:Hugging Face blog 2026-09-20](https://huggingface.co/blog/x) [prov:primary]';
+  const card = (item) => render(digest(item), config);
+
+  assert.match(card('- **A model shipped** — Why it matters. ' + src + ' #new'),
+    /<span class="tag t-new">new<\/span>/, 'a trailing #new is the card status');
+  assert.match(card('- **A model shipped** — Why it matters. ' + src + ' #followup'),
+    /<span class="tag t-followup">followup<\/span>/, 'a trailing #followup is the card status');
+  assert.match(card('- **A model shipped** — #new Why it matters. ' + src),
+    /<span class="tag t-new">new<\/span>/, 'a #new at the start of the item text is still a flag');
+  assert.match(card('- **A model shipped** — Why it matters. ' + src + ' #new #developing'),
+    /<span class="tag t-new">new<\/span>/, 'an additive flag still does not decide the tag');
+  assert.doesNotMatch(card('- **A model shipped** — Why it matters. ' + src + ' #new #developing'),
+    /class="tag t-developing"/, 'and it draws no developing tag');
+});
+
+// --- TR-93: a truncated tag and a twice-encoded style value are not fetches -------------------
+
+// TR-93 read these two forms as fetches the predicate missed. The stricter reading was examined
+// and rejected, because neither form reaches the network: a tag that runs into end of file
+// without its '>' is discarded by the HTML tokeniser, so the reader builds no element and
+// fetches nothing (every end-of-file-in-tag case produces no token), and a style attribute is
+// CSS, where no HTML character-reference pass is applied - the doubly encoded value stays a
+// relative name to the CSS parser. Flagging them would refuse a genuinely self-contained
+// artifact on a premise the reader's environment contradicts. The change made from that premise
+// is reverted and the tests below record the faithful behaviour. The reading was also refusing on
+// a byte the document does not contain: a file that ends inside a tag is truncated, and the
+// stricter form read that absence as a request to fetch.
+test('externalAssets does not flag a resource tag that is never closed before end of file', () => {
+  const truncated = [
+    ['an unquoted img src', '<html><body><img src=https://cdn.example.com/a.png'],
+    ['a quoted script src', '<html><body><script src="https://cdn.example.com/a.js"'],
+    ['a link stylesheet', '<html><head><link rel=stylesheet href=https://cdn.example.com/a.css'],
+    ['an iframe after other markup', '<html><body><p>prose</p><iframe src=https://cdn.example.com/f'],
+    ['a source srcset', '<picture><source srcset=https://cdn.example.com/a.png 2x'],
+  ];
+  for (const [what, html] of truncated) {
+    assert.equal(externalAssets(html), false,
+      what + ' is a tag the reader never builds an element from, so it fetches nothing: ' + html);
+  }
+  // A tag that is never closed but names no resource is still not a fetch: a citation is
+  // content, and the predicate must not turn a truncated one into a failed artifact.
+  const harmless = [
+    ['a div with a class', '<html><body><div class="x"'],
+    ['a paragraph of prose', '<html><body><p>prose that runs to the end of the file'],
+    ['a meta description', '<html><head><meta name=description content=text'],
+    ['a citation link', '<html><body><a href=https://example.com/x'],
+  ];
+  for (const [what, html] of harmless) {
+    assert.equal(externalAssets(html), false, what + ' fetches nothing: ' + html);
+  }
+});
+
+// TR-93 regression test: a style attribute is CSS, and the HTML parser has already applied its
+// one character-reference pass to the attribute value. CSS applies none, so the doubly encoded
+// value the row read as remote is a relative name - a file named '&#104;ttps://...', not a
+// fetch. Reading it as remote would fail the gate on a value the browser treats as a local name.
+test('externalAssets does not flag a style URL that is character-encoded twice', () => {
+  const cssRelative = [
+    ['a hidden scheme letter', '<div style="background:url(&amp;#104;ttps://cdn.example.com/a.png)">x</div>'],
+    ['a hidden scheme-relative opener', '<div style="background:url(&amp;#47;&amp;#47;cdn.example.com/a.png)">x</div>'],
+  ];
+  for (const [what, html] of cssRelative) {
+    assert.equal(externalAssets(html), false,
+      what + ' is a relative name to the CSS parser, so it fetches nothing: ' + html);
+  }
+  const harmless = [
+    ['a data: payload', '<div style="background:url(data:image/png;base64,AAAA)">x</div>'],
+    ['a relative name', '<div style="background:url(photo.png)">x</div>'],
+    ['plain declarations', '<div style="color:red;font-weight:bold">x</div>'],
+    ['an encoded relative name', '<div style="background:url(&amp;#112;hoto.png)">x</div>'],
+  ];
+  for (const [what, html] of harmless) {
+    assert.equal(externalAssets(html), false, what + ' is self-contained: ' + html);
+  }
+});
+
+// TR-105 regression test: the CSS scan recognised only the literal closing tag, so a style
+// element a browser still builds hid a remote url() from the predicate: whitespace before the
+// end tag's bracket, an attribute on the end tag, a newline inside it, and a body that runs to
+// the end of the file with no end tag at all. Both the renderer and the gate act on this
+// verdict, so a document that fetches remote CSS was reported self-contained.
+test('externalAssets sees remote CSS in a style element the tokeniser still closes', () => {
+  const css = 'body{background:url(https://evil.example/x.png)}';
+  const hidden = [
+    ['a space before the end tag bracket', '<html><head><style>' + css + '</style ></head></html>'],
+    ['an attribute on the end tag', '<html><head><style>' + css + '</style class=x></head></html>'],
+    ['a newline inside the end tag', '<html><head><style>' + css + '</style\n></head></html>'],
+    ['no end tag before the end of the file', '<html><head><style>' + css],
+  ];
+  for (const [what, html] of hidden) {
+    assert.equal(externalAssets(html), true, what + ' still builds the element, so the CSS applies: ' + html);
+  }
+  // The control keeps its verdict: the same CSS behind the literal end tag was already a fetch.
+  assert.equal(externalAssets('<html><head><style>' + css + '</style></head></html>'), true);
 });

@@ -2,6 +2,8 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { collectRegistries, collectAdvisories, nvdStamp } from '../scripts/collect.mjs';
+import { linkify } from '../scripts/render-html.mjs';
+import { shapeHttpError } from '../scripts/lib/net.mjs';
 
 const ctx = {
   since: '2026-09-16T00:00:00Z', until: '2026-09-23T00:00:00Z', timeout: 5000,
@@ -199,7 +201,9 @@ test('a crate whose newest version is absent from versions[] gets no borrowed da
   const { candidates, notices } = await collectRegistries(regRow('crates', 'ghost', 'languages-runtimes'), withNet(body));
   assert.deepEqual(candidates, [], 'no candidate rather than one dated from another version');
   assert.equal(notices.length, 1);
-  assert.match(notices[0], /^crates ghost: no release time for 2\.0\.0/);
+  assert.equal(notices[0], 'crates ghost: no release time for the latest version; candidate skipped',
+    'the notice names the source and the cause, not the upstream version: ' + notices[0]);
+  assert.equal(notices[0].includes('2.0.0'), false, 'the upstream version reached the notice: ' + notices[0]);
 });
 
 test('an npm release with no publish time for its latest version is skipped with a notice', async () => {
@@ -210,7 +214,9 @@ test('an npm release with no publish time for its latest version is skipped with
   const { candidates, notices } = await collectRegistries(regRow('npm', 'ghost', 'languages-runtimes'), withNet(body));
   assert.deepEqual(candidates, [], 'the modified time is not a release time');
   assert.equal(notices.length, 1);
-  assert.match(notices[0], /^npm ghost: no release time for 9\.9\.9/);
+  assert.equal(notices[0], 'npm ghost: no release time for the latest version; candidate skipped',
+    'the notice names the source and the cause, not the upstream version: ' + notices[0]);
+  assert.equal(notices[0].includes('9.9.9'), false, 'the upstream version reached the notice: ' + notices[0]);
 });
 
 test('a PyPI release with no files has no release time and is skipped with a notice', async () => {
@@ -219,8 +225,135 @@ test('a PyPI release with no files has no release time and is skipped with a not
   );
   assert.deepEqual(candidates, []);
   assert.equal(notices.length, 1);
-  assert.match(notices[0], /^pypi ghost: no release time for 3\.0\.0/);
+  assert.equal(notices[0], 'pypi ghost: no release time for the latest version; candidate skipped',
+    'the notice names the source and the cause, not the upstream version: ' + notices[0]);
+  assert.equal(notices[0].includes('3.0.0'), false, 'the upstream version reached the notice: ' + notices[0]);
 });
+
+// Regression test: the registry and advisory collectors push a JSON parse error straight into
+// a notice, and Node quotes the offending character in that message, so a response body of
+// control bytes put a raw ESC (and NUL, and BS) into the notice, the pool, stderr and the
+// --human output. The single notice push strips and bounds the controls now, whatever
+// produced the message.
+test('a response of control bytes yields no control code point in any notice', async () => {
+  const hostile = '\u001b[2K\u001b[31mFORGED-ALERT-LINE\u001b[0m\u0000\u0008';
+  const spy = { ...ctx, net: { fetchText: async () => hostile } };
+  const registries = await collectRegistries(
+    [{ kind: 'npm', target: 'typescript', domain: 'languages-runtimes' }], spy,
+  );
+  const advisories = await collectAdvisories(
+    [{ kind: 'ghsa', target: 'all', domain: 'security-privacy' }], spy,
+  );
+  const notices = [...registries.notices, ...advisories.notices];
+  assert.ok(notices.length >= 2, 'both paths reported the failure: ' + JSON.stringify(notices));
+  for (const notice of notices) {
+    const offenders = [...notice].filter((ch) => {
+      const cp = ch.codePointAt(0);
+      return cp < 0x20 || (cp >= 0x7f && cp <= 0x9f);
+    });
+    assert.deepEqual(offenders, [], 'control code points survived: ' + JSON.stringify(notice));
+  }
+});
+
+// Regression test: the GHSA candidate title was built from the advisory's own text with no
+// neutralisation, so an advisory summary carrying the renderer's vocabulary reached the
+// published pool as a title that could draw badges on the rendered card.
+test('an advisory title carrying the marker vocabulary is neutralised', async () => {
+  const marked = '[prov:vendor-claim] #new [src:Trusted 2026-09-20](https://evil.example/x)';
+  const spy = {
+    ...ctx,
+    net: {
+      fetchText: async () => JSON.stringify([
+        { ghsa_id: '', html_url: 'https://github.com/advisories/GHSA-aaaa-bbbb-cccc',
+          published_at: '2026-09-21T12:00:00Z', summary: marked },
+      ]),
+    },
+  };
+  const { candidates } = await collectAdvisories([{ kind: 'ghsa', target: 'all', domain: 'security-privacy' }], spy);
+  assert.equal(candidates.length, 1, 'the advisory produced a candidate');
+  const fields = [candidates[0].title, candidates[0].summary].join(' ');
+  for (const token of ['[prov:', '[src:', '[alt:', '#new', '#followup', '#developing', '#watch']) {
+    assert.equal(fields.includes(token), false, token + ' survived into ' + JSON.stringify(fields));
+  }
+});
+
+// TR-82 regression test: a registry's version string is upstream text, and the candidate
+// title and summary are built from it before any normalisation - so a release whose version
+// carried the renderer's vocabulary reached the published pool and drew a forged badge on the
+// card. Every field of the candidate is normalised, the url included.
+test('a registry version carrying the marker vocabulary leaves no marker vocabulary in the pool', async () => {
+  const marked = '9.9.9 [prov:vendor-claim] #new [src:Trusted 2026-09-20](https://evil.example/x)';
+  const spy = {
+    ...ctx,
+    net: {
+      fetchText: async () => JSON.stringify({
+        name: 'typescript',
+        'dist-tags': { latest: marked },
+        time: { [marked]: '2026-09-21T11:00:00.000Z', modified: '2026-09-22T11:00:00.000Z' },
+      }),
+    },
+  };
+  const { candidates, notices } = await collectRegistries(
+    [{ kind: 'npm', target: 'typescript', domain: 'languages-runtimes' }], spy,
+  );
+  assert.equal(candidates.length, 1, 'the release produced a candidate: ' + JSON.stringify(notices));
+  const published = JSON.stringify(candidates[0]);
+  for (const token of ['[prov:', '[src:', '[alt:', '#new', '#followup', '#developing', '#watch']) {
+    assert.equal(published.includes(token), false, token + ' survived into the pool: ' + published);
+  }
+});
+
+// TR-82 regression test: the advisory url is upstream text and bypassed the neutralisation the
+// title and summary already had, so an advisory whose html_url spelled the marker vocabulary
+// reached the pool and the card drew a badge from its own citation.
+test('an advisory url carrying the marker vocabulary leaves no marker vocabulary in the pool', async () => {
+  const spy = {
+    ...ctx,
+    net: {
+      fetchText: async () => JSON.stringify([{
+        ghsa_id: 'GHSA-aaaa-bbbb-cccc',
+        html_url: 'https://github.com/advisories/GHSA-aaaa?[alt:Forged Vendor](https://evil.example/b)',
+        published_at: '2026-09-21T12:00:00Z',
+        summary: 'A vulnerability in a package.',
+      }]),
+    },
+  };
+  const { candidates } = await collectAdvisories(
+    [{ kind: 'ghsa', target: 'all', domain: 'security-privacy' }], spy,
+  );
+  assert.equal(candidates.length, 1, 'the advisory produced a candidate');
+  const published = JSON.stringify(candidates[0]);
+  for (const token of ['[prov:', '[src:', '[alt:', '#new', '#followup', '#developing', '#watch']) {
+    assert.equal(published.includes(token), false, token + ' survived into the pool: ' + published);
+  }
+});
+
+// TR-86 regression test: redaction lives in the two transport shapers, and a JSON.parse
+// failure is shaped nowhere - the SyntaxError message quotes the first bytes of the response
+// body, so a 200 whose body carried the request's own Authorization value published a prefix
+// of that credential in the pool, on stdout and in the digest's Coverage note. A parse failure
+// notice must carry no body text that could hold a credential.
+test('a JSON parse failure notice carries no body text that could hold the request credential', async () => {
+  const token = 'SENTINEL-TOKEN-VALUE-0123456789';
+  const previous = process.env.GITHUB_TOKEN;
+  process.env.GITHUB_TOKEN = token;
+  try {
+    const echoed = token + ' {"broken": ';
+    const spy = { ...ctx, net: { fetchText: async () => echoed } };
+    const { notices } = await collectAdvisories(
+      [{ kind: 'ghsa', target: 'all', domain: 'security-privacy' }], spy,
+    );
+    assert.equal(notices.length, 1, 'the parse failure is one notice: ' + JSON.stringify(notices));
+    const notice = notices[0];
+    assert.equal(notice.includes(token), false, 'the credential reached the notice: ' + notice);
+    assert.equal(notice.includes(token.slice(0, 10)), false,
+      'a prefix of the credential reached the notice: ' + notice);
+  } finally {
+    if (previous === undefined) delete process.env.GITHUB_TOKEN;
+    else process.env.GITHUB_TOKEN = previous;
+  }
+});
+
 
 test('a Go module path is case-escaped for the proxy', async () => {
   let seen = '';
@@ -234,4 +367,134 @@ test('a Go module path is case-escaped for the proxy', async () => {
   assert.deepEqual(notices, []);
   assert.equal(seen, 'https://proxy.golang.org/github.com/!burnt!sushi/toml/@latest');
   assert.equal(candidates[0].url, 'https://pkg.go.dev/github.com/BurntSushi/toml', 'the human page keeps its case');
+});
+
+// Regression test: the collector's notice sanitiser stripped control characters but not
+// the marker vocabulary the renderer trusts, so an upstream body quoted in a notice drew
+// a forged provenance badge in the Coverage note that SKILL.md requires the digest to
+// publish. A notice is published text and is neutralised like any other.
+test('a notice carrying the marker vocabulary draws no badge when it is published', async () => {
+  const cases = [
+    ['a provenance marker', '[prov:vendor-claim]'],
+    ['a status flag', '#new'],
+  ];
+  for (const [what, body] of cases) {
+    const stub = { ...ctx, net: { fetchText: async () => body } };
+    const { notices } = await collectRegistries([{ kind: 'npm', target: 'serde', domain: 'ai-llm' }], stub);
+    assert.equal(notices.length, 1, what + ': the quoted body produced one notice');
+    const notice = notices[0];
+    assert.doesNotMatch(notice, /\[(?:src|alt|prov):/, what + ': the marker opener is neutralised: ' + notice);
+    assert.doesNotMatch(notice, /#(?:new|followup|developing|watch)\b/, what + ': the status flag is neutralised: ' + notice);
+    const published = linkify(notice);
+    assert.doesNotMatch(published, /class="badge|class="tag t-/, what + ': no badge is drawn from a notice: ' + published);
+  }
+});
+
+// TR-96 regression test: the NVD identifier is upstream text and was interpolated raw into the
+// citation URL, so a crafted id forged the destination the digest publishes, an id carrying a
+// space produced a citation the renderer cannot read, and an absent id published a live link
+// ending in 'undefined'. Only an identifier shaped like a CVE id becomes a citation; every other
+// row is skipped with a notice the Coverage note carries.
+test('a crafted or absent NVD identifier never becomes a citation', async () => {
+  const rows = [{ kind: 'nvd', target: 'high-severity', domain: 'security-privacy' }];
+  const net = {
+    fetchText: async () => JSON.stringify({
+      vulnerabilities: [
+        { cve: { id: 'CVE-2026-0001](https://evil.example/x)', published: '2026-09-21T00:00:00.000',
+          descriptions: [{ lang: 'en', value: 'a forged destination' }] } },
+        { cve: { id: 'CVE-2026-0001 [prov:vendor-claim]', published: '2026-09-21T00:00:00.000',
+          descriptions: [{ lang: 'en', value: 'an identifier with a space' }] } },
+        { cve: { published: '2026-09-21T00:00:00.000',
+          descriptions: [{ lang: 'en', value: 'no identifier at all' }] } },
+        { cve: { id: 'CVE-2026-12345', published: '2026-09-21T00:00:00.000',
+          descriptions: [{ lang: 'en', value: 'a well-formed identifier' }] } },
+      ],
+    }),
+  };
+  const { candidates, notices } = await collectAdvisories(rows, { ...ctx, net });
+  for (const candidate of candidates) {
+    assert.doesNotMatch(candidate.url, /evil\.example/,
+      'a forged destination reached a card: ' + candidate.url);
+    assert.doesNotMatch(candidate.url, /undefined/,
+      'a dead link reached a card: ' + candidate.url);
+    assert.match(candidate.url, /^https:\/\/nvd\.nist\.gov\/vuln\/detail\/CVE-\d{4}-\d{4,}$/,
+      'every published NVD destination is a plain CVE url: ' + candidate.url);
+  }
+  assert.deepEqual(candidates.map((c) => c.title), ['CVE-2026-12345'],
+    'only the well-formed row ships');
+  assert.equal(notices.length, 3,
+    'each unusable identifier is reported, not dropped silently: ' + notices.join(' | '));
+  for (const notice of notices) {
+    assert.match(notice, /identifier/i, 'the notice names what it skipped: ' + notice);
+    assert.equal(notice.includes('evil.example'), false, 'a rejected identifier reached the notice: ' + notice);
+    assert.equal(notice.includes('vendor-claim'), false, 'a rejected identifier reached the notice: ' + notice);
+    assert.doesNotMatch(notice, /CVE-2026-0001/, 'a rejected identifier reached the notice: ' + notice);
+  }
+});
+
+// TR-107 regression test: a notice is published text and the digest ships as Markdown, so the
+// Coverage note is read through a Markdown renderer whose link rule draws a live anchor out of
+// '[label](destination)'. The identifier a rejected advisory carries is upstream text of
+// arbitrary shape - the row below is skipped precisely because it is not a CVE id - and it was
+// once quoted into the notice verbatim, so an id that spelled '[x](https://evil.example/pwn)'
+// put an anchor pointing wherever the upstream value chose into the published note. The notice
+// now quotes no identifier at all, so no anchor can be drawn from one, and the link seam the
+// push applies stays as defence in depth for any notice that reaches it carrying link syntax.
+const MARKDOWN_LINK = /\[([^\]\n]*)\]\(((?:[^()\s]|\([^()\s]*\))*)\)/g;
+// The one rendering rule this test pins: the notice text through a Markdown reader. A live
+// anchor is exactly what the rule draws, and its address is the upstream value's own.
+const renderMarkdown = (text) => String(text)
+  .replace(MARKDOWN_LINK, (match, label, href) => `<a href="${href}">${label}</a>`);
+
+test('a rejected NVD identifier that spells a markdown link draws no anchor in the coverage note', async () => {
+  const net = {
+    fetchText: async () => JSON.stringify({
+      vulnerabilities: [
+        { cve: { id: '[x](https://evil.example/pwn)', published: '2026-09-21T00:00:00.000',
+          descriptions: [{ lang: 'en', value: 'a markdown link' }] } },
+        { cve: { id: '[draft] CVE', published: '2026-09-21T00:00:00.000',
+          descriptions: [{ lang: 'en', value: 'a bracketed word' }] } },
+      ],
+    }),
+  };
+  const { candidates, notices } = await collectAdvisories(
+    [{ kind: 'nvd', target: 'high-severity', domain: 'security-privacy' }], { ...ctx, net });
+  assert.deepEqual(candidates, [], 'neither identifier is a CVE id, so neither row ships');
+  assert.equal(notices.length, 2, 'each unusable identifier is reported: ' + notices.join(' | '));
+
+  // What the coverage note publishes, read the way a Markdown reader reads it. The notice names
+  // the source and the cause and quotes neither identifier, so no anchor can be drawn from one.
+  const rendered = notices.map(renderMarkdown).join('\n');
+  assert.doesNotMatch(rendered, /<a\b/, 'a notice rendered a live anchor: ' + rendered);
+  for (const notice of notices) {
+    assert.match(notice, /identifier is not a CVE id/, 'the notice still names what it skipped: ' + notice);
+  }
+  assert.equal(notices[0].includes('evil.example'), false,
+    'the rejected identifier reached the notice: ' + notices[0]);
+  assert.equal(notices[1].includes('draft'), false,
+    'the rejected identifier reached the notice: ' + notices[1]);
+  assert.doesNotMatch(notices[1], /\[draft\] CVE/, 'the rejected identifier reached the notice: ' + notices[1]);
+
+  // A shaped 5xx notice is the status and the redacted request; the server's own message, and
+  // the punctuation and link syntax in it, never reach the Coverage note.
+  const stub = {
+    ...ctx,
+    net: {
+      fetchText: async () => {
+        throw shapeHttpError(500,
+          Buffer.from('the feed is otherwise fine (retry later); see [1] of the log'),
+          'https://feeds.example/rss', 400);
+      },
+    },
+  };
+  const { notices: shaped } = await collectRegistries(
+    [{ kind: 'npm', target: 'serde', domain: 'ai-llm' }], stub);
+  assert.equal(shaped.length, 1, 'the failed row produced one notice');
+  assert.equal(shaped[0], 'npm serde: HTTP 500 for https://feeds.example/rss',
+    'the notice is the status and the redacted request: ' + shaped[0]);
+  assert.equal(shaped[0].includes('otherwise fine'), false,
+    'the upstream answer reached the notice: ' + shaped[0]);
+  assert.doesNotMatch(shaped[0], /\]\(/, 'the notice carries no link syntax: ' + shaped[0]);
+  assert.doesNotMatch(renderMarkdown(shaped[0]), /<a\b/,
+    'a parenthesised remark is not a link: ' + shaped[0]);
 });

@@ -25,6 +25,7 @@ private repository, no shared state, nothing that assumes a particular operator 
 | 2026-09-23 | Research fan-out widened to 4-8 passes, since the final sweep left each pass owning more domains. |
 | 2026-09-24 | Revision: the navigation shortcut became a catalogue column (`short`), with the reader's rules for it; the watchlist counts restated against `config/watchlist.md`; the deliverable description brought up to date (the chip row, the card per domain and per item, the badge rows, focus and print); the completeness-floor sentence corrected, the gate's warnings recorded, the gate section completed with the two failure rules and two warnings it had omitted, the exit-code table brought back in line with the four CLIs, the quiet-line example and its exact-name rule corrected, the `<n>` definition reduced to one, the watchlist's rows described as sitting across the core and watch domains, the catalogue's source-of-truth sentence corrected, and the pool example's notice wording matched to the collector. |
 | 2026-09-24 | Trimmed to design only, because this is now the only documentation file that ships: every reference to a non-shipped file, the heritage reuse note, the process content in the validation section and the implementation walkthrough note were removed, and the document discipline was restated as a rule about this file. |
+| 2026-10-16 | Revision: the notice rule tightened, so a notice records the degradation — the source, the status and the cause — and never quotes the upstream answer's text; and the settings group that described the response snippet caps now describes the bounds on candidate text and on the shaped error text. |
 
 ---
 
@@ -155,7 +156,7 @@ and never restated here. The groups it covers:
 - the tier ceilings and the item budget: the per-domain maxima, the watch-notable ceiling, the total range;
 - research: the fan-out pass range, and the deep-dive policy;
 - policy lists and paths: the discovery-only hosts and the output directory;
-- request bounds: the per-request timeout, the response snippet caps, the run-history cap;
+- request bounds: the per-request timeout, the caps on candidate text and on the shaped error text, the run-history cap;
 - the GitHub budget: the per-source request counts, the advisory reserve, and the documented anonymous hourly
   allowance that the shipped watchlist must fit inside.
 
@@ -310,8 +311,10 @@ required, and `reference/feasibility.md` holds the measured arithmetic.
 
 It emits one candidate-pool JSON: an array of candidates, each tagged with a domain key, a source-tier hint
 and its raw metadata, plus a `notices` array recording any degradation (rate limits, unreachable sources,
-schema surprises). **It does not rank or score candidates.** Ranking is a heuristic that can silently bury the
-quiet but important item, which is the one failure a radar must not have; judgement stays with the agent.
+schema surprises). A notice records the degradation — the source, the status and the cause — and never
+quotes the upstream answer's text. **It does not rank or score candidates.** Ranking is a heuristic that can
+silently bury the quiet but important item, which is the one failure a radar must not have; judgement stays
+with the agent.
 
 ### 3.7 Research fan-out and synthesis
 

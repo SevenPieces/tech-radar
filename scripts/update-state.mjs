@@ -2,8 +2,13 @@
 // scripts/update-state.mjs
 // Run state for the tech-radar skill: the coverage window, item history,
 // the watchlist and per-domain watermarks. Zero dependencies.
-import { createHash } from 'node:crypto';
-import { readFileSync, writeFileSync, existsSync } from 'node:fs';
+import { createHash, randomBytes } from 'node:crypto';
+import {
+  accessSync, chmodSync, constants, existsSync, lstatSync, readFileSync, readlinkSync, realpathSync,
+  renameSync, statSync, unlinkSync, writeFileSync,
+} from 'node:fs';
+import { hostname } from 'node:os';
+import { basename, dirname, isAbsolute, join, resolve } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { readConfig } from './lib/mdtable.mjs';
 import { hostOf } from './lib/net.mjs';
@@ -29,9 +34,15 @@ first run, not an error. update merges the run's items into the state and
 advances the watermarks of the domains the run covered. A run that is already
 recorded for the same date and domains is refused rather than merged twice.
 
-Exit codes: 0 OK, 1 fatal, 2 state, items or config not found or unreadable, an
-invalid --date, an invalid settings value, or the run is already recorded; 3 the items file is not an array or an item failed
-validation; 4 output could not be written.`;
+Exit codes: 0 OK, 2 state, items or config not found or unreadable, an invalid
+--date, an invalid settings value, the run is already recorded, --out naming an
+existing file other than --state, or another update holds the lock on the state or
+the output (a lock whose holder is gone is reclaimed); 3 the items file is not an
+array or an item failed validation; 4 the output could not be written. No code path
+returns 1: every failure this tool reports is 2, 3 or 4, and an error it does not
+name is mapped to 2 ('err.exitCode ?? 2'). Only an exception that escapes main
+altogether exits 1, as it does for any Node process; the collector's usage reserves
+its own 1 for that same case.`;
 
 // An error that carries the exit code the CLI should return for it.
 function fail(message, exitCode) {
@@ -69,6 +80,25 @@ function positiveInt(config, key) {
   return n;
 }
 
+// The timezone is configuration like every other settings value, and the plan label
+// interpolates it verbatim. A missing row published "Covering ... (undefined)", which the
+// gate accepted because it only checks that the digest repeats the label, and an unusable
+// name failed inside Intl with a zone-library message that named no settings row at all.
+// Checked before the plan is built, so the refusal names the row the operator has to fix.
+function planTimezone(config) {
+  const raw = config.settings.timezone;
+  if (typeof raw !== 'string' || raw.trim() === '') {
+    throw fail('timezone is missing or empty: the plan label needs an IANA time zone name', 2);
+  }
+  try {
+    // Throws a RangeError when the runtime does not know the name.
+    new Intl.DateTimeFormat('en-CA', { timeZone: raw }).format(0);
+  } catch {
+    throw fail(`timezone is not a time zone Intl accepts, got ${JSON.stringify(raw)}`, 2);
+  }
+  return raw;
+}
+
 // The run log's own cap.
 function runsCap(config) {
   return positiveInt(config, 'runs_history_max');
@@ -88,7 +118,7 @@ function assertKnownDomains(config, only) {
 // the catalogue key. Both are accepted here and resolved to the key, because the
 // key is the stable representation the state is built on; anything else is a
 // validation failure the caller has to fix.
-export function resolveDomainKey(config, value) {
+function resolveDomainKey(config, value) {
   const byKey = config.domains.find((d) => d.key === value);
   if (byKey) return byKey.key;
   const byName = config.domains.find((d) => d.domain === value);
@@ -104,11 +134,18 @@ export function resolveDomainKey(config, value) {
 // is the only artifact a run has.
 export function planWindows(config, state, now = new Date(), only = null, floor = null) {
   assertKnownDomains(config, only);
-  const s = config.settings;
+  const tz = planTimezone(config);
   const capMs = positiveInt(config, 'window_cap_weeks') * WEEK;
   const capFloorMs = now.getTime() - capMs;
   const explicit = floor ? new Date(floor) : null;
   if (explicit && Number.isNaN(explicit.getTime())) throw fail(`invalid --since: ${floor}`, 2);
+  // A floor later than now asks for a window that ends before it starts. plan used to
+  // print that inverted window - and a label the digest must repeat verbatim - while
+  // collect refused the very same window, so the plan was unusable and the digest it
+  // labelled was unbuildable. The floor is refused before anything is printed.
+  if (explicit && explicit.getTime() > now.getTime()) {
+    throw fail(`--since ${floor} is after now (${now.toISOString()}): the window would be empty`, 2);
+  }
   const perDomain = {};
   let earliestDeclaredMs = null;
   let earliestMs = null;
@@ -145,7 +182,7 @@ export function planWindows(config, state, now = new Date(), only = null, floor 
   const capped = skippedMs > 0;
   const sinceIso = new Date(earliestMs).toISOString();
   const untilIso = now.toISOString();
-  const label = `Covering ${stamp(new Date(earliestMs), s.timezone)} to ${stamp(now, s.timezone)} (${s.timezone}) · cap ${capped ? 'hit' : 'not hit'}`;
+  const label = `Covering ${stamp(new Date(earliestMs), tz)} to ${stamp(now, tz)} (${tz}) · cap ${capped ? 'hit' : 'not hit'}`;
   return {
     since: sinceIso,
     until: untilIso,
@@ -169,8 +206,29 @@ export function storyKey(title, url) {
   return createHash('sha256').update(`${normalizeTitle(title)}|${hostOf(url)}`).digest('hex').slice(0, 12);
 }
 
+// Every entry is validated before a story key is computed from it. Without this a
+// non-object entry died with a raw TypeError - the exit 1 the CLI never returns - and an
+// entry with no title or primaryUrl collapsed every such item onto one bogus key
+// (String(undefined) and hostOf(undefined) both produce ''), so malformed items merged
+// into a single state entry titled "undefined" with no primaryUrl. The exit is the
+// documented exit 3, and it happens before anything is written.
+function validateItems(items) {
+  items.forEach((item, index) => {
+    if (!item || typeof item !== 'object' || Array.isArray(item)) {
+      throw fail(`item ${index} is ${shapeOf(item)}, not an object`, 3);
+    }
+    if (typeof item.title !== 'string' || item.title.trim() === '') {
+      throw fail(`item ${index} has no non-empty string title, got ${JSON.stringify(item.title)}`, 3);
+    }
+    if (typeof item.primaryUrl !== 'string' || item.primaryUrl.trim() === '') {
+      throw fail(`item ${index} has no non-empty string primaryUrl, got ${JSON.stringify(item.primaryUrl)}`, 3);
+    }
+  });
+}
+
 export function mergeRun(config, state, { items, date, entry = 'weekly', now = new Date(), only = null, window = null }) {
   assertKnownDomains(config, only);
+  validateItems(items);
   const next = JSON.parse(JSON.stringify(state));
   next.version = 1;
   next.updatedAt = now.toISOString();
@@ -259,11 +317,107 @@ export function parseArgs(argv) {
   return out;
 }
 
+// The containers are validated, not trusted. An array where a map belongs (or the
+// reverse) used to be accepted and then written back as the wrong container - every
+// watermark and all item history silently gone at exit 0 - and a runs field that was
+// not an array crashed the run-log lookup with a raw TypeError, the exit 1 that
+// reference/state-schema.md says the CLI never returns. A container that is absent is
+// normalised through emptyState, so it can never disable a rule either.
+const STATE_CONTAINERS = [['domains', 'object'], ['items', 'object'], ['watchlist', 'array'], ['runs', 'array']];
+
+function shapeOf(value) {
+  if (value === null) return 'null';
+  if (Array.isArray(value)) return 'an array';
+  return `a ${typeof value}`;
+}
+
+function isContainer(value, kind) {
+  if (kind === 'array') return Array.isArray(value);
+  return typeof value === 'object' && value !== null && !Array.isArray(value);
+}
+
+// A date the window rule and the retention pass can read. `new Date("nonsense")` is Invalid
+// Date, and its getTime() is NaN, so every comparison against it is false: a watermark like
+// that made plan die inside Intl with "Invalid time value" (exit 1, and a raw stack trace)
+// while update silently rewrote the value it could not read. Validated instead of trusted.
+function isDateString(value) {
+  return typeof value === 'string' && value.trim() !== '' && !Number.isNaN(Date.parse(value));
+}
+
+function requireDate(field, value, where) {
+  if (!isDateString(value)) {
+    throw fail(`${where} has a ${field} that is not a date, got ${JSON.stringify(value)}`, 2);
+  }
+}
+
+function requireCounter(field, value, where) {
+  if (!Number.isInteger(value) || value <= 0) {
+    throw fail(`${where} has a ${field} that is not a positive integer, got ${JSON.stringify(value)}`, 2);
+  }
+}
+
+// Every ENTITY inside the containers is validated too, against the shape
+// reference/state-schema.md documents. Only the containers and the runs entries were
+// checked, so a null watchlist entry died with a raw TypeError on the retention pass, an
+// empty one was dropped in silence at exit 0, a null items entry died the same way, and a
+// watermark that is not a date broke plan and was overwritten by update. Each of those is a
+// named exit-2 state error now, raised before anything is read past or written.
+function assertStateEntries(state) {
+  state.watchlist.forEach((entry, index) => {
+    const where = `state field "watchlist" entry ${index}`;
+    if (!entry || typeof entry !== 'object' || Array.isArray(entry)) {
+      throw fail(`${where} is ${shapeOf(entry)}, not an object`, 2);
+    }
+    if (typeof entry.key !== 'string' || entry.key.trim() === '') {
+      throw fail(`${where} has no non-empty string key, got ${JSON.stringify(entry.key)}`, 2);
+    }
+    requireDate('firstSeen', entry.firstSeen, where);
+    requireDate('lastSeen', entry.lastSeen, where);
+    requireCounter('timesSeen', entry.timesSeen, where);
+  });
+  for (const [key, entry] of Object.entries(state.items)) {
+    const where = `state field "items" entry "${key}"`;
+    if (!entry || typeof entry !== 'object' || Array.isArray(entry)) {
+      throw fail(`${where} is ${shapeOf(entry)}, not an object`, 2);
+    }
+    for (const field of ['title', 'domain', 'primaryUrl']) {
+      if (typeof entry[field] !== 'string' || entry[field].trim() === '') {
+        throw fail(`${where} has no non-empty string ${field}, got ${JSON.stringify(entry[field])}`, 2);
+      }
+    }
+    requireDate('firstSeen', entry.firstSeen, where);
+    requireDate('lastSeen', entry.lastSeen, where);
+    requireCounter('timesSeen', entry.timesSeen, where);
+  }
+  for (const [key, record] of Object.entries(state.domains)) {
+    const where = `state field "domains" entry "${key}"`;
+    if (!record || typeof record !== 'object' || Array.isArray(record)) {
+      throw fail(`${where} is ${shapeOf(record)}, not an object`, 2);
+    }
+    // Both watermarks are ISO instants or null; a state that has never been merged carries
+    // null for every key.
+    for (const field of ['lastCoveredAt', 'lastRunAt']) {
+      if (record[field] !== null && record[field] !== undefined) requireDate(field, record[field], where);
+    }
+  }
+}
+
 function loadState(path, config) {
   if (!existsSync(path)) return emptyState(config.domains.map((d) => d.key));
   const raw = readFileSync(path, 'utf8');
   const state = JSON.parse(raw);
-  if (!state || typeof state !== 'object' || Array.isArray(state)) throw new Error('state is not an object');
+  if (!state || typeof state !== 'object' || Array.isArray(state)) throw fail('state is not an object', 2);
+  const base = emptyState(config.domains.map((d) => d.key));
+  for (const [key, kind] of STATE_CONTAINERS) {
+    if (state[key] === undefined) { state[key] = base[key]; continue; }
+    if (!isContainer(state[key], kind)) {
+      throw fail(`state field "${key}" must be ${kind === 'array' ? 'an array' : 'an object'}, got ${shapeOf(state[key])}`, 2);
+    }
+  }
+  if (state.runs.some((run) => !run || typeof run !== 'object' || Array.isArray(run))) {
+    throw fail('state field "runs" must hold only run objects, got an entry that is not an object', 2);
+  }
+  assertStateEntries(state);
   return state;
 }
 
@@ -293,9 +447,244 @@ export function normalizeRunDate(value) {
 export function findRecordedRun(state, date, domainKeys) {
   const wanted = [...domainKeys].sort().join(',');
   const day = normalizeRunDate(date);
-  return (state.runs ?? []).find(
-    (r) => normalizeRunDate(r.date) === day && [...(r.domains ?? [])].sort().join(',') === wanted,
+  // A library caller may hand in a state that never passed loadState, so the lookup is
+  // shaped defensively: it reads what it can and never throws (the CLI documents no exit 1).
+  const runs = Array.isArray(state?.runs) ? state.runs : [];
+  return runs.find(
+    (r) => r && typeof r === 'object' && !Array.isArray(r)
+      && normalizeRunDate(r.date) === day
+      && [...(Array.isArray(r.domains) ? r.domains : [])].sort().join(',') === wanted,
   ) ?? null;
+}
+
+// The file the write lands on, with a symlinked destination followed to its target. The
+// lock (canonicalPath), the divergent-out comparison and the mode copy (statSync) already
+// canonicalise through a link, so the write has to as well. Renaming over the spelling the
+// operator gave replaces the link inode itself: the link becomes a regular file holding the
+// new state while the file it pointed at keeps the old one - stale content - and the merge
+// is written to a path the lock never protected. Resolving rather than refusing keeps both
+// the operator's link and their run: the merge lands on the file they aimed it at.
+//
+// realpathSync answers for a link whose target is there (the 'state lives on another volume
+// behind a symlink' case). A link whose final target is not there yet has no real path, so
+// the chain is walked by hand to the name it points at, which the write then creates exactly
+// as a plain write to a fresh destination would. A chain that never terminates is refused
+// with the documented write failure rather than guessed at, and the caller's failure path
+// unlinks the temp this write created, so nothing is left behind.
+// The name a chain of symlinks ends at, walked by hand because realpathSync only answers when
+// the final target exists. The name it returns is either an existing file or the name the last
+// link points at, which the write then creates exactly as a plain write to a fresh destination
+// would; null means the chain never terminated within the bound. Both the writer and the lock
+// read this one answer, so they cannot disagree about which file a destination names.
+function walkLinks(path) {
+  let current = path;
+  let stats;
+  try { stats = lstatSync(current); } catch { return current; }
+  for (let hop = 0; stats.isSymbolicLink(); hop += 1) {
+    if (hop >= 32) return null;
+    const target = readlinkSync(current);
+    current = isAbsolute(target) ? target : resolve(dirname(current), target);
+    try { stats = lstatSync(current); } catch { return current; }
+  }
+  return current;
+}
+
+function resolveWriteTarget(out) {
+  try { return realpathSync(out); } catch { /* absent, or a link to a path that is not there */ }
+  const target = walkLinks(out);
+  if (target === null) throw fail(`${out} is a symlink chain that does not resolve to a file`, 4);
+  return target;
+}
+
+// The mode the replacement carries. The rename replaces the inode, so an existing
+// destination keeps its own permissions only if the temp is born with them: a temp created
+// with the process default silently widened a state the operator had protected - a 0600
+// state came back 0664 - where the plain write this replaced preserved the mode. A fresh
+// (absent) destination has no mode to preserve and keeps the create's own 0666 & ~umask,
+// exactly what the plain write produced.
+function destinationMode(out) {
+  try { return statSync(out).mode & 0o777; } catch { return null; }
+}
+
+// The temp path. The documented name is the destination plus .tmp and the create is
+// exclusive (O_EXCL), so a symlink planted there is never opened and the file it points at
+// is never touched; an entry that is not a regular file is refused rather than followed,
+// overwritten or removed. A regular file at that name is not a live writer's temp - the
+// update lock serialises writers - so it is a leftover of an interrupted write, and the
+// write falls back to a name carrying this process's id and a random suffix, which nothing
+// can pre-plant, instead of deleting a file this process did not create.
+function tempPathFor(out) {
+  const fixed = `${out}.tmp`;
+  let existing = null;
+  try { existing = lstatSync(fixed); } catch { existing = null; }
+  if (existing && !existing.isFile()) {
+    throw fail(`${fixed} is ${existing.isSymbolicLink() ? 'a symlink' : 'not a regular file'}, so it is not written through; remove it and retry`, 4);
+  }
+  return existing ? `${out}.${process.pid}.${randomBytes(6).toString('hex')}.tmp` : fixed;
+}
+
+// The state is replaced atomically: the new body is written to a temp file in the same
+// directory and renamed over the destination, so a failed or interrupted write can never
+// leave the destination truncated - the previous state survives intact. A destination
+// that exists but is not writable is refused (the rename itself needs only the directory
+// and would otherwise replace a file the operator protected), the temp this process
+// created is removed on every failure path, and the caller still reports the documented
+// exit 4.
+function writeStateAtomic(out, body) {
+  // Everything below names the resolved destination, not the spelling: the temp has to be
+  // born beside the inode the rename replaces, or a symlinked destination on another volume
+  // would fail the rename with EXDEV, and the rename itself has to name that inode.
+  const destination = resolveWriteTarget(out);
+  const mode = destinationMode(destination);
+  const tmp = tempPathFor(destination);
+  try {
+    writeFileSync(tmp, body, { flag: 'wx', mode: mode ?? 0o666 });
+    // chmod after the create, because the umask would otherwise clear bits the
+    // destination held (a 0664 state under a 022 umask is the common case). Only a
+    // destination that already existed is pinned; a fresh one keeps 0666 & ~umask.
+    if (mode !== null) chmodSync(tmp, mode);
+    if (existsSync(destination)) accessSync(destination, constants.W_OK);
+    renameSync(tmp, destination);
+  } catch (err) {
+    // Unconditionally: the flag this used to carry was set only after writeFileSync
+    // returned, so a write that failed part way through - a size limit, a full disk, an
+    // I/O error - left its partial temp behind for no later run to reclaim. tempPathFor
+    // returns only a name that was absent, or one carrying this process's id and a random
+    // suffix, so anything at that name is this write's own output. The collector and the
+    // renderer already unlink on every failure path.
+    try { unlinkSync(tmp); } catch { /* the temp was never created */ }
+    throw err;
+  }
+}
+
+// The lock is an exclusive create of <path>.lock, the name .gitignore already
+// anticipates; the file is removed in a finally, so a normal run never blocks the next.
+// The lock also records the process that holds it, because a run killed between taking the
+// lock and that finally would otherwise block every later update forever with no remedy.
+// A lock whose recorded process is gone is an orphan and is reclaimed immediately, without
+// waiting for an age.
+//
+// The lock's subject is the file the merge writes. Locking --state alone left two updates
+// that named different states and one shared --out free to overwrite each other, and the
+// later write silently dropped the earlier run, so the destination is locked too; the
+// state is locked as well when it is a different file, because the merge reads it. The
+// documented --out == --state invocation is one path and therefore one lock, and two
+// spellings of one path are one path here too (see canonicalPath below).
+function lockTargets(opts) {
+  const paths = [canonicalPath(opts.state)];
+  if (opts.out) paths.push(canonicalPath(opts.out));
+  return [...new Set(paths)].sort();
+}
+
+// Two spellings of one path - 's.json' and './s.json', the same file named absolutely,
+// or a symlink to it - name one file, so they have to produce one lock name and compare
+// equal. The canonical spelling is the real path when the file is there, and the name the
+// chain ends at when it is not: a lock is taken for an output that does not exist yet as
+// much as for one that does, and a caller who spells its own state two ways must not be
+// refused by the lock it just took. Nothing here writes to the canonical path; it is the
+// identity of the file, not a destination.
+//
+// A dangling link has no real path, and the link's own name is not the file the run writes:
+// locking '<link>.lock' while the write lands on the link's target left a live lock on the
+// target unable to refuse the run, so two updates - one naming the link, one naming the
+// target - each passed their own check and one merge was lost. The chain is walked exactly
+// as resolveWriteTarget walks it, so the lock and the write name one file. A chain that never
+// terminates is left to the writer, which refuses it with the documented write failure.
+function canonicalPath(path) {
+  const name = String(path);
+  try { return realpathSync(name); } catch { /* the file does not exist yet */ }
+  const target = walkLinks(name);
+  if (target !== null && target !== name) {
+    try { return join(realpathSync(dirname(target)), basename(target)); } catch { return resolve(target); }
+  }
+  try { return join(realpathSync(dirname(name)), basename(name)); } catch { return resolve(name); }
+}
+
+function releaseLocks(lockPaths) {
+  for (const lockPath of lockPaths) {
+    try { unlinkSync(lockPath); } catch { /* the lock file was already gone */ }
+  }
+}
+
+// Reads a lock file as a holder record: { pid } when its contents name the process that
+// took the lock, null when they do not. A file that merely carries the lock's name is not
+// a holder record, so the reclaim path must not delete it.
+function lockRecord(lockPath) {
+  let parsed;
+  try {
+    parsed = JSON.parse(readFileSync(lockPath, 'utf8'));
+  } catch {
+    return null;
+  }
+  const pid = Number(parsed?.pid);
+  return Number.isInteger(pid) && pid > 0 ? { pid } : null;
+}
+
+// Whether a process id is still alive. EPERM means the process exists but belongs to
+// another user; only ESRCH is gone.
+function pidAlive(pid) {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (err) {
+    return err.code === 'EPERM';
+  }
+}
+
+function acquireLock(path) {
+  const lockPath = `${path}.lock`;
+  // Nothing needs serialising when the lock's directory is not there: the state or output
+  // the run names cannot exist either, and the write that follows is what has to report the
+  // missing directory - exit 4, 'cannot write' - not the lock. Creating the lock used to
+  // fail with ENOENT and exit 2 blaming a lock the caller never asked for.
+  if (!existsSync(dirname(lockPath))) return null;
+  const refusal = `another update holds ${lockPath}; nothing was merged. Retry when it finishes.`;
+  const record = JSON.stringify({ pid: process.pid, host: hostname(), startedAt: new Date().toISOString() });
+  for (let attempt = 0; ; attempt += 1) {
+    try {
+      // Owner-only: the record names the process that holds the lock, and the lock itself
+      // is nobody else's business.
+      writeFileSync(lockPath, record + '\n', { flag: 'wx', mode: 0o600 });
+      return lockPath;
+    } catch (err) {
+      // A lock that cannot be created for a permission reason - the destination directory
+      // is not writable, or the filesystem is read-only - is not a lock the caller asked
+      // for. Taking none is safe: no writer can write there, so there is nothing to
+      // serialise, and the write that follows reports the destination it could not write
+      // (exit 4) instead of exit 2 naming a lock the caller never asked for.
+      if (err.code === 'EACCES' || err.code === 'EROFS' || err.code === 'EPERM') return null;
+      if (err.code !== 'EEXIST') throw fail(`cannot lock ${lockPath}: ${err.message}`, 2);
+    }
+    // A lock exists. Reclaim it once when its recorded process is gone; a live holder, or
+    // a lock a concurrent run created while this one was reclaiming the orphan, is a real
+    // refusal. The second attempt never reclaims, so two reclaimers cannot both win.
+    const holder = lockRecord(lockPath);
+    if (holder === null) {
+      throw fail(`cannot lock ${lockPath}: the file is not a lock record written by update-state.mjs; inspect it and remove it if it is stale`, 2);
+    }
+    if (attempt > 0 || pidAlive(holder.pid)) throw fail(refusal, 2);
+    try {
+      unlinkSync(lockPath);
+    } catch (err) {
+      if (err.code !== 'ENOENT') throw fail(`cannot lock ${lockPath}: ${err.message}`, 2);
+    }
+  }
+}
+
+// Every lock or none: a run that takes one subject and is refused the other must not leave
+// the first behind, because the finally of the caller only sees what this returns.
+function acquireLocks(paths) {
+  const held = [];
+  try {
+    for (const path of paths) {
+      const lockPath = acquireLock(path);
+      if (lockPath) held.push(lockPath);
+    }
+  } catch (err) {
+    releaseLocks(held);
+    throw err;
+  }
+  return held;
 }
 
 export function main(argv = process.argv.slice(2)) {
@@ -326,6 +715,31 @@ export function main(argv = process.argv.slice(2)) {
     process.exitCode = 2;
     return 2;
   }
+  // update merges into the state file (the documented --out == --state invocation), so
+  // its read, its merge and its write are one critical section: two concurrent updates
+  // otherwise each read the same state and the later write silently drops the earlier
+  // run. The lock file .gitignore already anticipates serialises them; a held lock is a
+  // named refusal rather than a lost run. plan mutates nothing and takes no lock.
+  let lockPaths = [];
+  if (opts.command === 'update') {
+    try {
+      lockPaths = acquireLocks(lockTargets(opts));
+    } catch (err) {
+      console.error(`update-state: ${err.message}`);
+      process.exitCode = err.exitCode ?? 2;
+      return process.exitCode;
+    }
+  }
+  try {
+    return runCommand(opts, config);
+  } finally {
+    releaseLocks(lockPaths);
+  }
+}
+
+// The command body. It runs with the update lock held, so the state is read and written
+// inside one critical section.
+function runCommand(opts, config) {
   let state;
   try {
     state = loadState(opts.state, config);
@@ -355,6 +769,16 @@ export function main(argv = process.argv.slice(2)) {
   }
   if (!/^\d{4}-\d{2}-\d{2}$/.test(opts.date)) {
     console.error(`update-state: --date must be YYYY-MM-DD, got ${JSON.stringify(opts.date)}`);
+    process.exitCode = 2;
+    return 2;
+  }
+  // --out is the file the merge writes; --state is the file it reads. The documented
+  // invocation names one path for both, and the update lock only excludes overlapping
+  // writers. When the two differ and the destination already exists, this run would
+  // overwrite the runs recorded there without ever reading them and silently drop the
+  // earlier run, so the divergent invocation is refused instead.
+  if (canonicalPath(opts.out) !== canonicalPath(opts.state) && existsSync(opts.out)) {
+    console.error(`update-state: --out ${opts.out} already exists and is not --state ${opts.state}; refusing to overwrite the runs recorded there. Pass the same path for --state and --out, or remove the destination first.`);
     process.exitCode = 2;
     return 2;
   }
@@ -421,7 +845,7 @@ export function main(argv = process.argv.slice(2)) {
     return process.exitCode;
   }
   try {
-    writeFileSync(opts.out, `${JSON.stringify(merged.state, null, 2)}\n`);
+    writeStateAtomic(opts.out, `${JSON.stringify(merged.state, null, 2)}\n`);
   } catch (err) {
     console.error(`update-state: cannot write ${opts.out}: ${err.message}`);
     process.exitCode = 4;

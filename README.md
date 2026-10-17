@@ -26,16 +26,25 @@ pool), `.items.json` (the items that shipped), `.plan.json` (the window plan the
 
 - **Node 18 or newer.** Every script runs under Node.js and uses only the standard library: no dependencies,
   no `package.json`, no build step, nothing to install.
+- **The `curl` binary on `PATH`.** The collector fetches over HTTP by shelling out to `curl`; it is the only
+  external program the skill runs.
 - A skill-capable agent harness (DeepSeek Harness, Claude Code, ...) with web search and fetch available.
 - Network access for the collector and for the research passes.
 - `GITHUB_TOKEN` is optional and only raises the GitHub API rate limit. The anonymous budget is measured,
-  not assumed: 60 core requests per hour, and the shipped watchlist currently asks for 56 of them - 55
-  repositories plus the advisory list - against the 58 that are spendable once the configured
-  `github_rate_limit_reserve` of 2 is held back, leaving two requests of headroom, so a first run fits. The collector
-  probes that budget on every run and, when a run runs short, records a notice that reports `remaining N of M`;
-  those notices belong in the digest's coverage note. A second full run inside the same hour loses the GitHub
-  tail, and the collector degrades those sources to notices instead of failing. Every other source needs no
-  token. See Token safety.
+  not assumed: 60 core requests per hour, and the shipped watchlist's floor is 56 of them - 55 repositories
+  plus the advisory list - against the 58 that are spendable once the configured `github_rate_limit_reserve`
+  of 2 is held back, leaving two requests of headroom. **The tags phase is separate and comes out of what the
+  floor leaves.** Whenever a repository's releases produce no in-window candidate the collector also asks for
+  that repository's tags - one request each, up to 55 more - so a quiet week wants 111 GitHub requests in all:
+  55 releases, the advisory listing and 55 tag listings. Of those the hour charges 59 - the 55 releases, the
+  advisory and 3 of the tag listings - and the other 52 tag listings go unchecked, which forces a rate-limit
+  notice into the coverage note. The collector probes that budget on every run and, when a run runs short,
+  records a notice that reports `remaining N of M`; those notices belong in the digest's coverage note. That
+  probe is advisory, not a measurement of this run: it reads the allowance of the address the run leaves from,
+  so on a shared egress it can report a fresh budget while the address is already being charged and the run is
+  serving 403 or 429 bodies reading `API rate limit exceeded` in place of candidates. A healthy probe is not
+  proof the run will be served - the first refusal is what settles it. A second full run inside the same hour
+  loses the GitHub tail, and the collector degrades those sources to notices instead of failing. Every other source needs no token. See Token safety.
 
 ## Token safety
 
@@ -53,7 +62,7 @@ The collector runs without a credential; a `GITHUB_TOKEN` only raises the GitHub
 - Make any file that holds it owner-only (`chmod 600`) and never commit it. This repository is published whole.
 - Never paste a token into an agent session: transcripts are written to disk and may be indexed later.
 
-**Know the residual.** The collector hands the credential to `curl` as a request header, which places it in that process's command line while a request is in flight. Command lines are readable by other local accounts unless the system sets `hidepid`; environment variables are owner-only, which is why the token is read from the environment rather than from an argument. The token never reaches a digest, notice or artifact. On a single-user machine that is a small, transient exposure; on a shared host, run the skill in a container or a dedicated account, or use no token at all.
+**Know the residual.** The collector hands the credential to `curl` as a request header, which places it in that process's command line while a request is in flight. Command lines are readable by other local accounts unless the system sets `hidepid`; environment variables are owner-only, which is why the token is read from the environment rather than from an argument. The collector writes that header into no artifact of its own: the pool, the digest and everything else it produces are built from the URLs it requested and what the servers answered, and the credential is never one of those fields. What does get published is the notice's own text, never the upstream answer's text: a failed source becomes a notice, a notice names the degradation - the source, the status and the cause - and a degraded run's coverage note is required to carry those notices into the digest (the gate fails a run that omits the `Collector notices: <n>` line). An HTTP failure is reported as `HTTP <status> for <redacted url>` with no excerpt of the response body, and no notice reproduces an upstream identifier or version. What a notice does carry is the request's own text, which is scrubbed at the single point it is pushed: the request's userinfo password whatever its length while its username is removed only from eight characters up, the value of a credential-named parameter from three characters up, a credential header whole, and the credential shapes the collector recognises; no other value the request put in its URL is removed. The URL the notice names keeps its scheme, host and path and loses its userinfo and its whole query string, so a secret embedded in a path survives that rule and is published. That scrubbing is defence in depth rather than the boundary itself, since the upstream text is never quoted; read a notice as a diagnostic of a degraded source, not as proof that no credential is in it. On a single-user machine that is a small, transient exposure; on a shared host, run the skill in a container or a dedicated account, or use no token at all.
 
 **Rotate.** Revoke and reissue if the token is ever exposed — a transcript, a screenshot, a shared shell, a backup.
 
@@ -91,7 +100,7 @@ Four Markdown tables under `config/` hold all of it, and every quantity the skil
 in a script:
 
 - `config/domains.md` - the catalogue: key, English domain, `short` (the topic-navigation chip label), `label_zh`, cluster, tier (`core` or `watch`) and why each domain is carried.
-- `config/settings.md` - every quantity and policy: the window cap, the first-run reach, the per-domain ceilings, the watch-notable and total budgets, the fan-out width, the timezone, the discovery-host list and the output directory.
+- `config/settings.md` - every quantity and policy: the window cap, the first-run reach, the per-domain ceilings, the watch-notable and total budgets, the fan-out width, the timezone, the discovery-host list, the navigation-chip cap (`short_max_chars`), the notice length cap (`notice_max_chars`) and the output directory.
 - `config/sources.md` - the source registry: which outlets are read, their evidence tier, their language and what automated fetch has actually achieved.
 - `config/watchlist.md` - the collector's only input: the repositories, categories, packages, advisories and feeds that are scanned, each mapped to a domain.
 
@@ -147,7 +156,7 @@ reference/evidence.md          the evidence bar, provenance markers and per-doma
 reference/feasibility.md       the probe record: what is retrievable and what is blocked
 examples/                      an illustrative digest, its HTML and the plan it is verified against
 docs/design.md                 the spec: requirements, decisions, architecture, interfaces and constraints
-                               — the only documentation file that ships with the skill
+                               — the only file under docs/ that ships with the skill
 examples/sample-digest.md      an illustrative digest, clearly labelled
 examples/sample-digest.html    the same example, rendered
 examples/sample-plan.json      the synthetic window the example's dates sit inside

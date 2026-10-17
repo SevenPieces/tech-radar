@@ -2,7 +2,7 @@
 // scripts/check-quality.mjs
 // The quality gate. Zero dependencies. Prints every violation with its line
 // number and exits 5 if there is at least one failure; warnings never fail a run.
-import { readFileSync, existsSync } from 'node:fs';
+import { readFileSync, existsSync, statSync } from 'node:fs';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { readConfig } from './lib/mdtable.mjs';
 import { hostOf, isDiscoveryOnly } from './lib/net.mjs';
@@ -36,15 +36,21 @@ const ITEM = /^-\s+\*\*(.+?)\*\*\s+—\s+([\s\S]*)$/;
 // case); [^)]+ truncated them at the first ')' and made the gate read a different URL than
 // the renderer drew. One level of nesting is supported, as in render-html.mjs.
 const SRC = /\[src:([^\]]+?)\s+(\d{4}-\d{2}-\d{2}[^\]]*)\]\((https?:\/\/(?:[^()\s]|\([^()\s]*\))+)\)/;
-const MARKER = /\[src:[^\]]*\]\((?:[^()\s]|\([^()\s]*\))*\)|\[alt:[^\]]*\]\((?:[^()\s]|\([^()\s]*\))*\)|\[prov:[a-z-]+\]|#(?:new|followup|developing|watch)\b/g;
+// A status flag is a token: its '#' must not be glued to a word character, so it opens the
+// text or follows whitespace or punctuation. Without this boundary the gate read 'C#new' in
+// prose as a flag while the renderer drew no status tag, so an item could pass the gate
+// carrying no tag at all. Both flag scans below use the same boundary as the renderer's
+// FLAG_BOUNDARY and the neutraliser's STATUS_FLAG, so the three agree on what a flag is.
+const FLAG_BOUNDARY = '(?<!\\w)#';
+const MARKER = new RegExp('\\[src:[^\\]]*\\]\\((?:[^()\\s]|\\([^()\\s]*\\))*\\)|\\[alt:[^\\]]*\\]\\((?:[^()\\s]|\\([^()\\s]*\\))*\\)|\\[prov:[a-z-]+\\]|' + FLAG_BOUNDARY + '(?:new|followup|developing|watch)\\b', 'g');
 const CITATION_LINK = /\[(?:src|alt):[^\]]*\]\((?:[^()\s]|\([^()\s]*\))*\)/g;
 const PROV = /\[prov:[a-z-]+\]/g;
-const STATUS = /#(new|followup|developing|watch)\b/g;
+const STATUS = new RegExp(FLAG_BOUNDARY + '(new|followup|developing|watch)\\b', 'g');
 
 // A digest written on another platform carries CRLF line endings; every parser
 // normalises them, because \r left in place makes the heading and item anchors match
 // nothing at all.
-export function normalizeNewlines(md) {
+function normalizeNewlines(md) {
   return String(md ?? '').replace(/\r\n?/g, '\n');
 }
 
@@ -52,16 +58,16 @@ export function normalizeNewlines(md) {
 // domains' and '## Watch domains - notable this week'. The featured deep dive, the
 // quiet line, '## Coming up', the coverage note and '## Sources' are prose, so a
 // catalogue heading that reappears there does not turn its bullets into items.
-export function isCoreSection(heading) {
+function isCoreSection(heading) {
   return /^core\s+domains\b/i.test(String(heading ?? '').trim());
 }
 
-export function isWatchNotableSection(heading) {
+function isWatchNotableSection(heading) {
   const h = String(heading ?? '').trim();
   return /^watch\s+domains\b/i.test(h) && !/\bquiet\b/i.test(h);
 }
 
-export function isDomainSection(heading) {
+function isDomainSection(heading) {
   return isCoreSection(heading) || isWatchNotableSection(heading);
 }
 
@@ -84,7 +90,7 @@ function itemProse(body) {
 // heading. It is read line by line because a section body may legitimately start
 // with a blank line, which a lazy regex over '$' swallows.
 // Every level-2 heading, in order.
-export function sectionHeadings(md) {
+function sectionHeadings(md) {
   return normalizeNewlines(md).split('\n')
     .map((line) => /^##\s+(.*)$/.exec(line))
     .filter(Boolean)
@@ -92,7 +98,7 @@ export function sectionHeadings(md) {
 }
 
 // The first section whose heading matches a predicate, as { heading, text }.
-export function findSection(md, predicate) {
+function findSection(md, predicate) {
   const lines = normalizeNewlines(md).split('\n');
   let heading = null;
   let start = -1;
@@ -109,7 +115,7 @@ export function findSection(md, predicate) {
 // separated by any whitespace: '## Coverage  note' and '## Coverage\tnote' are the
 // same heading as '## Coverage note'. A section body may legitimately start with a
 // blank line, so sections are read line by line rather than with a lazy regex.
-export function sectionText(md, name) {
+function sectionText(md, name) {
   const words = String(name).trim().split(/\s+/)
     .map((w) => w.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'))
     .join('\\s+');
@@ -121,7 +127,7 @@ export function sectionText(md, name) {
 // before the bilingual separator. The section matters: a heading under '## Coming up'
 // is not a domain heading, and a deep-dive headline that happens to contain a
 // catalogue name is not one either.
-export function parseHeadingRecords(md) {
+function parseHeadingRecords(md) {
   const records = [];
   let section = '';
   normalizeNewlines(md).split('\n').forEach((line, i) => {
@@ -142,7 +148,7 @@ export function parseHeadingRecords(md) {
 }
 
 // The level-3 heading labels, in order.
-export function parseHeadings(md) {
+function parseHeadings(md) {
   return parseHeadingRecords(md).map((r) => r.label);
 }
 
@@ -181,12 +187,15 @@ export function parseItems(md) {
     const body = parts.join(' ').trim();
     const src = SRC.exec(body);
     const tokens = statusTokens(body);
+    // The flag is the last token that is #new or #followup. #developing and #watch are
+    // additive and never decide it, so '#new #developing' is still new and the earlier
+    // tokens stay prose; a token list with neither status yields no flag at all.
+    const flags = tokens.filter((t) => t === 'new' || t === 'followup');
     items.push({
       line: itemLine, section, domain, title: m[1], body,
       src: src ? { outlet: src[1].trim(), date: src[2].trim(), url: src[3] } : null,
       prov: [...body.matchAll(/\[prov:([a-z-]+)\]/g)].map((x) => x[1]),
-      // The trailing status token is the flag; any earlier ones read as prose.
-      flags: tokens.length ? [tokens[tokens.length - 1]] : [],
+      flags: flags.length ? [flags[flags.length - 1]] : [],
       statusTokens: tokens,
       // The language rule judges the headline and the summary together.
       cjk: /[\u4e00-\u9fff]/.test(`${m[1]} ${itemProse(body)}`),
@@ -198,7 +207,7 @@ export function parseItems(md) {
 // Bullets that look like items - a bullet marker followed by a bold headline - but do
 // not match the grammar are otherwise invisible: silently not an item, uncounted, and
 // with no signal that the digest lost a line.
-export function malformedItemLines(md) {
+function malformedItemLines(md) {
   const out = [];
   let collect = false;
   normalizeNewlines(md).split('\n').forEach((line, i) => {
@@ -213,6 +222,21 @@ export function malformedItemLines(md) {
   return out;
 }
 
+// The domains a plan actually covers. A plan is hand-written JSON by construction -
+// update-state.mjs is the only writer of one and refuses an unknown --domain key - so a
+// perDomain entry naming a domain the catalogue does not carry is not a covered domain:
+// it covers nothing, which is what the scope judgment and the floor below both read.
+// Sweep F31-8: the floor used to count the KEYS of perDomain, so a plan carrying
+// {"ghost-domain": {...}} alone reported covered = 1 - which is the single-domain probe
+// branch, so a ONE-item digest released the floor and, through the same key set, the
+// core-heading and quiet-line rules with it, at exit 0.
+export function plannedDomains(config, plan) {
+  const catalogue = new Set(config.domains.map((d) => d.key));
+  const perDomain = plan?.perDomain;
+  if (!perDomain || typeof perDomain !== 'object' || Array.isArray(perDomain)) return [];
+  return Object.keys(perDomain).filter((key) => catalogue.has(key));
+}
+
 // The floor for a run. The ceiling is global because it is about readability, while
 // the floor is about completeness, so it scales with the share of the catalogue a
 // scoped run covers: total_min_items scaled by that share, rounded up, never below
@@ -222,9 +246,18 @@ export function malformedItemLines(md) {
 // scope whose clamp binds sits at total_min_items. A single-domain run is a probe and
 // is not forced to pad; a run covering the whole catalogue, or none, keeps the
 // configured floor unchanged.
-export function scopedMinItems(settings, catalogueSize, perDomain) {
+// The covered count comes from plannedDomains when the caller can hand over the
+// catalogue, so an unrecognised key can never stand in for a domain; without one the
+// three-argument form counts keys exactly as it always did, for the module-level
+// callers that measure the arithmetic itself.
+export function scopedMinItems(settings, catalogueSize, perDomain, catalogue) {
   const total = Number(settings.total_min_items);
-  const covered = perDomain && typeof perDomain === 'object' ? Object.keys(perDomain).length : 0;
+  const keys = perDomain && typeof perDomain === 'object' && !Array.isArray(perDomain)
+    ? Object.keys(perDomain)
+    : [];
+  const covered = Array.isArray(catalogue)
+    ? keys.filter((key) => catalogue.includes(key)).length
+    : keys.length;
   if (covered === 0 || covered >= catalogueSize) return total;
   if (covered === 1) return 1;
   const scaled = Math.ceil((total * covered) / catalogueSize);
@@ -253,25 +286,25 @@ function tokenIn(text, token) {
 // the number itself must be exact.
 const NOTICE_LINE = /collector\s+notices\s*:?\s*[*_`"'(\[]*\s*(\d+)/i;
 
-export function reportedNoticeCount(text) {
+function reportedNoticeCount(text) {
   const m = NOTICE_LINE.exec(String(text ?? ''));
   return m ? Number(m[1]) : null;
 }
 
-// The story key is title plus host, so two different stories on one host whose
-// titles normalise alike collapse into one. The gate's duplicate check adds the URL
-// path, which keeps genuinely distinct stories distinct.
-export function dedupeKey(title, url) {
-  let path = String(url ?? '');
-  try { path = new URL(String(url)).pathname; } catch { /* keep the raw value */ }
-  return `${storyKey(title, url)}|${path}`;
+// The duplicate check is the documented story key - the normalised title plus the host
+// (reference/state-schema.md) - which is exactly what mergeRun collapses on. Adding the
+// URL path let two items that share a story key ship through the gate; the merge then
+// stored one entry and labelled the brand-new one a followup. Design 4.4 makes a shared
+// story key a gate failure, so the gate must key on the same thing the merge does.
+function dedupeKey(title, url) {
+  return storyKey(title, url);
 }
 
 // The documented enum. A value outside it - a typo, a capital variance, an empty
 // string - used to disable the featured-section rule with no signal at all.
-export const DEEP_DIVE_VALUES = ['when-warranted', 'always', 'never'];
+const DEEP_DIVE_VALUES = ['when-warranted', 'always', 'never'];
 
-export function deepDiveProblem(settings) {
+function deepDiveProblem(settings) {
   const value = String(settings?.deep_dive ?? '');
   if (DEEP_DIVE_VALUES.includes(value)) return null;
   return `deep_dive is ${JSON.stringify(settings?.deep_dive)}, which is not one of ${DEEP_DIVE_VALUES.join(', ')}`;
@@ -280,7 +313,7 @@ export function deepDiveProblem(settings) {
 // The plan JSON is an input like any other: a missing or malformed window or a label
 // that is not a string would silently disable the window and label rules, so the CLI
 // names the reason and exits 2 instead.
-export function planProblem(plan) {
+function planProblem(plan) {
   if (!plan || typeof plan !== 'object' || Array.isArray(plan)) return 'the plan is not an object';
   if (!plan.window || typeof plan.window !== 'object' || Array.isArray(plan.window)) return 'the plan has no window object';
   for (const key of ['since', 'until']) {
@@ -288,6 +321,41 @@ export function planProblem(plan) {
     if (typeof value !== 'string' || Number.isNaN(Date.parse(value))) return `the plan window.${key} is not a date`;
   }
   if (typeof plan.label !== 'string' || plan.label.trim() === '') return 'the plan label is not a string';
+  // perDomain decides which core headings and quiet lines a run answers for, so an entry
+  // that is null or otherwise not an object must be named here rather than read as "not
+  // covered" by one rule and "covered" by another, which disabled both at once.
+  if (plan.perDomain !== undefined) {
+    if (!plan.perDomain || typeof plan.perDomain !== 'object' || Array.isArray(plan.perDomain)) {
+      return 'the plan perDomain is not an object';
+    }
+    for (const [key, value] of Object.entries(plan.perDomain)) {
+      if (!value || typeof value !== 'object' || Array.isArray(value)) {
+        return `the plan perDomain.${key} is not an object`;
+      }
+    }
+  }
+  return null;
+}
+
+// The gate's budget rules are arithmetic, and Number(undefined) is NaN: every comparison
+// against NaN is false, so one deleted settings row turns a rule into a no-op while the
+// gate still prints QUALITY: PASS. Five budget rules and the discovery-host rule were
+// disabled that way. Like update-state's positiveInt, the gate refuses the configuration
+// and names the key instead of reporting a clean run.
+const GATE_QUANTITIES = ['core_max_items', 'watch_max_items', 'watch_notable_max', 'total_min_items', 'total_max_items'];
+
+function settingsProblem(settings) {
+  for (const key of GATE_QUANTITIES) {
+    const raw = settings?.[key];
+    const n = Number(raw);
+    if (!Number.isInteger(n) || n <= 0) {
+      return `${key} must be a positive integer, got ${JSON.stringify(raw)}`;
+    }
+  }
+  const hosts = String(settings?.discovery_hosts ?? '').split(',').map((x) => x.trim()).filter(Boolean);
+  if (hosts.length === 0) {
+    return `discovery_hosts must be a non-empty comma-separated list of host names, got ${JSON.stringify(settings?.discovery_hosts)}`;
+  }
   return null;
 }
 
@@ -380,8 +448,23 @@ export function check(md, config, plan, opts = {}) {
     failures.push(`watch domains contributed ${watchItems} items, over watch_notable_max ${s.watch_notable_max}`);
   }
   const catalogueSize = config.domains.length;
-  const floor = scopedMinItems(s, catalogueSize, plan.perDomain);
-  const coveredCount = plan.perDomain && typeof plan.perDomain === 'object' ? Object.keys(plan.perDomain).length : 0;
+  // The domain set every plan-keyed rule reads: the plan's own keys, with any key the
+  // catalogue does not carry named and dropped (sweep F31-8). A hand-written plan is the
+  // only way such a key arrives - update-state.mjs refuses an unknown --domain - and the
+  // gate used to score the floor from the raw key count and the scoped rules from the
+  // same key set, so one unrecognised key released the floor AND the core-heading and
+  // quiet-line rules with it while the Coverage note went on claiming the full catalogue.
+  const plannedKeys = Object.keys(plan.perDomain && typeof plan.perDomain === 'object' && !Array.isArray(plan.perDomain)
+    ? plan.perDomain : {});
+  const catalogueKeys = config.domains.map((d) => d.key);
+  for (const key of plannedKeys) {
+    if (!catalogueKeys.includes(key)) {
+      failures.push(`plan perDomain names "${key}", which is not a catalogue domain: it covers nothing, and the run's completeness floor and scoped rules are scored without it`);
+    }
+  }
+  const planned = plannedDomains(config, plan);
+  const floor = scopedMinItems(s, catalogueSize, plan.perDomain, catalogueKeys);
+  const coveredCount = planned.length;
   if (items.length < floor) {
     failures.push(coveredCount > 0 && coveredCount < catalogueSize
       ? `${items.length} items is below the scoped floor of ${floor} for a run covering ${coveredCount} of ${catalogueSize} domains`
@@ -390,21 +473,29 @@ export function check(md, config, plan, opts = {}) {
   if (items.length > Number(s.total_max_items)) failures.push(`${items.length} items is above total_max_items ${s.total_max_items}`);
 
   const keys = new Map();
+  const named = new Set();
   for (const it of items) {
     if (!it.src) continue;
     const k = dedupeKey(it.title, it.src.url);
-    if (keys.has(k)) failures.push(`line ${it.line}: duplicate story key ${k} with line ${keys.get(k)}`);
-    else keys.set(k, it.line);
+    if (!keys.has(k)) { keys.set(k, it.line); continue; }
+    // One violation per story key: a run of items that all collapse into the same story
+    // is named once, against the earlier line the group first appeared on.
+    if (named.has(k)) continue;
+    named.add(k);
+    failures.push(`line ${it.line}: duplicate story key ${k} with line ${keys.get(k)}`);
   }
 
   // Design 4.4: a quiet core domain keeps its heading with an explicit quiet line,
   // so it can never vanish silently. A plan that names the domains a run covered
   // (a focus or catch-up run) requires only those. An empty perDomain object is
   // not a claim of "nothing covered": it is a plan that would otherwise fail open,
-  // so it is treated as unscoped and every core domain is required.
-  const planned = plan.perDomain && typeof plan.perDomain === 'object' ? Object.keys(plan.perDomain) : [];
+  // so it is treated as unscoped and every core domain is required. The same holds
+  // for a plan whose every key is unrecognised: it names no domain of this catalogue,
+  // so it is unscoped rather than a scope of ghosts (sweep F31-8).
   const scoped = planned.length > 0;
-  const covered = (d) => !scoped || Boolean(plan.perDomain[d.key]);
+  // One predicate for both rules: a domain the plan names is covered, whatever its entry
+  // holds, so a malformed entry cannot read as "not covered" and disable a rule.
+  const covered = (d) => !scoped || planned.includes(d.key);
   for (const d of config.domains.filter((x) => x.tier === 'core' && covered(x))) {
     if (!domainHeadings.some((r) => r.name === d.domain && isCoreSection(r.section))) {
       failures.push(`core domain ${d.domain} has no section heading; a quiet core domain keeps its heading and says so`);
@@ -567,12 +658,30 @@ export function main(argv = process.argv.slice(2)) {
     process.exitCode = 2;
     return 2;
   }
-  // A --html path that does not exist is a typo, not a pass: silently skipping
-  // the check would disable the self-containment rule for the whole run.
-  if (opts.html && !existsSync(opts.html)) {
-    console.error(`check-quality: --html file not found: ${opts.html}`);
-    process.exitCode = 2;
-    return 2;
+  // A --html path that does not exist, is not a file, or cannot be read is a typo or a
+  // permission problem, not a pass: silently skipping the check would disable the
+  // self-containment rule for the whole run. Each case is a named exit 2; a directory
+  // used to pass the existence test and die on the read with an EISDIR stack trace.
+  if (opts.html) {
+    let stat = null;
+    try { stat = statSync(opts.html); } catch { stat = null; }
+    if (!stat) {
+      console.error(`check-quality: --html file not found: ${opts.html}`);
+      process.exitCode = 2;
+      return 2;
+    }
+    if (!stat.isFile()) {
+      console.error(`check-quality: --html is not a file: ${opts.html}`);
+      process.exitCode = 2;
+      return 2;
+    }
+    try {
+      readFileSync(opts.html, 'utf8');
+    } catch (err) {
+      console.error(`check-quality: cannot read --html ${opts.html}: ${err.message}`);
+      process.exitCode = 2;
+      return 2;
+    }
   }
   // The pool is read defensively: a missing, unreadable or malformed file is an input
   // error, never a silently absent check.
@@ -609,6 +718,14 @@ export function main(argv = process.argv.slice(2)) {
     config = readConfig(opts.config);
   } catch (err) {
     console.error(`check-quality: cannot read config ${opts.config}: ${err.message}`);
+    process.exitCode = 2;
+    return 2;
+  }
+  // A missing or unusable budget setting is a configuration error, not a quietly
+  // disabled rule: the CLI names the key and exits 2 like the other invalid-setting paths.
+  const settingsIssue = settingsProblem(config.settings);
+  if (settingsIssue) {
+    console.error(`check-quality: ${settingsIssue}`);
     process.exitCode = 2;
     return 2;
   }

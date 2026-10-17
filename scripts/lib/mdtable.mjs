@@ -5,7 +5,8 @@
 // tables. Cells are trimmed, and a short row yields empty strings for the
 // missing trailing cells.
 import { readFileSync } from 'node:fs';
-import { join } from 'node:path';
+import { dirname, join } from 'node:path';
+import { fileURLToPath } from 'node:url';
 
 const FENCE = /^\s*(?:```|~~~)/;
 const SEPARATOR = /^:?-{2,}:?$/;
@@ -65,10 +66,61 @@ export function readSettings(path) {
   return out;
 }
 
-export function readDomains(path) {
+// The settings that ship beside this module: the last resort for the chip cap when a
+// caller carries no settings and the catalogue has no settings file of its own.
+const SHIPPED_SETTINGS = fileURLToPath(new URL('../../config/settings.md', import.meta.url));
+
+function positiveIntOf(settings, key) {
+  const n = Number(settings?.[key]);
+  return Number.isInteger(n) && n > 0 ? n : null;
+}
+
+// A cap that is present but unusable is a configuration error, not an absent one: falling
+// through to the shipped value would run with a cap the configuration never asked for.
+// Only a key that is genuinely absent resolves to null, so the caller can fall back.
+function capOf(settings) {
+  if (!settings || !Object.prototype.hasOwnProperty.call(settings, 'short_max_chars')) return null;
+  const value = settings.short_max_chars;
+  if (value === undefined) return null;
+  const n = Number(value);
+  if (!Number.isInteger(n) || n <= 0) {
+    throw new Error(`short_max_chars is invalid in config/settings.md: ${JSON.stringify(value)}`);
+  }
+  return n;
+}
+
+// The chip cap is a quantity like every other one, so it is configuration and never a
+// literal here. A caller may pass the settings object; a caller that does not gets the
+// settings file read from the directory beside the catalogue it is reading; a fixture
+// that writes only a catalogue falls back to the shipped settings.
+export function shortCap(settings) {
+  const explicit = capOf(settings);
+  if (explicit) return explicit;
+  const shipped = positiveIntOf(readSettings(SHIPPED_SETTINGS), 'short_max_chars');
+  if (shipped) return shipped;
+  throw new Error('short_max_chars is missing or invalid in config/settings.md');
+}
+
+export function readDomains(path, settings) {
+  let cap = capOf(settings);
+  if (!cap) {
+    // The settings beside the catalogue are read only when the caller carries none; an
+    // unreadable file leaves the reader's own resolution, an unusable value is named.
+    let beside = null;
+    try { beside = readSettings(join(dirname(path), 'settings.md')); } catch { beside = null; }
+    cap = capOf(beside) ?? shortCap(null);
+  }
   const rows = readTableObjects(path);
   const seen = new Set();
   for (const r of rows) {
+    // U+0000 is the renderer's substitution sentinel, so a cell carrying one could rewrite
+    // the authored text or leave a raw NUL in the published document. Every cell is checked
+    // before any other rule, so the refusal names the character wherever it sits.
+    for (const [column, value] of Object.entries(r)) {
+      if (String(value).includes('\u0000')) {
+        throw new Error(`U+0000 in the ${column} cell for ${r.key || '(no key)'}`);
+      }
+    }
     if (!KEY.test(r.key)) throw new Error(`bad domain key: ${r.key}`);
     if (seen.has(r.key)) throw new Error(`duplicate domain key: ${r.key}`);
     seen.add(r.key);
@@ -80,7 +132,7 @@ export function readDomains(path) {
     // word are ambiguous. An absent column is allowed - the renderer falls back to a clause.
     if (r.short !== undefined && String(r.short).trim() !== '') {
       const label = String(r.short).trim();
-      if (label.length > 18) throw new Error(`short label too long for ${r.key}: ${label}`);
+      if (label.length > cap) throw new Error(`short label too long for ${r.key}: ${label} (short_max_chars ${cap})`);
       if (/[<>"']/.test(label)) throw new Error(`short label must be attribute-safe for ${r.key}: ${label}`);
     }
   }
