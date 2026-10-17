@@ -192,6 +192,41 @@ test('F38-1: the two generic keyword rules answer for NEL exactly as they do for
   }
 });
 
+test('the recorded residual: a NEL at the value position still answers for the scaffold', () => {
+  // RECORDED RATHER THAN CLOSED. A value position that IS the terminator answers as LF does only
+  // while the line carries no scaffold: the module's own diagnosis ('HTTP 503', a mapped transport
+  // cause) is masked as a span and restored after the pass, and the two spellings reach that span
+  // through different branches of the value reader. With a span in the line the NEL spelling falls
+  // to the reader's null branch -- the whole matched region is consumed, span and all -- while the
+  // LF spelling consumes only the value and keeps the keyword beside it. Measured first-hand at the
+  // tip: 'authorization:' + NEL + CRED + ' HTTP 503' answers '[redacted] HTTP 503' where the same
+  // line with LF answers 'authorization:' + LF + '[redacted] HTTP 503'.
+  //
+  // This is the same shape the closing sweep measured as NEL-versus-LF parity violations in the
+  // scaffold class, and it is NOT F38-1's class (that one PUBLISHED the credential and is closed).
+  // Here the credential is removed on BOTH spellings and on BOTH entry points; what differs is the
+  // surrounding text, and what is at stake is the notice diagnosis on the NEL spelling alone. The
+  // reach is therefore the module surface and the assembled notice for a NEL-spelling value
+  // position, and NOT the shipped collector: plainText normalises the NEL to the inline space
+  // before a candidate field is formed, so no shipped keyless path reaches this spelling. It is
+  // pinned here so a later pass cannot close it silently or regress it the other way.
+  const span = ' HTTP 503';
+  const nelLine = 'authorization:' + SEPARATORS.find(([n]) => n === 'U+0085 NEXT LINE')[1] + CRED + span;
+  const lfLine = 'authorization:' + LF + CRED + span;
+  // The credential is removed and the status survives on both spellings.
+  assert.ok(!redactSecrets(nelLine, []).includes(CRED), 'the NEL spelling published the credential');
+  assert.ok(!redactSecrets(lfLine, []).includes(CRED), 'the LF spelling published the credential');
+  assert.ok(redactSecrets(nelLine, []).includes('HTTP 503'), 'the NEL spelling lost the status');
+  assert.ok(redactSecrets(lfLine, []).includes('HTTP 503'), 'the LF spelling lost the status');
+  // The two ENTRY POINTS agree with each other on the NEL spelling ...
+  const nel = redactSecrets(nelLine, []);
+  assert.equal(redactCredentialShapes(nelLine), nel, 'the two entry points disagree about the NEL spelling');
+  // ... and the divergence is NEL against LF alone, which is the recorded residual.
+  assert.equal(nel, '[redacted]' + span, 'the recorded NEL answer moved: ' + JSON.stringify(nel));
+  assert.equal(redactSecrets(lfLine, []), 'authorization:' + LF + '[redacted]' + span,
+    'the recorded LF answer moved: ' + JSON.stringify(redactSecrets(lfLine, [])));
+});
+
 test('F36-2: prose that merely carries these characters is byte-identical', () => {
   for (const [name, separator] of SEPARATORS) {
     const text = 'the run covered 43 domains' + separator + 'and merged 0 items';
