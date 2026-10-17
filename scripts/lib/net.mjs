@@ -110,12 +110,6 @@ function credentialShapedToken(token) {
 // The generic Bearer alternative is ONE rule now ('redactBearerValues' below) and both paths run
 // it, at the same place in the same order, so 'redactSecrets(x, [])' and
 // 'redactCredentialShapes(x)' publish the same text for every x.
-const SHAPE_CLASSIC_TOKEN = /\bgh[pousr]_[A-Za-z0-9]{6,}\b/g;
-const SHAPE_FINE_GRAINED_PAT = /\bgithub_pat_[A-Za-z0-9_]{20,}\b/g;
-const SECRET_SHAPES = [
-  SHAPE_CLASSIC_TOKEN,
-  SHAPE_FINE_GRAINED_PAT,
-];
 // Two refusals keep a SOURCE's path from being read as a header, and both are about the text after
 // the colon, never about the keyword:
 //   - a token that begins a URL is refused ('authorization: https://...' is the assembly's own seam
@@ -234,11 +228,25 @@ function nameCharacter(letter) {
   return '(?:' + letter + '|&#0*' + lower + ';|&#[xX]0*' + lower.toString(16) + ';'
     + '|&#0*' + upper + ';|&#[xX]0*' + upper.toString(16) + ';)';
 }
-const keywordName = (word) => word.split('').map(nameCharacter).join('');
-const AUTH_NAME = keywordName('authorization');
-const AUTH_NAME_BRITISH = keywordName('authorisation');
-const AUTH_NAME_UNDERSCORED = keywordName('authori')
-  + '(?:' + nameCharacter('s') + '|' + nameCharacter('z') + ')' + keywordName('ation');
+// The name's letters are joined THROUGH the separator class (Batch 98; closing sweep F40-1), so a
+// keyword a surface split with a separator is still the keyword -- which is why the name constants
+// are built BELOW, after that class is declared, rather than here.
+const keywordName = (word) => word.split('').map(nameCharacter).join(SCHEME_GAP + '*');
+// THE CONTROL BYTES, NAMED AND EXPORTED SO ONE RULE HAS ONE SOURCE (Batch 93; closing sweep
+// F39-1). Every site that normalises control bytes in text the pipeline PUBLISHES reads this same
+// class: plainText below (a candidate field), and neutraliseNoticeText in collect.mjs (an assembled
+// notice). The rule the two sites share is that words keep their separation: a control byte standing
+// between two words becomes the space that keeps them apart, and NONE is dropped, because a dropped
+// byte glues a credential keyword to its value at a gap every keyword rule requires at least one
+// character to fill. The class stands here three times for three read shapes -- the global replace,
+// the plain string class a caller can compose, and a non-global test -- and all three are the one
+// range 0x00-0x1F plus 0x7F-0x9F. A site that needs the rule reads one of these names rather than
+// writing the range again, which is what let the F38-1 class close one byte at a time (Batch 88
+// spaced U+0085 here and in the notice pass while the rest of the range kept gluing). It stands
+// ABOVE the separator class below because that class is built from it (Batch 98).
+const CONTROLS = /[\u0000-\u001f\u007f-\u009f]/g;
+export const CONTROL_CHARACTERS = '\u0000-\u001f\u007f-\u009f';
+export const CONTROL_PATTERN = /[\u0000-\u001f\u007f-\u009f]/;
 // THE TWO SETS THE BRIDGE IS BUILT FROM are declared HERE, above every matcher that reads them
 // (Batch 86; final verification F37-1), so the header keyword's bridging whitespace and the scheme
 // token's own gap are built from the SAME set the value reader's line ends come from. Their full
@@ -274,10 +282,76 @@ const AUTH_BRIDGE_SPACE = '[' + AUTH_INLINE_SPACE + AUTH_LINE_TERMINATORS + ']';
 // every regex below that reads the gap carries it.
 export const INVISIBLE_SEPARATOR = '\\p{Default_Ignorable_Code_Point}';
 export const INVISIBLE_SEPARATOR_PATTERN = /\p{Default_Ignorable_Code_Point}/u;
-// THE GAP THE TWO GENERIC SCHEME RULES READ: the bridge plus the invisible class above. It is a
+// THE ONE SEPARATOR CLASS (Batch 98; closing sweep F40-1, the mirror of Batch 96's widening). The
+// rule, stated once and read by every matcher below: A REMOVABLE CONTROL BYTE OR AN INVISIBLE
+// SEPARATOR THAT STANDS INSIDE A KEYWORD, OR INSIDE A CURATED SECRET SHAPE, DOES NOT BREAK IT -- THE
+// SHAPE IS READ THROUGH THOSE SEPARATORS, WHILE THE PUBLISHED TEXT KEEPS THE SPACED FORM BATCH 93
+// ESTABLISHED. A keyword is its letters with optional separators between them; a curated shape is the
+// same. Batch 93 replaced DROPPING a control byte with SPACING it, because a dropped byte glued a
+// keyword to its value; the drop's gluing was load-bearing for the other position, and spacing
+// un-glued it: 'Bear' + NUL + 'er tok_...', 'Ba' + NUL + 'sic <b64>', 'authoriz' + NUL + 'ation: ',
+// 'gh' + NUL + 'p_...' and 'github' + NUL + '_pat_...' were published in the shipped keyless pool
+// title and summary where the pre-93 revision removed them (measured on the real collectAll with the
+// stub transport, in the closing sweep's p42/p49/p51). The class is the bridge below PLUS the
+// default-ignorable property PLUS every control byte, so the gap and the interior read ONE set: the
+// separator between a keyword and its value and the separator inside it are the same character
+// doing the same thing, and no later fix can close one position without the other.
+//
+// Four directions are held at once, and the property test drives all four:
+//   (a) a keyword or shape split by a separator is still recognised and removed (this class);
+//   (b) a keyword glued to its value by a dropped byte is still handled -- every control byte is a
+//       separator in the published text (Batch 93's own rule, unchanged);
+//   (c) an invisible separator between a keyword and its value is still a gap (Batch 96, unchanged --
+//       the class only widened);
+//   (d) ordinary prose is not reaped: the widened class only adds alternative spellings of the SAME
+//       keyword, and every rule still requires its value (a credential-shaped token, a base64 pair, a
+//       shape body) before anything is removed. A text with no separator at an interior position
+//       matches exactly as it did before, which is why the tracked corpus differential is 0.
+//
+// WHAT IS READ THROUGH AND WHAT IS NOT. The interior read covers the KEYWORD (Bearer, Basic, the
+// authorization name) and the FIXED PREFIX of the two curated shapes ('gh' + [pousr] + '_' and
+// 'github_pat_'). It does not extend the VALUE run: a token split inside its own characters is
+// ambiguous with two words, so the run still stops at the separator and the by-value half (looseValue
+// below) is what removes the run's own value through it. The bound and its measurement are recorded
+// in tests/interior-separator-property.test.mjs.
+const SEPARATOR_CHARACTERS = CONTROL_CHARACTERS + AUTH_INLINE_SPACE + AUTH_LINE_TERMINATORS
+  + INVISIBLE_SEPARATOR;
+// THE GAP THE TWO GENERIC SCHEME RULES READ is now the whole separator class above. It is a
 // character class, so a caller writes SCHEME_GAP + '*' (or '+').
-export const SCHEME_GAP = '[' + AUTH_INLINE_SPACE + AUTH_LINE_TERMINATORS + INVISIBLE_SEPARATOR + ']';
+export const SCHEME_GAP = '[' + CONTROL_CHARACTERS + AUTH_INLINE_SPACE + AUTH_LINE_TERMINATORS
+  + INVISIBLE_SEPARATOR + ']';
 export const SCHEME_GAP_PATTERN = new RegExp(SCHEME_GAP, 'u');
+// A literal word read THROUGH the class: every character of the literal, with a run of separators
+// allowed between one and the next. The separator is a character no letter can be, so the pattern is
+// unambiguous and the run backtracks nothing. It needs the 'u' flag, because the class carries the
+// property.
+function throughSeparators(literal) {
+  return [...literal]
+    .map((ch) => ch.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'))
+    .join(SCHEME_GAP + '*');
+}
+// The same across fragments that are already pattern sources rather than literal characters.
+const joinThroughSeparators = (parts) => parts.join(SCHEME_GAP + '*');
+const AUTH_NAME = keywordName('authorization');
+const AUTH_NAME_BRITISH = keywordName('authorisation');
+const AUTH_NAME_UNDERSCORED = joinThroughSeparators([
+  keywordName('authori'),
+  '(?:' + nameCharacter('s') + '|' + nameCharacter('z') + ')',
+  keywordName('ation'),
+]);
+// THE TWO CURATED SHAPES, read through the separator class (Batch 98; closing sweep F40-1): the
+// shape's FIXED PREFIX is its characters with optional separators between them, so 'gh' + NUL + 'p_...'
+// and 'github' + NUL + '_pat_...' are the shapes they spell. The BODY stays one run -- see the class
+// statement above for why a body that crossed separators would reap the words after a real token --
+// and it is the by-value half that removes a body the surface split inside itself.
+const SHAPE_CLASSIC_TOKEN = new RegExp('\\b' + throughSeparators('gh') + SCHEME_GAP + '*'
+  + '[pousr]' + SCHEME_GAP + '*' + '_' + '[A-Za-z0-9]{6,}\\b', 'gu');
+const SHAPE_FINE_GRAINED_PAT = new RegExp('\\b' + throughSeparators('github_pat_')
+  + '[A-Za-z0-9_]{20,}\\b', 'gu');
+const SECRET_SHAPES = [
+  SHAPE_CLASSIC_TOKEN,
+  SHAPE_FINE_GRAINED_PAT,
+];
 // The gap as a RUN, for the two GENERIC keyword rules (Batch 88; closing sweep F38-1, widened whole
 // in Batch 96; closing sweep F40-1). Those two rules -- the Basic keyword's own gap and BEARER_VALUE's
 // gap -- each still read JavaScript's \s, which is exactly AUTH_INLINE_SPACE + CR/LF/LS/PS and NOT
@@ -291,7 +365,7 @@ const SCHEME_GAP_RUN = new RegExp('^' + SCHEME_GAP + '+', 'u');
 // keyword's gap (Batch 88; closing sweep F38-1).
 const SCHEME_GAP_RUN_OPTIONAL = new RegExp('^' + SCHEME_GAP + '*([A-Za-z0-9+/]+={0,2})', 'u');
 
-const AUTHORIZATION_KEYWORD = new RegExp('(?<![\\w\\/])(?:proxy-)?' + AUTH_NAME + '["\']?' + AUTH_BRIDGE_SPACE + '*' + AUTH_COLON + AUTH_BRIDGE_SPACE + '*', 'gi');
+const AUTHORIZATION_KEYWORD = new RegExp('(?<![\\w\\/])(?:proxy-)?' + AUTH_NAME + '["\']?' + AUTH_BRIDGE_SPACE + '*' + AUTH_COLON + AUTH_BRIDGE_SPACE + '*', 'giu');
 // Sweep F31-4's neighbour rows: the keyword was that one spelling with a word boundary on each
 // side, so two header NAMES a real surface writes were read by nothing. 'authorisation' is the
 // British spelling of the same header - the colon and the value after it are identical, only the
@@ -303,9 +377,9 @@ const AUTHORIZATION_KEYWORD = new RegExp('(?<![\\w\\/])(?:proxy-)?' + AUTH_NAME 
 // prefix through. The underscore matcher is the one deliberate exception, and it is the shape a
 // dump writes ('HTTP_AUTHORIZATION', 'X_AUTHORIZATION', 'HTTP_X_AUTHORIZATION'); it keeps the same
 // lookbehind for '/', so the notice seam ('.../authorization: HTTP 503') is still refused.
-const AUTHORIZATION_KEYWORD_BRITISH = new RegExp('(?<![\\w\\/])' + AUTH_NAME_BRITISH + '["\']?' + AUTH_BRIDGE_SPACE + '*' + AUTH_COLON + AUTH_BRIDGE_SPACE + '*', 'gi');
+const AUTHORIZATION_KEYWORD_BRITISH = new RegExp('(?<![\\w\\/])' + AUTH_NAME_BRITISH + '["\']?' + AUTH_BRIDGE_SPACE + '*' + AUTH_COLON + AUTH_BRIDGE_SPACE + '*', 'giu');
 const AUTHORIZATION_KEYWORD_UNDERSCORED = new RegExp('(?<![\\w.\\/-])(?:[A-Za-z0-9]+_)+(?:proxy-)?'
-  + AUTH_NAME_UNDERSCORED + '["\']?' + AUTH_BRIDGE_SPACE + '*' + AUTH_COLON + AUTH_BRIDGE_SPACE + '*', 'gi');
+  + AUTH_NAME_UNDERSCORED + '["\']?' + AUTH_BRIDGE_SPACE + '*' + AUTH_COLON + AUTH_BRIDGE_SPACE + '*', 'giu');
 const AUTHORIZATION_KEYWORDS = [AUTHORIZATION_KEYWORD, AUTHORIZATION_KEYWORD_BRITISH, AUTHORIZATION_KEYWORD_UNDERSCORED];
 // The atoms a header VALUE is built from (see 'readAuthorizationValue' below): a quoted string --
 // double or single, an escaped quote inside it read as one character, or a quote that is never
@@ -547,7 +621,7 @@ function authorizationAtomContinuesValue(atom) {
 // made a long folded value quadratic (closing sweep F34-7: 20,000 folded lines cost twelve seconds
 // and the same text through the previous revision was still counting when it ran out of stack). The
 // verdict is the one the index test made - the same match, starting at the same position.
-const AUTHORIZATION_KEYWORDS_AT = AUTHORIZATION_KEYWORDS.map((re) => new RegExp(re.source, 'iy'));
+const AUTHORIZATION_KEYWORDS_AT = AUTHORIZATION_KEYWORDS.map((re) => new RegExp(re.source, 'iyu'));
 function authorizationKeywordStartsAt(source, at) {
   if (at >= source.length) return false;
   for (const re of AUTHORIZATION_KEYWORDS_AT) {
@@ -1111,19 +1185,22 @@ function redactBasicCredentials(text) {
   let out = '';
   let at = 0;
   let resumeAt = -1;
-  const pattern = /Basic/gi;
+  // The keyword is read through the separator class exactly as BEARER_VALUE's is (Batch 98; closing
+  // sweep F40-1): 'Ba' + NUL + 'sic <b64>' is the Basic keyword a surface split, and every offset
+  // below is the MATCH's own length rather than the five literal letters.
+  const pattern = new RegExp(throughSeparators('Basic'), 'giu');
   for (const match of source.matchAll(pattern)) {
     const idx = match.index;
     if (idx < at) continue;
     const prev = idx === 0 ? '' : source[idx - 1];
     if (/[A-Za-z0-9_]/.test(prev) && idx !== resumeAt) continue;
-    const after = source.slice(idx + 'Basic'.length);
+    const after = source.slice(idx + match[0].length);
     // The keyword's own gap reads SCHEME_GAP_RUN, not \s (Batch 88; closing sweep F38-1; widened
     // Batch 96, closing sweep F40-1): a NEL between 'Basic' and its blob is a line end exactly as LF
     // is and \s does not match it, and an invisible character there is a separator no reader can see.
     const space = SCHEME_GAP_RUN.exec(after);
     if (space === null) continue;
-    const tokenStart = idx + 'Basic'.length + space[0].length;
+    const tokenStart = idx + match[0].length + space[0].length;
     if (tokenStart < at) continue;
     const token = decodedBasicToken(after.slice(space[0].length));
     if (token === null) continue;
@@ -1333,12 +1410,22 @@ function boundedValue(value) {
 // LS, PS, SP and TAB all removed it -- after which the assembled notice published the value
 // readably and was not a fixed point. The gap is now \s plus U+0085, exactly the set the rest of
 // the module reads a separator from, so every one of them answers as LF does.
-const VALUE_GAP = '\\s\\u0085';
+// The gap is the module's ONE SEPARATOR CLASS now (Batch 98; closing sweep F40-1): the same set the
+// gap and the interior of a keyword read (SEPARATOR_CHARACTERS above), so a control byte or an
+// invisible character a surface put inside the run's own value answers as LF does at BOTH entry
+// points -- including the notice path, which removes before it spaces and therefore could not read a
+// control byte through \s (the F40-3 shape). The by-value half has the value, so this is the one
+// place the value's own characters may be read through a separator without reaping prose.
+const VALUE_GAP = SEPARATOR_CHARACTERS;
 function looseValue(value) {
   const pattern = [...String(value)]
     .map((ch) => ch.replace(/[.*+?^$(){}|[\]\\]/g, '\\$&'))
     .join('[' + VALUE_GAP + ']*');
-  return new RegExp(pattern, 'g');
+  // The 'u' flag is required, not optional: the gap carries the default-ignorable property, and a
+  // pattern built with that property and compiled WITHOUT the flag is not the property -- it is the
+  // identity escape \p plus the literal braces, which matches nothing a value is ever split by. The
+  // flag is read the same way SCHEME_GAP_PATTERN reads it (Batch 96/98).
+  return new RegExp(pattern, 'gu');
 }
 
 // A value can also be republished in the URL's own spelling of it: redactUrl is the URL
@@ -1569,7 +1656,8 @@ export function redactSecrets(text, secrets) {
 // where LF stopped it. Both positions now answer exactly as LF does, and the gap also reads every
 // character that carries no visible content (ZWSP, SHY, WJ, MVS, U+3164, ZWNJ, ZWJ and the rest of the
 // default-ignorable class), which is a shape no reader can tell from 'Bearer <value>'.
-const BEARER_VALUE = new RegExp('\\bBearer' + SCHEME_GAP + '+(' + AUTH_TOKEN_CHARS + ')', 'giu');
+const BEARER_VALUE = new RegExp('\\b' + throughSeparators('Bearer') + SCHEME_GAP + '+('
+  + AUTH_TOKEN_CHARS + ')', 'giu');
 function redactBearerValues(text) {
   return String(text).replace(BEARER_VALUE, (m, token) => (
     credentialShapedToken(token) ? REDACTION_SENTINEL : m));
@@ -2219,20 +2307,6 @@ export function splitItems(xml) {
 // on a published card: a marker's bracket and colon become spaces, and a status token's
 // hash becomes a space rather than being deleted. Markdown link syntax is the same class
 // of trusted text, so the seam below is spaced here too. The length bound is applied last.
-// THE CONTROL BYTES, NAMED AND EXPORTED SO ONE RULE HAS ONE SOURCE (Batch 93; closing sweep
-// F39-1). Every site that normalises control bytes in text the pipeline PUBLISHES reads this same
-// class: plainText below (a candidate field), and neutraliseNoticeText in collect.mjs (an assembled
-// notice). The rule the two sites share is that words keep their separation: a control byte standing
-// between two words becomes the space that keeps them apart, and NONE is dropped, because a dropped
-// byte glues a credential keyword to its value at a gap every keyword rule requires at least one
-// character to fill. The class stands here three times for three read shapes -- the global replace,
-// the plain string class a caller can compose, and a non-global test -- and all three are the one
-// range 0x00-0x1F plus 0x7F-0x9F. A site that needs the rule reads one of these names rather than
-// writing the range again, which is what let the F38-1 class close one byte at a time (Batch 88
-// spaced U+0085 here and in the notice pass while the rest of the range kept gluing).
-const CONTROLS = /[\u0000-\u001f\u007f-\u009f]/g;
-export const CONTROL_CHARACTERS = '\u0000-\u001f\u007f-\u009f';
-export const CONTROL_PATTERN = /[\u0000-\u001f\u007f-\u009f]/;
 // A whole marker, opener and closer together, with a plausible body after the opener: a
 // bracketed span that reads like a label rather than a sentence. Both brackets and the colon
 // become spaces and the body keeps its words, so 'Rust 1.90 [prov:preprint] notes' reads

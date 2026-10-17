@@ -34,7 +34,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import {
-  plainText, redactSecrets, redactCredentialShapes,
+  plainText, redactSecrets, redactCredentialShapes, CONTROL_CHARACTERS, CONTROL_PATTERN,
   INVISIBLE_SEPARATOR, INVISIBLE_SEPARATOR_PATTERN, SCHEME_GAP, SCHEME_GAP_PATTERN,
 } from '../scripts/lib/net.mjs';
 import { collectAll, assembleNotice, neutraliseNoticeText } from '../scripts/collect.mjs';
@@ -56,13 +56,13 @@ const WITNESSES = [0x200b, 0x00ad, 0x2060, 0x180e, 0x3164, 0x200c, 0x200d, 0x206
 // The class is not BMP-only: the variation selectors and the tag characters are default-ignorable too.
 const BEYOND_BMP = [0xfe00, 0xe0001, 0xe007f, 0xe0100];
 
-test('the named scheme gap is the bridge PLUS the default-ignorable class, and it is pinned', () => {
+test('the named scheme gap is the bridge PLUS the invisible class PLUS the control class, and it is pinned', () => {
   assert.equal(INVISIBLE_SEPARATOR, '\\p{Default_Ignorable_Code_Point}',
     'the named invisible class moved; this file pins the definition it asserts over');
   assert.equal(SCHEME_GAP,
-    '[' + '\t\v\f \u00a0\u1680\u2000-\u200a\u202f\u205f\u3000\ufeff' + '\\r\\n\\u2028\\u2029\\u0085'
+    '[' + CONTROL_CHARACTERS + '\t\v\f \u00a0\u1680\u2000-\u200a\u202f\u205f\u3000\ufeff' + '\\r\\n\\u2028\\u2029\\u0085'
       + INVISIBLE_SEPARATOR + ']',
-    'the scheme gap is no longer the bridge plus the invisible class; the gap is where F40-1 lives');
+    'the scheme gap is no longer the bridge plus the invisible class plus the control bytes');
   for (const cp of WITNESSES) {
     assert.ok(isSchemeGap(cp), u(cp) + ' left the scheme gap, and this is one of the ten F40-1 measured');
     assert.ok(INVISIBLE_SEPARATOR_PATTERN.test(String.fromCodePoint(cp)),
@@ -72,10 +72,19 @@ test('the named scheme gap is the bridge PLUS the default-ignorable class, and i
   for (const cp of [0x09, 0x0a, 0x0d, 0x20, 0x85, 0xa0, 0x1680, 0x2000, 0x200a, 0x2028, 0x2029, 0x202f, 0x205f, 0x3000, 0xfeff]) {
     assert.ok(isSchemeGap(cp), u(cp) + ' is a bridge character and left the scheme gap');
   }
-  // The class's own size in the swept range, pinned: 24 bridge characters + 38 default-ignorable ones.
-  assert.equal(GAP.length, 62, 'the scheme gap in 0x0000-0x2FFF is no longer 24 bridge + 38 invisible');
+  // The class's own size in the swept range, pinned: 24 bridge characters + 38 default-ignorable ones,
+  // plus the 65 control bytes Batch 98 added (59 of them new -- \t, \v, \f, \r, \n and U+0085 were
+  // already bridge members).
+  assert.equal(GAP.length, 121, 'the scheme gap in 0x0000-0x2FFF is no longer 24 bridge + 38 invisible + 65 control');
   assert.equal(GAP.filter((cp) => INVISIBLE_SEPARATOR_PATTERN.test(String.fromCodePoint(cp))).length, 38,
     'the default-ignorable half of the gap moved inside 0x0000-0x2FFF');
+  // The control half (Batch 98; closing sweep F40-1): every control byte is a separator at this gap
+  // exactly as it is inside a keyword, because the gap and the interior read ONE class.
+  const controlHalf = GAP.filter((cp) => CONTROL_PATTERN.test(String.fromCharCode(cp)));
+  assert.equal(controlHalf.length, 65, 'the control half of the gap moved inside 0x0000-0x2FFF');
+  for (const cp of [0x00, 0x01, 0x08, 0x7f, 0x80, 0x9b, 0x9f]) {
+    assert.ok(isSchemeGap(cp), u(cp) + ' is a control byte and left the scheme gap');
+  }
   assert.ok(GAP.includes(0x0a), 'LF is not in the class and every assertion below would be vacuous');
   // The boundary is real in BOTH directions: a visible mark beside a token is not a separator ...
   assert.ok(!isSchemeGap(0x25cc), 'a visible mark is not a separator');
