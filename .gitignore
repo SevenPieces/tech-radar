@@ -3,6 +3,10 @@
 Thumbs.db
 
 # Run artifacts
+# The dotted state spelling is named with its lock (Batch 89; closing sweep F38-2): the lock on the
+# next line already says this spelling is machine state, and a state file git does not ignore is one
+# a stray `git add -A` publishes.
+.tech-radar-state
 .tech-radar-state.lock
 # Any lock, not only the two documented spellings: a lock names the state it guards, so it
 # sits beside whatever the state file is called, and it records the machine's hostname.

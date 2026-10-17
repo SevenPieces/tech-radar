@@ -612,6 +612,41 @@ test('the state lock spelling .gitignore names for itself is dropped by the repo
   }
 });
 
+// Closing sweep F38-2 (Low) and Batch 89. '.tech-radar-state' was in the fallback's
+// RUN_ARTIFACT_NAMES, whose header says it is 'the run artifacts .gitignore names', but the shipped
+// .gitignore named only its LOCK. For an UNTRACKED '.tech-radar-state' the two answers therefore
+// disagreed: git's answer kept the file and handed it to the publication guard, while the no-git
+// answer dropped it on the name and handed it to nobody -- the same file judged by one answer and
+// unjudged by the other -- and because .gitignore did not name it, an ordinary 'git add -A' would
+// have published it. The recorded F37-2 bound does not cover that: its rationale is a name the
+// reader NEVER receives, and this was a name the reader did. The direction is the one .gitignore's
+// own comment chooses ('state belongs to the machine'), applied to the state whose lock it already
+// hides: the bare name is ignored beside its lock, both answers drop it, and neither publishes it.
+test('the dotted state spelling .gitignore names beside its lock is dropped by BOTH answers', (t) => {
+  const dir = walkerFixture({
+    '.gitignore': readFileSync(join(SKILL_ROOT, '.gitignore')),
+    'config/settings.md': 'a shipped file\n',
+    '.tech-radar-state': 'ghp_' + 'fakefakefakefake' + '\n',
+  });
+  if (dir === null) {
+    t.skip('git is not available, so the repository answer was not exercised');
+    return;
+  }
+  try {
+    const tracked = spawnSync('git', ['-C', dir, 'ls-files', '--', '.tech-radar-state'], { encoding: 'utf8' }).stdout.trim();
+    assert.equal(tracked, '', 'the fixture state file is tracked, so the untracked case under test was not built');
+    const withGit = shippedFiles(dir);
+    assert.deepEqual(withGit, ['.gitignore', 'config/settings.md'],
+      '.gitignore does not name the bare dotted state spelling, so an ordinary git add -A publishes it: ' + JSON.stringify(withGit));
+    assert.deepEqual(noGitWalk(dir), withGit,
+      'the two walker answers disagree about an untracked .tech-radar-state');
+    assert.deepEqual(scan(dir, SECRET, 'carries'), [],
+      'a state file the reader never receives was handed to a publication guard');
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 // Closing sweep F35-3 (Low, a regression Batch 70 introduced), pinned on the layout the sweep
 // measured. A lock the repository TRACKS is kept by git's answer whatever the ignore rules say - git
 // does not ignore what it carries - and Batch 70's clause dropped it from the no-git answer on the
