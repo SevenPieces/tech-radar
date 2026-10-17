@@ -17,6 +17,7 @@ import {
   neutraliseMarkers, neutraliseLinkSeams, noticePreservingRewrites, neutraliseUrl, redactSecrets,
   requestSecrets, requestSecretSets, neutraliseTagSpans, neutraliseEntityTags, repriceShapedError,
   redactCredentialShapes, NOTICE_SEPARATOR, NO_DETAIL_REASON, CONTROL_CHARACTERS,
+  markSeparators, renderSeparatorMarks,
 } from './lib/net.mjs';
 
 // The collector must work from any working directory, so the default configuration
@@ -234,9 +235,14 @@ function requireNoticeLimit(value) {
 // the ones the candidate normaliser draws too, so the two boundaries cannot drift apart
 // (TR-122, TR-123).
 export function neutraliseNoticeText(text) {
-  const spaced = neutraliseTagSpans(neutraliseEntityTags(
-    String(text).replace(NOTICE_CONTROLS, ' '),
-  ));
+  // THE NOTICE CONTROL PASS RECORDS THE SEPARATOR IT MEETS (Batch 101), through the ONE normaliser
+  // plainText calls: a control byte that is not an ordinary word gap -- and a non-ordinary
+  // whitespace spelling -- becomes the separator mark, and the mark is rendered as the space it
+  // stood in for when the notice is published (sanitizeNotice and assembleNotice below). The pass
+  // runs AFTER the redaction on the shipped paths, so this does not change what any rule reads
+  // there; it keeps the evidence for a text the assembly re-pushes, which is where a normalised
+  // notice used to lose it.
+  const spaced = neutraliseTagSpans(neutraliseEntityTags(markSeparators(String(text))));
   // The markdown link seam belongs to this path and not to the neutraliser a candidate field
   // uses: a notice is published verbatim in the Coverage note, while a release body's links are
   // ordinary Markdown that the pool has to keep.
@@ -255,10 +261,11 @@ export function neutraliseNoticeText(text) {
 function noticeSource(label, name, limit) {
   const room = Math.max(0, noticeSourceRoom(requireNoticeLimit(limit)) - String(label).length - 1);
   const text = neutraliseNoticeText(String(name ?? ''));
-  return `${label} ${text.length > room ? text.slice(0, room) : text}`;
+  // The label is published, so the mark the normaliser records is rendered here (Batch 101).
+  return renderSeparatorMarks(`${label} ${text.length > room ? text.slice(0, room) : text}`);
 }
 function sanitizeNotice(text, limit) {
-  return neutraliseNoticeText(text).slice(0, requireNoticeLimit(limit));
+  return renderSeparatorMarks(neutraliseNoticeText(text).slice(0, requireNoticeLimit(limit)));
 }
 function pushNotice(notices, text, secrets, limit) {
   notices.push(sanitizeNotice(redactSecrets(text, secrets), limit));
@@ -556,10 +563,13 @@ export function assembleNotice(source, detail, secrets, limit) {
   // reads across it ('authorization: value', an unterminated tag opener reaching the detail's '>')
   // and the redaction of one part against a value the other part carries are all handled here,
   // once, in the order a reader of the line would apply them.
+  // The marks the normaliser records are rendered as spaces on the way out of every branch below
+  // (Batch 101): a published notice carries no internal character.
+  const publish = (text) => renderSeparatorMarks(text);
   const whole = neutraliseNoticeText(redactSecrets(head0 + NOTICE_SEPARATOR + tail0, secrets));
   const head = neutraliseNoticeText(redactSecrets(head0, secrets));
   const tail = neutraliseNoticeText(redactSecrets(tail0, secrets));
-  if (whole.length <= cap) return join(whole);
+  if (whole.length <= cap) return publish(join(whole));
   const labelRoom = Math.min(noticeLabelRoom(head0), cap);
   const repriced = repricedDetailWithin(whole, detail, secrets, cap, labelRoom);
   if (repriced !== null) {
@@ -573,15 +583,15 @@ export function assembleNotice(source, detail, secrets, limit) {
     // line became the source of bytes, and the whole line still is: the text is published only
     // while it is a contiguous run of that redaction.
     const room = Math.max(0, cap - NOTICE_SEPARATOR_CHARS - repriced.length);
-    if (room === 0) return join(repriced.slice(0, cap));
+    if (room === 0) return publish(join(repriced.slice(0, cap)));
     // The head is a slice of the WHOLE line, never the head's own pass: 'head' is a different
     // text from 'whole' whenever a rule read across the ': ' seam or a value spanned it, and a
     // slice of it can carry a byte the whole-line pass removed (the F27-5 class). 'whole' is
     // always long enough -- it starts with the whole of head0 and the redaction only removes.
     const line = whole.slice(0, Math.min(whole.length, room)) + NOTICE_SEPARATOR + repriced;
-    return join(line.length <= cap ? line : repriced.slice(0, cap));
+    return publish(join(line.length <= cap ? line : repriced.slice(0, cap)));
   }
-  return join(boundedNotice(whole, head, tail, cap, labelRoom));
+  return publish(join(boundedNotice(whole, head, tail, cap, labelRoom)));
 }
 // The push a notice built as '<source>: <detail>' uses, so the two parts stay apart until the cap
 // is applied. A caller that carries one already-assembled string -- a re-redaction pass, a message

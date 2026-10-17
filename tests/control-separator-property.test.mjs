@@ -29,10 +29,20 @@
 // (the shipped path) rather than redactSecrets over a raw control byte.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { plainText, redactSecrets, CONTROL_CHARACTERS, CONTROL_PATTERN } from '../scripts/lib/net.mjs';
+import {
+  plainText, redactSecrets, renderSeparatorMarks, CONTROL_CHARACTERS, CONTROL_PATTERN,
+} from '../scripts/lib/net.mjs';
 import { collectAll, neutraliseNoticeText, assembleNotice } from '../scripts/collect.mjs';
 
 const LF = String.fromCharCode(10);
+// The internal mark plainText records a non-ordinary separator with (Batch 101), and the ordinary
+// word gaps it must NOT mark. Both are written here as the module states them; a drift in either
+// moves this file.
+const SEPARATOR_MARK = '\uE001';
+// Batch 101: the ORDINARY word gap is the space and the line ends. A tab and the other C0
+// whitespace controls are split evidence (a surface that writes one inside a credential is not
+// writing the space between two words), so they are recorded as the mark like any other.
+const ORDINARY_WORD_GAPS = new Set(['\n', '\r', ' ', '\u0085', '\u2028', '\u2029']);
 const CRED = 'tok_' + '9f3a2c7d1e5b';
 const B64 = Buffer.from('alice:' + 's3cr3tp4ssw0rd').toString('base64');
 const SECRET = 's3cr3tp4ssw0rd';
@@ -46,14 +56,26 @@ const CREDENTIAL = (text) => text.includes(B64) || text.includes(CRED) || text.i
 test('plainText spaces every control byte exactly as it spaces LF, and no control survives', () => {
   assert.equal(CONTROL_CHARACTERS, '\u0000-\u001f\u007f-\u009f',
     'the named control class moved; this file pins the range it asserts over');
-  const lf = plainText('a' + LF + 'b', 100);
+  // Batch 101: plainText RECORDS the separator it meets instead of losing it. A control byte that is
+  // not an ordinary word gap becomes net.mjs's separator mark, which the publication view renders as
+  // the space LF gets; the claim this row makes is about the PUBLISHED byte, so it is read through
+  // that view, and the recording itself is asserted beside it (a row that lost the evidence would
+  // pass here and fail the property file, so both halves are stated).
+  const published = (raw) => renderSeparatorMarks(plainText(raw, 100));
+  const lf = published('a' + LF + 'b');
   assert.equal(lf, 'a b', 'LF is the reference answer and it is one space');
   for (const cp of CONTROL_BYTES) {
     const ch = String.fromCharCode(cp);
-    const out = plainText('a' + ch + 'b', 100);
+    const out = published('a' + ch + 'b');
     assert.equal(out, lf, u(cp) + ' is not spaced as LF is: ' + JSON.stringify(out));
     assert.doesNotMatch(out, CONTROL_PATTERN,
       u(cp) + ' survived into published text: ' + JSON.stringify(out));
+    // The evidence: an ordinary word gap stays the space it is, and every other class member is
+    // recorded as the mark (never as the byte itself, which is what the publication forbids).
+    const records = plainText('a' + ch + 'b', 100) === 'a' + SEPARATOR_MARK + 'b';
+    const ordinary = ORDINARY_WORD_GAPS.has(ch);
+    assert.equal(records, !ordinary,
+      u(cp) + (ordinary ? ' is an ordinary word gap and was marked' : ' is split evidence and was not marked'));
   }
   assert.equal(CONTROL_BYTES.length, 0x20 + 0x21, 'the class is 0x00-0x1F plus 0x7F-0x9F');
 });

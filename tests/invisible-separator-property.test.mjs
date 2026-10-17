@@ -61,7 +61,8 @@ test('the named scheme gap is the bridge PLUS the invisible class PLUS the contr
     'the named invisible class moved; this file pins the definition it asserts over');
   assert.equal(SCHEME_GAP,
     '[' + CONTROL_CHARACTERS + '\t\v\f \u00a0\u1680\u2000-\u200a\u202f\u205f\u3000\ufeff' + '\\r\\n\\u2028\\u2029\\u0085'
-      + INVISIBLE_SEPARATOR + ']',
+      // U+E001 is the SEPARATOR MARK Batch 101 added (net.mjs SEPARATOR_MARK).
+      + INVISIBLE_SEPARATOR + '\uE001]',
     'the scheme gap is no longer the bridge plus the invisible class plus the control bytes');
   for (const cp of WITNESSES) {
     assert.ok(isSchemeGap(cp), u(cp) + ' left the scheme gap, and this is one of the ten F40-1 measured');

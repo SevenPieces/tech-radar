@@ -245,6 +245,10 @@ const keywordName = (word) => word.split('').map(nameCharacter).join(SCHEME_GAP 
 // spaced U+0085 here and in the notice pass while the rest of the range kept gluing). It stands
 // ABOVE the separator class below because that class is built from it (Batch 98).
 const CONTROLS = /[\u0000-\u001f\u007f-\u009f]/g;
+// THE WHITESPACE SPELLINGS THAT ARE SPLIT EVIDENCE (Batch 101): every whitespace member of the one
+// class that is not an ordinary word gap. They collapse to a space today, which loses the fact that
+// a surface wrote one INSIDE a credential; they are marked instead, and render as the space they were.
+const SPECIAL_WHITESPACE = /[\u00a0\u1680\u2000-\u200a\u202f\u205f\u3000\ufeff]/g;
 export const CONTROL_CHARACTERS = '\u0000-\u001f\u007f-\u009f';
 export const CONTROL_PATTERN = /[\u0000-\u001f\u007f-\u009f]/;
 // THE TWO SETS THE BRIDGE IS BUILT FROM are declared HERE, above every matcher that reads them
@@ -306,25 +310,72 @@ export const INVISIBLE_SEPARATOR_PATTERN = /\p{Default_Ignorable_Code_Point}/u;
 //   removed across them. The published bytes are therefore exactly the spaced text with the
 //   recognised spans removed, and both entry points publish the same text.
 //
-// THE GLUE AT THE VALUE RUN IS BOUNDED TO ONE SEPARATOR RUN, and that bound is the prose guard.
-// A value run the spaced text carries that ALREADY satisfies the rule is complete: it is recognised
-// and removed as it stands, and it is NOT extended across a separator, so the word after a real
-// token survives ('Bearer tok_9f3a2c7d1e5b and this sentence' keeps 'and this sentence'). A value
-// run that does NOT satisfy the rule on its own -- the position FINAL41's F41-1 measured, where the
-// fragment before the split was below the rule's own minimum and NOTHING was removed -- continues
-// across AT MOST ONE separator run into the next run of the rule's own value characters, and the
-// span (both runs and the separators between them) is removed whole. The next run must itself be a
-// value run by the rule's own test, so an ordinary word cannot pull the prose after it into a
-// removal. That is why 'ghp_abc' + SEP + 'defghijklmnop', a Basic payload split inside
-// its base64, a PAT body split below its twentieth character and a token split inside its own
-// characters all remove as one credential, while an ordinary sentence keeps its words.
+// THE INFORMATION THE SHAPE RULES NEED IS KEPT NOW (Batch 101; the FINAL42 pair's root cause). The
+// paragraph above described Batch 100's model, and its bound was the defect: plainText turned a
+// control byte into a SPACE for publication, and after that a byte that WAS a separator -- which may
+// stand INSIDE a credential -- could not be told from an ordinary word gap, which may not be
+// crossed. So the glue crossed ONE run and required each fragment to be shaped on its own, and the
+// pair measured both failures on the shipped keyless pool: a credential split so that NEITHER
+// fragment passes the shape test (both below the minimum, or the digits all on one side) removed
+// NOTHING and published whole, and a credential split by TWO or more separator runs was never read
+// at all.
 //
-// WHAT THE MODEL MEASURES, in both directions:
+// THE SEPARATOR MARK. plainText -- and the notice control pass, through the same normaliser --
+// writes SEPARATOR_MARK (U+E001) in place of every separator-class character that is NOT an ordinary
+// word gap. The mark is a member of the class the rules read, is rendered as a space everywhere text
+// is published, is invisible to every other rule, and cannot come from an input (plainText
+// normalises an incoming one to a space; a raw text handed straight to a redaction entry point can
+// spell one, which can only make a rule cross MORE, never less). A separator that arrives as the
+// character itself needs no mark: the class already carries its evidence.
+//
+// THE JOIN. A value run that ALREADY satisfies the rule is complete and is never extended -- the
+// prose guard's spine. A run that does not is joined forwards:
+//   - ACROSS SPLIT EVIDENCE (the mark, an invisible separator, a non-ordinary whitespace spelling)
+//     the join is UNBOUNDED in the number of runs and the fragments after the first need not be
+//     shaped on their own: the joined text is what the rule tests. That is F42-1 (neither fragment
+//     shaped) and F42-2 (two or more runs) closed with one clause.
+//   - ACROSS AN ORDINARY WORD GAP -- a space or a line end, the characters prose writes between two
+//     words -- the join crosses AT MOST ONCE, only before any split evidence has been seen, and only
+//     when the fragment after it passes the rule's own test on its own (Batch 100's bound, kept
+//     because it is what keeps ordinary prose: the suite pins 'Bearer token1 is required' and
+//     'authorization: required for this feed', and both move if this test is dropped). Once split
+//     evidence has established the split, a later ordinary gap is crossed too.
+// ENTITY SPELLINGS of the class are read as the separators they name before any rule runs, on both
+// entry points and in plainText (F42-5): a reference that resolves to a class member is the
+// separator it spells, whatever it names.
+//
+// WHAT THE MODEL MEASURES at this revision (the FINAL42 pair's probes, re-run): 117 separators (the
+// 65 control code points, 24 default-ignorable witnesses, 12 whitespace spellings, 5 line ends and
+// 17 entity spellings) x 234 split positions (every shape, every internal offset, split once, twice
+// and at three runs, the class statement's example value, an 8- and a 12-character value, the
+// letter/digit boundary, a quoted payload) x 7 surfaces = 191,646 cells: 21,411 leakers at 3fcf85c,
+// 1,737 now -- and every one of the 1,737 is an ordinary word gap (space, LF, CR, NEL, LS, PS). The
+// shipped keyless collectAll over the same rows: 8,408 of 44,928 title+summary fields at 3fcf85c,
+// 656 now (all at ordinary word gaps). ZERO cells leak behind a control byte, a default-ignorable, a
+// non-ordinary whitespace spelling or an entity spelling.
+//
+// THE PRICE OF THE ORDINARY WORD GAP, measured in both directions rather than assumed. Closing the
+// remaining cells -- treating a space or a line end as split evidence -- was run as a variant of
+// this exact model: it takes the matrix to 0 and the shipped pool to 0 of 44,928, and it reaps 28
+// lines of the SHIPPED CORPUS (0 at this revision), among them the suite's own pinned prose
+// ('a Bearer token1 is required' -> 'a [redacted] required', 'Bearer tokens are rotated every 7 days
+// by the gateway' -> '[redacted] days by the gateway', 'authorization: token1 token2' ->
+// '[redacted]', 'authorization: see https://a.example/v2 for the details' -> '[redacted] for the
+// details'), and moves 2,413 of the 5,000 keyword-pressure prose rows where this revision moves 938
+// -- the same 938 the previous revision moves. The trade is the module's own established one (Batch
+// 67: a rule that cannot tell a credential from prose cannot both consume the credential and keep
+// the prose), and it is stated here so no later round can soften it into an unmeasured claim.
+//
+// WHAT THE MODEL MEASURES, in both directions (Batch 101 restates it; the measurements stand in
+// the block below this one, which is the revision's own):
 //   (a) every shape (Basic, Bearer, the authorization family and both curated shapes) split at
 //       EVERY position -- inside the keyword, inside the prefix, inside the body, at the boundary,
-//       at the gap -- by EVERY separator of the class, removes on both entry points, in the
-//       assembled notice at 128/402/1000 and in the shipped keyless collectAll: nothing of the
-//       credential is published, whole or recoverable with separators between its characters;
+//       at the gap -- by EVERY separator that CARRIES SPLIT EVIDENCE (a control byte, a
+//       default-ignorable, a non-ordinary whitespace spelling, an entity spelling of one) removes on
+//       both entry points, in the assembled notice at 128/402/1000 and in the shipped keyless
+//       collectAll, however many runs the split uses: nothing of the credential is published. The
+//       ordinary word gap is the one spelling that carries no evidence, and its bound and price are
+//       measured below;
 //   (b) no published byte moves for an input with no separator at a shape position: the tracked
 //       corpus differential is 0 (the glue is only taken where the spaced run cannot match), both
 //       entry points are the same text, and the caps and the fixed points hold;
@@ -340,22 +391,33 @@ export const INVISIBLE_SEPARATOR_PATTERN = /\p{Default_Ignorable_Code_Point}/u;
 // match as it stands, and only across one separator run. The two entry points agree because the
 // class (not the byte a particular surface wrote) is what decides.
 //
-// THE PRICE AT THE PREFIX/BODY BOUNDARY, measured and stated rather than hidden. At that one
-// position the fragment before the separator is EMPTY, so the surface's own split and an ordinary
-// word gap are the same shape, and no local test can tell them apart: 'ghp_' + space + a word the
-// rule's own minimum accepts ('strip the token prefix') is read as the split body and removed. The
+// THE PRICE AT THE PREFIX/BODY BOUNDARY, measured and stated rather than hidden (corrected by
+// Batch 101: the example the previous revision gave was below the minimum the price requires, so it
+// did not reproduce). At that one position the fragment before the separator is EMPTY, so a
+// surface's ordinary-space split and an ordinary word gap are the same shape, and no local test can
+// tell them apart: 'ghp_' + space + a word the rule's own minimum accepts ('the documented ghp_
+// prefix is six characters' loses 'ghp_ prefix'; 'ghp_ consider it' loses 'ghp_ consider') is read
+// as the split body and removed. A word BELOW the minimum is not read ('ghp_ strip the token
+// prefix' is byte-identical, 'strip' being five characters, and so is 'ghp_ token' with five). The
 // alternative is publishing the whole credential at that boundary, which is the leak the model
 // exists to stop, and the module already owns this trade on the header path (Batch 67's 'a rule
 // that cannot tell a credential from prose cannot both consume the credential and keep the
-// prose'). No shipped text carries the spelling (the tracked corpus differential over every
-// shipped file is 0), and the word has to reach the rule's own minimum directly after a bare
-// vendor prefix -- an ordinary sentence never does.
+// prose'). The size of the price is measured: over the 5,000-line keyword-pressure prose corpus the
+// tracked corpus differential is 0 and 411 lines carry this price (identical at 3fcf85c), so the
+// class is a sentence that spells a BARE VENDOR PREFIX directly followed by a word at or above the
+// shape's own minimum -- the one spelling the model cannot distinguish, and the direction whose
+// failure is a published credential.
+// THE MARK IS A MEMBER OF THE CLASS THE RULES READ (Batch 101). The class statements that follow
+// name it in every matcher below: a keyword, a prefix, a gap and a value run read it exactly as they
+// read any other member, which is what lets a plainText-normalised text be recognised as the glued
+// view. It is \uE001 (SEPARATOR_MARK, declared with the join helpers below); it stands here as its
+// own escape because the class is built before that declaration, and tests pin the class as a string.
 const SEPARATOR_CHARACTERS = CONTROL_CHARACTERS + AUTH_INLINE_SPACE + AUTH_LINE_TERMINATORS
-  + INVISIBLE_SEPARATOR;
+  + INVISIBLE_SEPARATOR + '\uE001';
 // THE GAP THE TWO GENERIC SCHEME RULES READ is now the whole separator class above. It is a
 // character class, so a caller writes SCHEME_GAP + '*' (or '+').
 export const SCHEME_GAP = '[' + CONTROL_CHARACTERS + AUTH_INLINE_SPACE + AUTH_LINE_TERMINATORS
-  + INVISIBLE_SEPARATOR + ']';
+  + INVISIBLE_SEPARATOR + '\uE001]';
 export const SCHEME_GAP_PATTERN = new RegExp(SCHEME_GAP, 'u');
 // A literal word read THROUGH the class: every character of the literal, with a run of separators
 // allowed between one and the next. The separator is a character no letter can be, so the pattern is
@@ -411,6 +473,74 @@ function separatorRunEnd(text, from) {
   }
   return end === from ? -1 : end;
 }
+// THE SEPARATOR MARK (Batch 101; the FINAL42 pair's root cause, stated once and applied everywhere).
+// Batch 100's model lost the one fact the shape rules need. plainText turns a control byte into a
+// SPACE for publication, and after that a byte that WAS a separator -- which may stand INSIDE a
+// credential -- is indistinguishable from an ordinary word gap, which may not be crossed. So the
+// glue could only cross ONE run and had to require each fragment to be shaped on its own, and that
+// failed in both directions the pair measured: a credential split so that NEITHER fragment passes
+// the shape test (both below the minimum, or the digits all on one side) removed nothing and
+// published whole on the shipped keyless pool, and a credential split by TWO separator runs was
+// never read at all.
+//
+// The fix is to keep the information instead of guessing. When plainText meets a member of the
+// separator class that is NOT an ordinary word gap, it writes this one character in its place: a
+// private-use mark that records "a separator stood here". The shape rules then join fragments
+// across the mark -- and across an invisible separator, which is the same evidence written by the
+// surface itself -- for AS MANY RUNS AS THE SPLIT USES, and NEVER across an ordinary space, which
+// stays the prose guard. The mark is rendered as a space everywhere text is published, is invisible
+// to every other rule (it is not a word character, not whitespace, and not a member of any shape's
+// body class), and cannot come from an input: plainText normalises any incoming U+E001 to a space
+// before it writes one, and the module's own internal marks (U+E000, U+FFFF) remain the only other
+// characters no input may carry. A raw text handed straight to a redaction entry point can still
+// spell one; that can only make a rule cross MORE, never less, so it can never publish a credential.
+//
+// WHAT IS SPLIT EVIDENCE. The class members are not all the same claim. An ordinary word gap -- a
+// space, a tab, a line end -- is exactly what prose writes between two words, so a rule that crossed
+// it could not tell a split credential from a sentence: that is where the prose price F42-3/F42-6
+// measured comes from, and it is why this model crosses it at most once and only when the joined run
+// passes the rule's own test (the bound Batch 100 stated, kept here unchanged for that reason: the
+// suite's own pinned prose rows, 'Bearer token1 is required' and 'authorization: required for this
+// feed', are what dropping the second-fragment test across an ordinary space would reap). Everything
+// else in the class -- a control byte, a default-ignorable, any non-ordinary whitespace spelling --
+// is evidence a surface wrote a split, and prose never spells it, so the join is unbounded there.
+const SEPARATOR_MARK = '\uE001';
+const SEPARATOR_MARK_RE = /\uE001/g;
+// The join's own bound: a credential is short, and a bound that a legitimate split can never reach
+// keeps a hostile text from walking the rest of the document one run at a time.
+const MAX_JOINED_RUNS = 64;
+// The ordinary word gaps: the plain whitespace, every member of which JavaScript's \s matches.
+// Everything else in the one class is split evidence (see the block above).
+// The ORDINARY WORD GAP is the space and the line ends: the characters prose writes between two
+// words, and the only members of the class that cannot tell a split from a sentence. A TAB and the
+// two other C0 whitespace controls are NOT here (Batch 101): a surface that writes a tab inside a
+// credential is not writing the space between two words, prose does not carry one inside a word,
+// and the sweep measured the tab spelling leaking at 10,800 cells. They are split evidence.
+const ORDINARY_WORD_GAP = new Set(['\n', '\r', ' ', '\u0085', '\u2028', '\u2029']);
+// A diagnostic stamp -- the module's own vocabulary, written by every notice and every corpus row --
+// is never a credential fragment across an ordinary word gap (Batch 101; the pair's F42-3). The
+// notice path already exempts an ISO instant from its shape test for the same reason (Batch 79); a
+// bare date is the same vocabulary, and the sweep measured 'Bearer version 2026-10-15 is now
+// available' reaped at the tip where 4266f3a kept it. The exemption is read ONLY where an ordinary
+// word gap is crossed by a value the rule could not match as it stands: split evidence still joins
+// unconditionally, so a stamp is exempt from the prose guard and from nothing else.
+const DIAGNOSTIC_DATE_RE = /^\d{4}-\d{2}-\d{2}$/;
+const isDiagnosticStamp = (run) => DIAGNOSTIC_DATE_RE.test(String(run)) || DIAGNOSTIC_INSTANT_RE.test(String(run));
+const isOrdinaryWordGap = (ch) => ch !== undefined && ORDINARY_WORD_GAP.has(ch);
+// A separator-class character that is split evidence, or the mark itself (which stands for one).
+const isSplitEvidence = (ch) => ch === SEPARATOR_MARK
+  || (ch !== undefined && isSeparatorChar(ch) && !isOrdinaryWordGap(ch));
+// Whether a separator RUN carries split evidence anywhere in it: a ' \0 ' run does, a ' ' run does not.
+function separatorRunIsEvidence(run) {
+  for (const ch of String(run)) if (isSplitEvidence(ch)) return true;
+  return false;
+}
+// THE PUBLISHED VIEW OF THE MARK: a space, everywhere text is published. The mark never reaches a
+// published byte (the two redaction entry points and the notice assembly render it last), and the
+// two internal characters cannot reach one either (withoutSentinel).
+export function renderSeparatorMarks(text) {
+  return String(text ?? '').replace(SEPARATOR_MARK_RE, ' ');
+}
 // THE GLUED VALUE RUN, mapped back (Batch 100). 'from' is where the value run starts in the SPACED
 // text and 'runEnd' is where its first maximal run stops. Returns the SPACED end index of the span
 // to remove when the first run does NOT satisfy the rule, the run after ONE separator run DOES, and
@@ -418,17 +548,45 @@ function separatorRunEnd(text, from) {
 // Returns null in every other case, which includes the case the prose guard needs: an already
 // acceptable run is complete and is never extended (tests/glued-value-run-property.test.mjs
 // asserts that bound with a token followed by prose).
+// THE JOIN ITSELF (Batch 101; the FINAL42 pair's F42-1 and F42-2). 'from' is where the first value
+// run starts, 'runEnd' where it stops. The first run must FAIL the rule's own test -- a run that
+// already satisfies it is complete and is never extended, which is the prose guard's spine -- and
+// the join then walks the runs after it:
+//   - across a separator run that CARRIES SPLIT EVIDENCE (the mark, an invisible separator, a
+//     non-ordinary whitespace spelling) the join is UNBOUNDED in the number of runs, and the
+//     fragment after it need not be shaped on its own: the joined text is what the rule tests. That
+//     is the pair's F42-1 (neither fragment shaped on its own) and F42-2 (two or more runs) closed
+//     with one clause, on the evidence the mark preserves.
+//   - across an ORDINARY word gap (a space, a tab, a line end) the join crosses AT MOST ONCE, only
+//     while no split evidence has been seen, and only when the fragment after it passes
+//     'acceptsSecond' -- the bound Batch 100 stated, kept exactly: an ordinary sentence cannot pull
+//     the prose after it into a removal ('Bearer token1 is required' is pinned by the suite and is
+//     the row that would move if this test were dropped). Once the split is established by evidence,
+//     a later ordinary gap is crossed too: the credential's own split is already proved, and no
+//     prose sentence carries a control byte or an invisible separator inside it.
+// Returns the SPACED end index of the span to remove, or null.
 function gluedContinuation(text, from, runEnd, isRunChar, accepts, acceptsSecond = accepts) {
-  if (accepts(text.slice(from, runEnd))) return null;
-  const afterSeparator = separatorRunEnd(text, runEnd);
-  if (afterSeparator === -1) return null;
-  const secondEnd = valueRunEnd(text, afterSeparator, isRunChar);
-  if (secondEnd === afterSeparator) return null;
   const first = text.slice(from, runEnd);
-  const second = text.slice(afterSeparator, secondEnd);
-  if (!acceptsSecond(second)) return null;
-  if (!accepts(first + second)) return null;
-  return secondEnd;
+  if (accepts(first)) return null;
+  let joined = first;
+  let pos = runEnd;
+  let evidenceSeen = false;
+  for (let runs = 0; runs < MAX_JOINED_RUNS; runs += 1) {
+    const afterSeparator = separatorRunEnd(text, pos);
+    if (afterSeparator === -1) return null;
+    const evidence = separatorRunIsEvidence(text.slice(pos, afterSeparator));
+    if (!evidence && evidenceSeen === false && runs > 0) return null;
+    const nextEnd = valueRunEnd(text, afterSeparator, isRunChar);
+    if (nextEnd === afterSeparator) return null;
+    const next = text.slice(afterSeparator, nextEnd);
+    if (!evidence && !evidenceSeen && !acceptsSecond(next)) return null;
+    joined += next;
+    if (accepts(joined)) return nextEnd;
+    if (!evidence && !evidenceSeen) return null;
+    evidenceSeen = evidenceSeen || evidence;
+    pos = nextEnd;
+  }
+  return null;
 }
 // A word boundary in the published text, for a shape whose pattern ended with '\b': the character
 // after the span is not a word character (the end of the text is a boundary).
@@ -817,22 +975,42 @@ function authorizationValueLineEndsAt(source, end) {
 // the shape test (so a complete credential-shaped atom is never extended), and the second atom has
 // to pass it on its own (so 'required' + line end + '7 days' can never be read as one value).
 function gluedAuthorizationValue(source, from, runEnd) {
-  const afterSeparator = separatorRunEnd(source, runEnd);
-  if (afterSeparator === -1) return -1;
-  AUTH_ATOM_AT_STICKY.lastIndex = afterSeparator;
-  const next = AUTH_ATOM_AT_STICKY.exec(source);
-  if (next === null) return -1;
-  const secondEnd = afterSeparator + next[0].length;
+  // THE JOIN (Batch 101; F42-1/F42-2 at the authorization family). Across SPLIT EVIDENCE -- the
+  // separator mark, an invisible separator, a non-ordinary whitespace spelling -- the atoms are
+  // joined for as many runs as the split uses and the joined value is what the shape test reads, so
+  // a token whose fragments are each too short (or carry the digits on one side) is one credential.
+  // Across an ORDINARY word gap the bound is Batch 100's, unchanged, and it is the prose guard: one
+  // run, the atom after it must pass the value's own grammar and shape test on its own, and the two
+  // joined must pass. The URL seam and the transport seam are still refused before any join.
   const first = source.slice(from, runEnd);
-  const second = next[0];
-  // The value's own grammar and refusals decide before the glue is taken: a prose word is not a
-  // continuation, and the URL seam / the transport seam are the assembly's own diagnosis, never a
-  // credential fragment (the same two refusals the whitespace-gap reading applies). Without this a
-  // 'see https://a.example/v2' value became a header value and the whole line was consumed.
-  if (!authorizationAtomContinuesValue(second)) return -1;
-  if (!authorizationAtomIsShaped(second)) return -1;
-  if (!authorizationAtomIsShaped(first + second)) return -1;
-  return secondEnd;
+  let joined = first;
+  let pos = runEnd;
+  let evidenceSeen = false;
+  for (let runs = 0; runs < MAX_JOINED_RUNS; runs += 1) {
+    const afterSeparator = separatorRunEnd(source, pos);
+    if (afterSeparator === -1) return -1;
+    const evidence = separatorRunIsEvidence(source.slice(pos, afterSeparator));
+    AUTH_ATOM_AT_STICKY.lastIndex = afterSeparator;
+    const next = AUTH_ATOM_AT_STICKY.exec(source);
+    if (next === null) return -1;
+    const secondEnd = afterSeparator + next[0].length;
+    const second = next[0];
+    // THE ORDINARY WORD GAP keeps Batch 100's bound whole: one crossing, the atom after it must pass
+    // the value's own grammar and shape test on its own, and a diagnostic stamp is not joined
+    // (F42-3). Split evidence carries none of these tests -- the joined value is what the rule reads.
+    if (!evidence) {
+      if (evidenceSeen || runs > 0) return -1;
+      if (!authorizationAtomContinuesValue(second)) return -1;
+      if (isDiagnosticStamp(second)) return -1;
+      if (!authorizationAtomIsShaped(second)) return -1;
+    }
+    joined += second;
+    if (authorizationAtomIsShaped(joined)) return secondEnd;
+    if (!evidence && !evidenceSeen) return -1;
+    evidenceSeen = evidenceSeen || evidence;
+    pos = secondEnd;
+  }
+  return -1;
 }
 
 function readAuthorizationValue(source, at) {
@@ -1308,20 +1486,55 @@ const isBasicRunChar = (ch) => ch !== undefined && /[A-Za-z0-9+/=]/.test(ch);
 // word after a complete payload survives (the one-run bound stated at the class statement).
 function gluedBasicTokenEnd(raw, absoluteStart) {
   // The quoted spelling is read whole or not at all (see decodedBasicToken): a quote cannot stand
-  // inside a run, so the glue is not taken for it.
-  if (raw.startsWith('"') || raw.startsWith("'")) return -1;
-  const firstEnd = valueRunEnd(raw, 0, isBasicRunChar);
-  const secondStart = separatorRunEnd(raw, firstEnd);
-  if (secondStart === -1) return -1;
-  const secondEnd = valueRunEnd(raw, secondStart, isBasicRunChar);
-  if (secondEnd === secondStart) return -1;
-  const joined = raw.slice(0, firstEnd) + raw.slice(secondStart, secondEnd);
-  const token = decodedBasicToken(joined);
-  if (token === null) return -1;
-  if (token.length <= firstEnd) return absoluteStart + token.length;
-  const intoSecond = token.length - firstEnd;
-  if (intoSecond > secondEnd - secondStart) return -1;
-  return absoluteStart + secondStart + intoSecond;
+  // inside a run. The quoted spelling IS read across the class now (Batch 101): a quoted payload
+  // split inside its base64 published the whole quoted credential on the shipped keyless pool
+  // (F42-2's neighbouring position), so the quote is peeled here, the payload is joined across the
+  // evidence as any other run is, and the closing quote is required where the published text has it.
+  const quote = raw.startsWith('"') || raw.startsWith("'") ? raw[0] : '';
+  const body = quote === '' ? raw : raw.slice(1);
+  // THE JOIN (Batch 101; F42-1/F42-2 at Basic): the runs are joined across split evidence for as
+  // many runs as the split uses, and across an ordinary word gap at most once (the bound Batch 100
+  // stated). The rule's own decode test decides, on the JOINED text, so a payload split into two
+  // fragments that each decode to nothing is still one credential.
+  const positions = [];
+  let joined = '';
+  let pos = 0;
+  let end = valueRunEnd(body, pos, isBasicRunChar);
+  joined = body.slice(0, end);
+  for (let i = 0; i < joined.length; i += 1) positions.push(i);
+  let evidenceSeen = false;
+  for (let runs = 0; runs < MAX_JOINED_RUNS; runs += 1) {
+    const afterSeparator = separatorRunEnd(body, end);
+    if (afterSeparator === -1) break;
+    const evidence = separatorRunIsEvidence(body.slice(end, afterSeparator));
+    if (!evidence && !evidenceSeen && runs > 0) break;
+    const nextEnd = valueRunEnd(body, afterSeparator, isBasicRunChar);
+    if (nextEnd === afterSeparator) break;
+    joined += body.slice(afterSeparator, nextEnd);
+    for (let i = afterSeparator; i < nextEnd; i += 1) positions.push(i);
+    // The rule's own acceptance, read on the recognition view. A quoted payload's closing quote must
+    // stand where the published text has it, exactly as the separated view requires.
+    if (quote !== '') {
+      // The quoted spelling: the token is the payload, and the span the published text carries is
+      // the payload plus the closing quote that stands right after it.
+      if (quotedPayloadToken(joined, body, nextEnd, quote) !== null) {
+        return absoluteStart + nextEnd + 1;
+      }
+    } else {
+      const token = decodedBasicToken(joined);
+      if (token !== null) return absoluteStart + positions[token.length - 1] + 1;
+    }
+    if (!evidence && !evidenceSeen) return -1;
+    evidenceSeen = evidenceSeen || evidence;
+    end = nextEnd;
+  }
+  return -1;
+}
+// The quoted payload's token, when the closing quote stands at the end of the run just joined: the
+// joined text is the recognition view, and the quote the published text carries is the one at 'end'.
+function quotedPayloadToken(joined, body, end, quote) {
+  if (body[end] !== quote) return null;
+  return decodedBasicToken(quote + joined + quote);
 }
 
 function redactBasicCredentials(text) {
@@ -1587,6 +1800,9 @@ function boundedValue(value) {
 // points -- including the notice path, which removes before it spaces and therefore could not read a
 // control byte through \s (the F40-3 shape). The by-value half has the value, so this is the one
 // place the value's own characters may be read through a separator without reaping prose.
+// The MARK is inside the class now (Batch 101), which is what this pattern needs: the candidate
+// path's plainText has replaced a non-ordinary separator with it, so a value echoed with a control
+// byte inside it is still read across the byte the pass wrote.
 const VALUE_GAP = SEPARATOR_CHARACTERS;
 function looseValue(value) {
   const pattern = [...String(value)]
@@ -1650,7 +1866,9 @@ function withoutSentinel(value) {
 // (verification F28-4). A private-use character is invisible in a pool field, and no field of a
 // published pool may carry one.
 export function normalizeInternalChars(text) {
-  return withoutSentinel(text);
+  // The separator mark is internal too (Batch 101): a text that carries one publishes the space it
+  // stood in for, so any publication path that is not the redaction renders it as the redaction does.
+  return renderSeparatorMarks(withoutSentinel(text));
 }
 
 // The marker's own shape, read as a span: a marker an earlier pass wrote is the one region this
@@ -1761,7 +1979,9 @@ export function redactSecrets(text, secrets) {
   // that stands where a scaffold's wildcard stands is inside a span and is therefore restored too,
   // which is why the by-value removal below still runs on the SCANNED text and the span text is
   // never re-scanned.
-  const scaffold = protectScaffold(maskStripped(withoutSentinel(text)));
+  // The separator-class ENTITY SPELLING is read before any rule runs (Batch 101; F42-5), on BOTH
+  // entry points: an entity that names a member of the one class is the separator it names.
+  const scaffold = protectScaffold(maskStripped(withoutSentinel(decodeSeparatorEntities(text))));
   let out = protectMarkers(removeMarkerBearingValues(scaffold.text, sorted));
   // One removal can expose another: the credential shapes read the word boundary before them, and
   // a removal beside one changes that boundary ('XabcdefghBasic dXNlcjpw' has no boundary before
@@ -1808,7 +2028,10 @@ export function redactSecrets(text, secrets) {
   // text the marker replacement no longer has a chance to see, while the placeholder the restore
   // was looking for is already a marker.
   const restored = scaffold.restore === null ? out : scaffold.restore(out);
-  return restored.replace(REDACTION_SENTINEL_RE, REDACTED_MARKER);
+  // The mark is rendered as the space it stood in for on the way out (Batch 101): no published byte
+  // carries the internal mark, and the published text is exactly the spaced view with the
+  // recognised spans removed.
+  return renderSeparatorMarks(restored.replace(REDACTION_SENTINEL_RE, REDACTED_MARKER));
 }
 
 // THE ONE GENERIC BEARER RULE (Batch 61). It is bounded to a credential-shaped value on BOTH
@@ -1848,7 +2071,7 @@ function redactBearerValues(text) {
       // The fragment before the split is below the rule's own shape test: read the run in the
       // GLUED view, across one separator run, and remove the mapped span whole (F41-1).
       const glued = gluedContinuation(source, tokenStart, runEnd, isBearerTokenChar,
-        credentialShapedToken);
+        credentialShapedToken, (run) => credentialShapedToken(run) && !isDiagnosticStamp(run));
       if (glued !== null) removeEnd = glued;
     }
     if (removeEnd === -1) continue;
@@ -1932,7 +2155,9 @@ function redactShapeRules(input) {
 // The two internal characters are normalised exactly as before (withoutSentinel inside
 // protectScaffold), which is the half F28-4 closed and this change must not reopen.
 export function redactCredentialShapes(text) {
-  const scaffold = protectScaffold(maskStripped(withoutSentinel(text)));
+  // The same entity reading redactSecrets runs (Batch 101; F42-5): the two entry points read one
+  // class, and an entity spelling of a separator is that separator on both.
+  const scaffold = protectScaffold(maskStripped(withoutSentinel(decodeSeparatorEntities(text))));
   let out = protectMarkers(scaffold.text);
   const applyShapes = (input) => {
     // The same shape pipeline redactSecrets runs, in the same order and with the same acceptance
@@ -1948,7 +2173,7 @@ export function redactCredentialShapes(text) {
     out = next;
   }
   const restored = scaffold.restore === null ? out : scaffold.restore(out);
-  return restored.replace(REDACTION_SENTINEL_RE, REDACTED_MARKER);
+  return renderSeparatorMarks(restored.replace(REDACTION_SENTINEL_RE, REDACTED_MARKER));
 }
 
 // Pure and offline-testable: it splits the status line off the captured bytes and
@@ -2478,7 +2703,20 @@ export function decodeBuffer(buf) {
   return new TextDecoder('utf-8').decode(buf);
 }
 
-const NAMED = { amp: '&', lt: '<', gt: '>', quot: '"', apos: "'", nbsp: ' ' };
+// THE NAMED REFERENCES THAT NAME A SEPARATOR (Batch 101; the FINAL42 pair's F42-5). A reader of the
+// published text decodes these exactly as it decodes '&amp;', so a credential split by one renders
+// intact in a Markdown view while the model saw only the letters of the reference. They are decoded
+// here -- by the same table the numeric references already crossed -- into the character each names,
+// and the redaction normalises that character like any other separator. The table is lower-cased by
+// the reader below, so the HTML spelling's own case ('&ZeroWidthSpace;', '&ThinSpace;') resolves too.
+const NAMED = {
+  amp: '&', lt: '<', gt: '>', quot: '"', apos: "'", nbsp: ' ',
+  shy: '\u00ad', zwnj: '\u200c', zwj: '\u200d', lrm: '\u200e', rlm: '\u200f',
+  zerowidthspace: '\u200b', nobreak: '\u2060', invisibletimes: '\u2062',
+  invisiblecomma: '\u2063', invisibleseparator: '\u2063', ensp: '\u2002', emsp: '\u2003',
+  thinsp: '\u2009', thinspace: '\u2009', hairsp: '\u200a', numsp: '\u2007', puncsp: '\u2008',
+  mediumspace: '\u205f', nonbreakingspace: '\u00a0', tab: '\t', newline: '\n',
+};
 
 // A numeric character reference may name a code point that does not exist
 // (above 0x10FFFF) or that is not a Unicode scalar value (a surrogate). Feed
@@ -2497,6 +2735,49 @@ export function decodeEntities(s) {
     .replace(/&([a-z]+);/gi, (m, n) => NAMED[n.toLowerCase()] ?? m);
 }
 
+// THE SEPARATOR-CLASS ENTITY SPELLING, READ AS THE SEPARATOR IT NAMES (Batch 101; F42-5). The
+// candidate path decodes numeric references in plainText and the notice path decoded nothing, so an
+// entity-spelled separator was read as a separator by one surface and by no rule on the other. This
+// decodes ONLY references that resolve to a member of the one separator class -- '&amp;' and every
+// other ordinary reference is left exactly as it stands, which is what keeps a notice with no
+// separator in it byte-identical -- and a reference that resolves to a CONTROL byte becomes the
+// mark rather than the byte, so an entity can never put a control back into a published text.
+// A non-ordinary separator resolves to itself: it is split evidence the rules already read, and the
+// published text keeps it as the surface wrote it (the spaced view).
+const ENTITY_REFERENCE = /&(?:#x([0-9a-f]+);|#(\d+);|([a-z][a-z0-9]*);)/gi;
+function resolvedReference(hex, dec, name) {
+  if (hex !== undefined) return charOrReplacement(parseInt(hex, 16));
+  if (dec !== undefined) return charOrReplacement(Number(dec));
+  return NAMED[String(name).toLowerCase()] ?? null;
+}
+export function decodeSeparatorEntities(s) {
+  return String(s).replace(ENTITY_REFERENCE, (match, hex, dec, name) => {
+    const ch = resolvedReference(hex, dec, name);
+    if (ch === null || ch === undefined) return match;
+    if (!SCHEME_GAP_PATTERN.test(ch)) return match;
+    // A reference that names ANY member of the class -- an invisible separator, a whitespace
+    // spelling, or the ordinary space itself -- is the surface SPELLING a separator, and a surface
+    // that spells one inside a credential is writing a split, not prose. It resolves to the mark.
+    // A character that arrives literally keeps its own evidence: an invisible separator stands as
+    // itself, and a plain space stays the word gap it is.
+    return SEPARATOR_MARK;
+  });
+}
+// THE ONE NORMALISER FOR THE CLASS (Batch 101). Every member that is not an ordinary word gap
+// becomes the mark, an incoming mark is normalised to a space first (so no input can forge one), and
+// a control byte that IS an ordinary word gap becomes the space it is. Both normalisers call it --
+// plainText for a candidate field and neutraliseNoticeText for a notice -- so the two passes record
+// the same evidence at every byte, which is the rule the control property test drives.
+export function markSeparators(text) {
+  // IDEMPOTENT BY CONSTRUCTION: a mark the text already carries is left where it is, so a text this
+  // function has normalised once is a fixed point of it (the notice normalisation is applied twice
+  // by contract, and its own fixed point is pinned). Un-forgeability belongs to the boundary where
+  // upstream bytes enter -- plainText normalises an incoming mark to a space before it writes one --
+  // and everywhere else a mark an input spells can only make a rule cross MORE, never less.
+  return String(text)
+    .replace(CONTROLS, (ch) => (isOrdinaryWordGap(ch) ? ' ' : SEPARATOR_MARK))
+    .replace(SPECIAL_WHITESPACE, SEPARATOR_MARK);
+}
 function stripCdata(s) {
   return s.replace(/^\s*<!\[CDATA\[/, '').replace(/\]\]>\s*$/, '');
 }
@@ -2855,11 +3136,20 @@ export function plainText(raw, limit) {
   // is also the only direction that can remove: a space can never publish a credential its own
   // line end would have removed, and this pass already collapses every whitespace run to one
   // space, so the answer at every one of these bytes is LF's own answer.
+  // THE INFORMATION IS KEPT NOW (Batch 101): a control byte that is not an ordinary word gap, and a
+  // non-ordinary whitespace spelling, become the SEPARATOR MARK rather than a space, so the shape
+  // rules can tell a split from a word gap. The published byte is unchanged -- the mark renders as a
+  // space at every redaction entry point -- and an incoming mark is normalised to a space here first,
+  // so no input can forge one. The run collapse below keeps a single mark for a run that carried one,
+  // which is the same collapsing the whitespace run always got.
   const text = neutraliseMarkers(
-    decodeEntities(neutraliseEntityTags(String(raw)).replace(/<[^>]*>/g, ' '))
-      .replace(CONTROLS, ' '),
+    markSeparators(decodeEntities(
+      decodeSeparatorEntities(neutraliseEntityTags(String(raw).replace(SEPARATOR_MARK_RE, ' ')))
+        .replace(/<[^>]*>/g, ' '),
+    )),
   )
-    .replace(/\s+/g, ' ').trim();
+    .replace(/[\s\uE001]+/g, (run) => (run.includes(SEPARATOR_MARK) ? SEPARATOR_MARK : ' '))
+    .replace(/^[\s\uE001]+|[\s\uE001]+$/g, '');
   return text.length > bound ? text.slice(0, bound) : text;
 }
 

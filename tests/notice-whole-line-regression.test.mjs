@@ -15,7 +15,7 @@ import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { assembleNotice, collectAll, neutraliseNoticeText } from '../scripts/collect.mjs';
-import { redactSecrets, requestSecrets, shapeTransportError } from '../scripts/lib/net.mjs';
+import { redactSecrets, requestSecrets, shapeTransportError, renderSeparatorMarks } from '../scripts/lib/net.mjs';
 import { readSettings } from '../scripts/lib/mdtable.mjs';
 
 const CONFIG_DIR = fileURLToPath(new URL('../config/', import.meta.url));
@@ -320,9 +320,13 @@ test('F27-5 residual: the assembly\u2019s own reason survives a value that spell
 // before Batch 91.
 test('a control byte is a separator in notice text: it is spaced, never dropped', () => {
   const NEL = '\u0085';
-  assert.equal(neutraliseNoticeText('a' + NEL + 'b'), 'a b',
+  // Batch 101: the notice control pass RECORDS the separator it meets as net.mjs's separator mark,
+  // and the mark is rendered as a space where the notice is published. The published byte this row
+  // pins is read through that view; assembleNotice below is the published form itself.
+  const published = (text) => renderSeparatorMarks(neutraliseNoticeText(text));
+  assert.equal(published('a' + NEL + 'b'), 'a b',
     'a NEL is a line end and becomes a space, not nothing');
-  assert.equal(neutraliseNoticeText('a' + '\n' + 'b'), neutraliseNoticeText('a' + NEL + 'b'),
+  assert.equal(published('a' + '\n' + 'b'), published('a' + NEL + 'b'),
     'a NEL answers exactly as LF does');
   // Every control byte, not the NEL alone: the notice pass reads the same named class plainText
   // does (net.mjs CONTROL_CHARACTERS), so the assembled notice and the candidate field cannot
@@ -330,7 +334,7 @@ test('a control byte is a separator in notice text: it is spaced, never dropped'
   for (let cp = 0x00; cp <= 0x9f; cp += 1) {
     if (cp >= 0x20 && cp <= 0x7e) continue; // printable: not this class
     const ch = String.fromCharCode(cp);
-    assert.equal(neutraliseNoticeText('a' + ch + 'b'), neutraliseNoticeText('a\nb'),
+    assert.equal(published('a' + ch + 'b'), published('a\nb'),
       'a control byte at U+' + cp.toString(16).padStart(4, '0') + ' is not spaced as LF is');
   }
   for (const cap of [128, 402, 1000]) {

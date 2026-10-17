@@ -97,7 +97,9 @@ test('the separator class is pinned: the gap and the interior are ONE set, and i
   // string is pinned so a later batch cannot narrow it back to a list of characters.
   assert.equal(SCHEME_GAP,
     '[' + CONTROL_CHARACTERS + '\t\v\f \u00a0\u1680\u2000-\u200a\u202f\u205f\u3000\ufeff'
-      + '\\r\\n\\u2028\\u2029\\u0085' + INVISIBLE_SEPARATOR + ']',
+      // U+E001 is the SEPARATOR MARK Batch 101 added (net.mjs SEPARATOR_MARK): the character
+      // plainText writes where a separator that was not an ordinary word gap stood.
+      + '\\r\\n\\u2028\\u2029\\u0085' + INVISIBLE_SEPARATOR + '\uE001]',
     'the separator class moved; this file pins the set every position below is measured over');
   assert.equal(CONTROL_CHARACTERS, '\u0000-\u001f\u007f-\u009f',
     'the named control class moved; this file pins the range it asserts over');

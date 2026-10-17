@@ -6,7 +6,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
-import { decodeBuffer, decodeEntities, field, atomLink, splitItems, neutraliseMarkers, neutraliseLinkSeams, plainText, isDiscoveryOnly, hostOf, shapeHttpError, shapeTransportError, splitCurlOutput, redactUrl, fetchText, neutraliseUrl, requestSecrets, redactSecrets, neutraliseEntityTags } from '../scripts/lib/net.mjs';
+import { decodeBuffer, decodeEntities, field, atomLink, splitItems, neutraliseMarkers, neutraliseLinkSeams, plainText, isDiscoveryOnly, hostOf, shapeHttpError, shapeTransportError, splitCurlOutput, redactUrl, fetchText, neutraliseUrl, requestSecrets, redactSecrets, neutraliseEntityTags, renderSeparatorMarks } from '../scripts/lib/net.mjs';
 import { curlAvailable } from './lib/commands.mjs';
 
 test('decodeBuffer passes UTF-8 through', () => {
@@ -71,7 +71,10 @@ test('plainText strips tags and bounds the result', () => {
 // value. The printable text around each control is still there and the words stay separate.
 test('plainText drops no control code point into the published text, and spaces where it stood', () => {
   const hostile = 'a\u001b[2Kb\u0000c\u0008d\u007f e\u009ff';
-  const out = plainText(hostile, 200);
+  // Batch 101: plainText RECORDS the separator (net.mjs SEPARATOR_MARK) rather than losing it, and
+  // the mark is rendered as a space where the text is published. The published byte this row pins is
+  // read through that view; the recording is what the property file drives.
+  const out = renderSeparatorMarks(plainText(hostile, 200));
   const offenders = [...out].filter((ch) => {
     const cp = ch.codePointAt(0);
     return cp < 0x20 || (cp >= 0x7f && cp <= 0x9f);
@@ -106,9 +109,11 @@ test('plainText spaces a NEL exactly as it spaces LF, so a keyword keeps its dis
 // as intended behaviour; the drop was the defect (see the row above and the property test in
 // tests/control-separator-property.test.mjs).
 test('plainText spaces every other C1 control beside the NEL it also spaces', () => {
-  const out = plainText('a\u009b' + 'b' + String.fromCharCode(0x85) + 'c\u009fd', 200);
+  // Batch 101: the published view of the same text -- a non-ordinary control is recorded as the
+  // separator mark and rendered as the space LF gets, so the published byte is unchanged.
+  const out = renderSeparatorMarks(plainText('a\u009b' + 'b' + String.fromCharCode(0x85) + 'c\u009fd', 200));
   assert.equal(out, 'a b c d', 'a C1 control still glued the words it stood between: ' + JSON.stringify(out));
-  assert.equal(out, plainText('a\n' + 'b' + String.fromCharCode(10) + 'c\nd', 200),
+  assert.equal(out, renderSeparatorMarks(plainText('a\n' + 'b' + String.fromCharCode(10) + 'c\nd', 200)),
     'a C1 control does not answer as LF does');
 });
 

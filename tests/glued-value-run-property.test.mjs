@@ -124,7 +124,10 @@ test('anti-vacuity: the class, the detector and the LF reference are not empty',
   // The class this file measures is the module's own class, pinned as a string.
   assert.equal(SCHEME_GAP,
     '[' + CONTROL_CHARACTERS + '\t\v\f \u00a0\u1680\u2000-\u200a\u202f\u205f\u3000\ufeff'
-      + '\\r\\n\\u2028\\u2029\\u0085' + INVISIBLE_SEPARATOR + ']',
+      // U+E001 is the SEPARATOR MARK Batch 101 added (net.mjs SEPARATOR_MARK): the one character
+      // plainText writes where a separator that was not an ordinary word gap stood, so the rules can
+      // tell a split from a word gap. It is a member of the class the rules read, by design.
+      + '\\r\\n\\u2028\\u2029\\u0085' + INVISIBLE_SEPARATOR + '\uE001]',
     'the separator class moved; this file pins the set every row below is measured over');
   assert.equal(SEPARATORS.length, 100, 'the separator range changed size: ' + SEPARATORS.length);
   for (const [label, ch] of SEPARATORS) {
