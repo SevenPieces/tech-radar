@@ -11,6 +11,7 @@ import { dirname, isAbsolute, resolve } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { readDomains, readSettings, shortCap } from './lib/mdtable.mjs';
 import { externalAssets } from './lib/assets.mjs';
+import { INVISIBLE_SEPARATOR } from './lib/net.mjs';
 
 // The configuration ships with the skill, so the default is the config directory
 // beside this script, spelled exactly as collect.mjs spells it: the documented
@@ -89,8 +90,16 @@ function normalizeNewlines(md) {
 // variation selector beside an emoji keeps the emoji and gets the space in the selector's place; no
 // shipped example carries one, and the shipped example still renders byte-identically.
 const INTERNAL_DIGEST_CHARS = /[\u0001-\u0008\u000B\u000C\u000E-\u001F\u007F-\u009F\u00AD\u061C\u180E\u200B-\u200F\u202A-\u202E\u2028\u2029\u2060-\u2064\u2066-\u206F\u3164\uFE00-\uFE0F\uFEFF\uFFF0-\uFFF8\uE000\uE001\uFFFF\u{E0000}-\u{E007F}\u{E0100}-\u{E01EF}]/gu;
+// THE CLASS IS THE MODULE'S CLASS, NOT A HAND LIST (Batch 107). The list above is written by hand and
+// is not the class the module normalises: the Default_Ignorable members it omits -- U+034F, U+115F,
+// U+1160, U+17B4..U+17B5, U+180B..U+180D, U+1BCA0..U+1BCA3, U+1D173..U+1D17A, U+2065 and U+FFA0 --
+// were copied into the .html while the quality gate answered PASS, which is the sentence above ('the
+// deliverable cannot carry a character no reader can see') being false at 22 assigned members. The
+// property below is the module's own (INVISIBLE_SEPARATOR, \p{Default_Ignorable_Code_Point}), the
+// one every shape rule reads, so the class is closed whole instead of one character at a time.
+const INVISIBLE_DIGEST_CHARS = new RegExp(INVISIBLE_SEPARATOR, 'gu');
 function stripInternalChars(md) {
-  return String(md ?? '').replace(INTERNAL_DIGEST_CHARS, ' ');
+  return String(md ?? '').replace(INTERNAL_DIGEST_CHARS, ' ').replace(INVISIBLE_DIGEST_CHARS, ' ');
 }
 
 const CSS = [

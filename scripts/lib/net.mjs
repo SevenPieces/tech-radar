@@ -328,8 +328,11 @@ export const INVISIBLE_SEPARATOR_PATTERN = /\p{Default_Ignorable_Code_Point}/u;
 // spell one, which can only make a rule cross MORE, never less). A separator that arrives as the
 // character itself needs no mark: the class already carries its evidence.
 //
-// THE JOIN. A value run that ALREADY satisfies the rule is complete and is never extended -- the
-// prose guard's spine. A run that does not is joined forwards:
+// THE JOIN. A value run that ALREADY satisfies the rule is the join's INITIAL BEST, not its end (the
+// walk is entered unconditionally): the runs after it are still read, the longest accepted value wins
+// across split evidence, and the walk STOPS at an ordinary word gap -- a value the rule accepted is
+// never extended across the gap, which is the prose guard's spine. A run that does not satisfy the
+// rule is joined forwards:
 //   - ACROSS SPLIT EVIDENCE (the mark, an invisible separator, a non-ordinary whitespace spelling)
 //     the join crosses for as many runs as the split uses within the join's own bound (the Basic
 //     join derives it from the text, Batch 104; the other two keep 64) and the fragments after the
@@ -584,12 +587,15 @@ export function renderSeparatorMarks(text) {
 // to remove when the first run does NOT satisfy the rule, the run after ONE separator run DOES, and
 // the two runs joined -- the recognition view, with the separator run deleted -- satisfy it too.
 // Returns null in every other case, which includes the case the prose guard needs: an already
-// acceptable run is complete and is never extended (tests/glued-value-run-property.test.mjs
+// acceptable run is never extended ACROSS AN ORDINARY WORD GAP (tests/glued-value-run-property.test.mjs
 // asserts that bound with a token followed by prose).
-// THE JOIN ITSELF (Batch 101; the FINAL42 pair's F42-1 and F42-2). 'from' is where the first value
-// run starts, 'runEnd' where it stops. The first run must FAIL the rule's own test -- a run that
-// already satisfies it is complete and is never extended, which is the prose guard's spine -- and
-// the join then walks the runs after it:
+// THE JOIN ITSELF (Batch 101; the FINAL42 pair's F42-1 and F42-2; the entry condition corrected in
+// Batch 106 and stated here). 'from' is where the first value run starts, 'runEnd' where it stops.
+// The first run's OWN acceptance is the walk's initial best, not a reason to stop reading: the join
+// walks the runs after it, so a value split after the rule's own minimum no longer leaves its tail
+// published. What ends the walk is the SEPARATOR'S CLASS: split evidence is crossed for as many runs
+// as the split uses, and an ordinary word gap never extends a value the rule already accepted (the
+// prose guard's spine):
 //   - across a separator run that CARRIES SPLIT EVIDENCE (the mark, an invisible separator, a
 //     non-ordinary whitespace spelling) the join crosses for as many runs as the split uses within
 //     the join's own bound, and the fragment after it need not be shaped on its own: the joined text
@@ -1535,10 +1541,22 @@ function decodedBasicToken(text) {
     // around the colon. 'Basic auth', 'Basic authentication' and every other ordinary word decode
     // to text that carries no colon and are left alone.
     if (!/^[\x20-\x7e]+$/.test(decoded) || !/^[^:=]+:[^:=]+$/.test(decoded)) continue;
-    // A quoted run only counts as the token when its closing quote stands right after the
-    // candidate: anything else is a longer run whose tail happens to be inside the quotes.
-    if (quote !== '' && raw[1 + length] !== quote) continue;
-    return quote === '' ? candidate : quote + candidate + quote;
+    if (quote === '') return candidate;
+    // A quoted run whose closing quote stands right after the candidate is the CLOSED spelling and
+    // its span carries both quotes. The quote can stand at no other position, because the run is the
+    // maximal base64 run and a quote is not a base64 character -- so this is the whole closed check.
+    if (raw[1 + length] === quote) return quote + candidate + quote;
+    // THE UNCLOSED QUOTED SPELLING (Batch 107). A quoted spelling whose closing quote is absent was
+    // read by NEITHER view: the closed
+    // check above refused every candidate and the walk's quoted branch required the quote too, so the
+    // WHOLE credential published -- 'release: Basic "<base64> and prose' reached the candidate field,
+    // the notice, the assembly at every cap and the real keyless pool's fields, decoded to
+    // 'user:password'. The module's own sentence for the sibling authorization reader (AUTH_ATOM)
+    // says leaving an unterminated quote where it stands publishes the credential; the Basic reader
+    // takes that reading now: the payload after the opening quote is read at the same lengths the
+    // closed spelling reads, and the span carries the opening quote and the payload, so no orphan
+    // quote is published in its place.
+    return quote + candidate;
   }
   return null;
 }
@@ -1554,8 +1572,9 @@ const isBasicRunChar = (ch) => ch !== undefined && /[A-Za-z0-9+/=]/.test(ch);
 // (the separator run deleted), the rule's own decode test decides, and the removal maps back to the
 // spaced text: the span runs from the first base64 character to the last one the decode accepted,
 // across the separator run. Returns the SPACED end index, or -1 when no token is recognised. A
-// token the separated view already accepted is never extended: the caller reads it first, and the
-// word after a complete payload survives (the one-run bound stated at the class statement).
+// token the separated view already accepted is the walk's INITIAL best now, not its end (Batch 106):
+// the runs after it are still read across split evidence, and the word after a complete payload
+// survives because the walk stops at an ordinary word gap (the prose guard).
 // THE BASE64 PREFIX, READ INCREMENTALLY (Batch 104; the final sweep's F44-1b). Until this batch the
 // join tested the rule's own `decodedBasicToken` on the joined text at every run, and that reader
 // tries every candidate length from the run's own length down to 8 -- so a text split one character
@@ -1764,11 +1783,19 @@ function gluedBasicTokenEnd(raw, absoluteStart, acceptedLength = -1) {
         // reader already declined -- a 'user:' pair with an empty password and '==' padding followed
         // by an ordinary word (the final verify's F45-3) -- and the gap was prose, not a split.
         if (evidence || tokenLength > before) best = Math.max(best, tokenLength);
-      } else if (tokenLength === layout.length && body[nextEnd] === quote) {
-        // The quoted spelling: the token is the payload, and the span the published text carries is
-        // the payload plus the closing quote that stands right after it, exactly as the separated
-        // view requires.
-        return absoluteStart + nextEnd + 1;
+      } else if (tokenLength === layout.length) {
+        // THE QUOTED SPELLING, CLOSED AND UNCLOSED (Batch 107). 'nextEnd' is an index into 'body'
+        // (= raw.slice(1)), so the source's exclusive end
+        // after the payload is absoluteStart + nextEnd + 1, and the CLOSED spelling's span is the
+        // payload PLUS the closing quote standing right after it -- at body[nextEnd] -- so it ends
+        // one character further. This reader used to return the shorter end, and every split
+        // position published 'Basic [redacted]"' (the closing quote left standing) while the comment
+        // claimed the span carried it (F47-4). Where NO closing quote stands after the payload, the
+        // spelling is the UNCLOSED one (F47-1): the longest accepted payload is the walk's best, read
+        // exactly as the closed spelling's payload is read, and the final span carries the opening
+        // quote together with the payload.
+        if (body[nextEnd] === quote) return absoluteStart + nextEnd + 2;
+        best = Math.max(best, tokenLength);
       }
     }
     if (!evidence && !evidenceSeen && best === -1) return -1;
@@ -1779,7 +1806,10 @@ function gluedBasicTokenEnd(raw, absoluteStart, acceptedLength = -1) {
     if (state.bad !== -1 || state.secondColon !== -1) break;
   }
   if (best === -1) return -1;
-  return absoluteStart + positions[best - 1] + 1;
+  // The quoted spelling's span carries the OPENING quote as well as the payload (Batch 107):
+  // 'positions' indexes 'body' (= raw.slice(1)) and the caller's accepted length is the payload
+  // without its quotes, so the source's exclusive end is one character further than the bare run's.
+  return absoluteStart + positions[best - 1] + (quote === '' ? 1 : 2);
 }
 
 function redactBasicCredentials(text) {
@@ -1841,7 +1871,12 @@ function redactBasicCredentials(text) {
     // all read, the acceptance is read at every joined length and to the end of the joined run, and
     // the removal maps back over every separator the split used.
     const quote = payload.startsWith('"') || payload.startsWith("'") ? payload[0] : '';
-    const acceptedLength = token === null ? -1 : quote === '' ? token.length : token.length - 2;
+    // The quoted spelling's span carries its quotes (Batch 61) and the accepted payload is the token
+    // WITHOUT them. Both spellings are read now (Batch 107): the CLOSED one carries two
+    // quotes, the UNCLOSED one (no closing quote) carries the opening quote only, which is what the
+    // reader returns -- so the payload's length is the token's length less the quotes it carries.
+    const quotedQuotes = token === null || quote === '' ? 0 : token.endsWith(quote) ? 2 : 1;
+    const acceptedLength = token === null ? -1 : token.length - quotedQuotes;
     const separatedEnd = token === null ? -1 : tokenStart + token.length;
     const gluedEnd = gluedBasicTokenEnd(payload, tokenStart, acceptedLength);
     const tokenEnd = Math.max(separatedEnd, gluedEnd);
@@ -2349,8 +2384,10 @@ function redactBearerValues(text) {
 // across a single separator run, read in the GLUED view and removed from the SPACED text across the
 // separator. The rule's minimum is what makes the body a body: reading the run as a positive class
 // that simply stopped at a separator published the WHOLE credential when the fragment before the
-// split was below it (FINAL41 F41-1). A body run at or above the minimum is complete and is never
-// extended, which is the prose guard: a complete body followed by ' and prose' keeps it.
+// split was below it (FINAL41 F41-1). A body run at or above the minimum is the walk's initial best
+// now, not its end (Batch 106), so a body split after the rule's own minimum is read and removed
+// whole; an ordinary word gap still ends the walk, which is the prose guard: a complete body
+// followed by ' and prose' keeps it.
 function redactCuratedShapes(text) {
   let out = text;
   for (const shape of CURATED_SHAPES) {
