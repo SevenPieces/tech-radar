@@ -1295,10 +1295,22 @@ function boundedValue(value) {
 // characters are escaped one at a time, so a value carrying a regex metacharacter is still a
 // literal. Only a value at or above the floor is matched this way: below it the spans a loose
 // pattern can match are short enough to reap unrelated text.
+//
+// THE GAP READS THE MODULE'S OWN LINE ENDS, NOT JAVASCRIPT'S \s (Batch 95; closing sweep F39-3).
+// The comment above says 'a whitespace control', and JavaScript's \s is every one of those EXCEPT
+// U+0085 NEXT LINE, which is White_Space=Yes and one of the five line ends AUTH_LINE_TERMINATORS
+// names -- the same fact the module states about itself where it declares the reader's token class
+// and the bridge, and the one Batch 88 read when it stopped plainText dropping the NEL. The joiner
+// was therefore the one site in the by-value half that answered a NEL differently from LF, and a
+// collected value echoed with a NEL inside it survived one redactSecrets pass where LF, CR, CRLF,
+// LS, PS, SP and TAB all removed it -- after which the assembled notice published the value
+// readably and was not a fixed point. The gap is now \s plus U+0085, exactly the set the rest of
+// the module reads a separator from, so every one of them answers as LF does.
+const VALUE_GAP = '\\s\\u0085';
 function looseValue(value) {
   const pattern = [...String(value)]
     .map((ch) => ch.replace(/[.*+?^$(){}|[\]\\]/g, '\\$&'))
-    .join('\\s*');
+    .join('[' + VALUE_GAP + ']*');
   return new RegExp(pattern, 'g');
 }
 
