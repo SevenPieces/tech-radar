@@ -37,6 +37,7 @@
 // marker itself" are corrected in this batch rather than left standing.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
+import { readFileSync } from 'node:fs';
 import { assembleNotice } from '../scripts/collect.mjs';
 import { redactSecrets } from '../scripts/lib/net.mjs';
 
@@ -111,3 +112,26 @@ test('the reach is the exported seam, not the shipped configuration and not an o
   assert.equal(redactSecrets(suffixOnly, ['redacted]']).length, suffixOnly.length,
     'a non-bracket marker substring did not behave as measured');
 });
+
+test('the two shipped texts state the redaction bound instead of the fixed-point claim it falsifies', () => {
+  // Closing sweep F40-2 (Low, documentation), Batch 97. Batch 94 corrected the two CODE comments beside
+  // the seam and left the same property asserted as fact in the two operator-facing texts, one of which
+  // (SKILL.md) is the skill's front door and the other (config/settings.md) the reference for this very
+  // setting. The claim falsified here is the REDACTION's fixed point, not the rewriting's: a re-redaction
+  // at the exported assembly can grow an already-priced notice by nine characters when the caller's value
+  // set carries a strict substring of the marker. Both texts now name that bound and its reach, and this
+  // row fails if either drifts back to the absolute wording.
+  const skill = readFileSync(new URL('../SKILL.md', import.meta.url), 'utf8');
+  const settings = readFileSync(new URL('../config/settings.md', import.meta.url), 'utf8');
+  for (const [name, text] of [['SKILL.md', skill], ['config/settings.md', settings]]) {
+    assert.doesNotMatch(text, /no later pass can lengthen a detail that was already priced\./,
+      name + ' still states the unqualified pricing guarantee');
+    assert.doesNotMatch(text, /No redaction can lengthen a text a pass published/,
+      name + ' still states the unqualified redaction guarantee');
+    assert.match(text, /strict SUBSTRING of the (?:redaction )?marker/,
+      name + ' does not name the class the bound needs');
+    assert.match(text, /nine characters/, name + ' does not name the bound');
+    assert.match(text, /cannot reach (?:the bound|it)/, name + ' does not name the reach');
+  }
+});
+
