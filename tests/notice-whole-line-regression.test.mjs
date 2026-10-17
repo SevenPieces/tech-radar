@@ -304,3 +304,25 @@ test('F27-5 residual: the assembly\u2019s own reason survives a value that spell
     'the tool said a [redacted] with no message twice',
     'the reason protection leaked into ordinary prose');
 });
+
+test('a NEL is a line end in notice text: it is spaced, never dropped', () => {
+  // A NEL (U+0085) is White_Space=Yes and one of the five line terminators the module reads, but
+  // JavaScript's \s does not match it, so the notice control pass used to DROP it while spacing LF,
+  // CR, CRLF, LS, PS and TAB. Dropping it glued a keyword to the value behind it -- one word no
+  // removal rule can read -- so 'authorization:' + NEL + '<token>' was published as a single word
+  // where every other line end leaves the space that lets the rule remove the credential.
+  const NEL = '\u0085';
+  assert.equal(neutraliseNoticeText('a' + NEL + 'b'), 'a b',
+    'a NEL is a line end and becomes a space, not nothing');
+  assert.equal(neutraliseNoticeText('a' + '\n' + 'b'), neutraliseNoticeText('a' + NEL + 'b'),
+    'a NEL answers exactly as LF does');
+  for (const cap of [128, 402, 1000]) {
+    const notice = assembleNotice('rss', 'authorization:' + NEL + 'tok_9f3a2c7d1e5b', [], cap);
+    assert.ok(!notice.includes('tok_9f3a2c7d1e5b'),
+      'the credential behind a NEL was published at cap ' + cap + ': ' + JSON.stringify(notice));
+    assert.ok(notice.startsWith('rss: '), 'the notice lost its source: ' + JSON.stringify(notice));
+  }
+  // The other C1 controls keep the rule this one is the exception to: a non-whitespace C1 control
+  // is dropped, not spaced.
+  assert.equal(neutraliseNoticeText('a\u0000b'), 'ab', 'a non-whitespace C1 control is still dropped');
+});
