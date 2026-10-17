@@ -243,7 +243,7 @@ test('ordinary prose is not reaped, and a separator outside the shape changes no
   }
 });
 
-test('THE RECORDED BOUND, CORRECTED: a complete run is not extended, and a run below the rule minimum is removed across the separator', () => {
+test('THE RECORDED BOUND, CORRECTED: a complete run is extended only across split evidence, and a run below the rule minimum is removed across the separator', () => {
   // The prose guard, measured: once a separator has been SPACED it is indistinguishable from a word
   // boundary, so a run that already satisfies the rule cannot be read through without reaping the
   // prose after a real token ('Bearer tok_1 and this sentence' would lose its tail). The by-value half
@@ -282,14 +282,20 @@ test('THE RECORDED BOUND, CORRECTED: a complete run is not extended, and a run b
       assert.ok(!shaped.includes(CRED.slice(12)),
         label + ': the surviving separator should have been swallowed with the run: ' + JSON.stringify(shaped));
     }
-    // The SAME bound at a curated shape's body, which is contiguous for the same reason: the surface
-    // split after 'gh' + 'p_abcdefgh' + separator + 'ijklmnop' and the shape pass removes the prefix plus the
-    // body up to the separator, leaving the tail. It is asserted here so the bound is one statement
-    // about the whole class and not a note about one rule.
+    // The SAME bound at a curated shape's body, with the Batch 106 correction (the FINAL46 pair's
+    // F46-1b): the split-evidence half is JOINED now -- the body's first run already passes the rule's
+    // minimum and is the walk's INITIAL best, and the walk still reads the runs after it, so the
+    // whole body is removed where the separator carries split evidence. Across a SPACED separator
+    // the recorded bound stands: the tail is published, because the spaced gap is the prose guard.
     const body = redactCredentialShapes(plainText('a commit carried gh' + 'p_abcdefgh' + ch
       + 'ijklmnop end', 400));
     assert.ok(!body.includes(TOK.slice(0, 10)), label + ': the keyless pass did not remove the shape');
-    assert.ok(body.includes('ijklmnop'), label + ': the recorded shape-body tail bound moved: ' + JSON.stringify(body));
+    if (spaced) {
+      assert.ok(body.includes('ijklmnop'), label + ': the recorded shape-body tail bound moved: ' + JSON.stringify(body));
+    } else {
+      assert.ok(!body.includes('ijklmnop'),
+        label + ': the split-evidence body was not joined, so the tail published: ' + JSON.stringify(body));
+    }
     // THE CLOSED HALF: a run below the rule's own minimum. The credential is the WHOLE thing here --
     // nothing of it may publish, on either entry point or in the assembled notice.
     const below = {

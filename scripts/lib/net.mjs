@@ -605,7 +605,16 @@ export function renderSeparatorMarks(text) {
 // Returns the SPACED end index of the span to remove, or null.
 function gluedContinuation(text, from, runEnd, isRunChar, accepts, acceptsSecond = accepts) {
   const first = text.slice(from, runEnd);
-  if (accepts(first)) return null;
+  // THE WALK IS ENTERED UNCONDITIONALLY (Batch 106; the FINAL46 pair's F46-1b, the same entry
+  // condition as the Basic join). A first run that already passes the rule used to END the walk
+  // with null, so a curated body split AFTER the rule's minimum -- a classic body whose first run is
+  // exactly the minimum or longer, split by ZWSP -- left the rest of the body published ('ghp_' + 36
+  // characters split at 18/24/36 left 22/16/4 body characters, FINAL46), and a Bearer value split
+  // after its own shape test did the same. The accepted first run is now the walk's INITIAL best: the
+  // runs after it are still read, the LONGEST accepted span across split evidence is the answer, and
+  // the ordinary word gap keeps the prose guard in both entry states (a complete value followed by
+  // prose is never extended across the gap).
+  const firstAccepted = accepts(first);
   let joined = first;
   let pos = runEnd;
   let evidenceSeen = false;
@@ -618,11 +627,12 @@ function gluedContinuation(text, from, runEnd, isRunChar, accepts, acceptsSecond
   // surface's evidence can still extend the value; the unsplit rule removes the whole run, so this
   // is the same answer. Within this join's own bound (MAX_JOINED_RUNS, unchanged here: a dense
   // evidence split PAST it still leaves a tail, the recorded A-54 state).
-  let best = -1;
+  let best = firstAccepted ? runEnd : -1;
   for (let runs = 0; runs < MAX_JOINED_RUNS; runs += 1) {
     const afterSeparator = separatorRunEnd(text, pos);
     if (afterSeparator === -1) break;
     const evidence = separatorRunIsEvidence(text.slice(pos, afterSeparator));
+    if (!evidence && firstAccepted) break;
     if (!evidence && evidenceSeen === false && runs > 0) break;
     // A value already accepted whose run ends at an ordinary separator is complete: the word after
     // it is prose, and joining it would extend the removal past the value.
@@ -1617,7 +1627,14 @@ function basicBase64Length(bytes) {
 // The accepted token's length in the JOINED text, or -1. This IS the rule's decode test, read on
 // the tracker's state: the longest decoded prefix that is printable, carries no '=' of its own, and
 // has exactly one ':' with a character on each side.
-function acceptedBasicTokenLength(joined, state) {
+// 'layout' is the JOINED text's own shape, kept incrementally so this test costs O(1) per run
+// (Batch 106): { length, firstPadding, paddingRunEnd }. 'length' is the number of characters read,
+// 'firstPadding' the index of the first '=' or -1, and 'paddingRunEnd' the index AFTER the first run
+// of '='. The regex the batch replaced ('^[A-Za-z0-9+/]*={0,2}$' over joined.slice(0, length)) was
+// O(length) per run, which made a valid pair split one character per run QUADRATIC (measured at
+// 566 ms for 57k payload characters, and the closing sweep's F46-3 filed it); the same decision is
+// read here from three integers, so the walk is linear in the text it is handed.
+function acceptedBasicTokenLength(joined, state, layout) {
   let longest = state.decoded;
   if (state.bad !== -1) longest = Math.min(longest, state.bad);
   if (state.secondColon !== -1) longest = Math.min(longest, state.secondColon);
@@ -1628,10 +1645,15 @@ function acceptedBasicTokenLength(joined, state) {
   // so a malformed single '=' is taken exactly as the rule's own reader takes it.
   if (longest === state.decoded) {
     const groupEnd = Math.ceil(length / 4) * 4;
-    while (length < groupEnd && length < joined.length && joined[length] === '=') length += 1;
+    const paddingAt = (i) => layout.firstPadding !== -1 && i >= layout.firstPadding && i < layout.paddingRunEnd;
+    while (length < groupEnd && length < layout.length && paddingAt(length)) length += 1;
   }
   if (length < 8) return -1;
-  if (!/^[A-Za-z0-9+/]*={0,2}$/.test(joined.slice(0, length))) {
+  // The old regex test, as arithmetic. A prefix of length L is base64-with-padding iff it carries no
+  // '=' at all, or its first '=' stands at L-2 or L-1 and the first '=' run reaches at least L (so
+  // no base64 character follows the padding inside the prefix).
+  if (layout.firstPadding !== -1 && length > layout.firstPadding
+    && !(layout.firstPadding >= length - 2 && layout.paddingRunEnd >= length)) {
     // A '=' inside the region is not padding: the rule's own reader is exact for the hostile
     // spelling, and this path is not reachable from a legitimate payload.
     const token = decodedBasicToken(joined);
@@ -1639,7 +1661,7 @@ function acceptedBasicTokenLength(joined, state) {
   }
   return length;
 }
-function gluedBasicTokenEnd(raw, absoluteStart) {
+function gluedBasicTokenEnd(raw, absoluteStart, acceptedLength = -1) {
   // The quoted spelling is read whole or not at all (see decodedBasicToken): a quote cannot stand
   // inside a run. The quoted spelling IS read across the class now (Batch 101): a quoted payload
   // split inside its base64 published the whole quoted credential on the shipped keyless pool
@@ -1665,6 +1687,27 @@ function gluedBasicTokenEnd(raw, absoluteStart) {
   for (let i = 0; i < joined.length; i += 1) positions.push(i);
   const tracker = basicJoinTracker();
   tracker.feed(joined);
+  // The joined text's LAYOUT, maintained incrementally (Batch 106): the acceptance test reads these
+  // integers instead of slicing and regex-testing the growing text, which is what made the walk
+  // quadratic on a valid pair split one character per run (the closing sweep's F46-3).
+  const layout = { length: 0, firstPadding: -1, paddingRunEnd: -1 };
+  const appendLayout = (chunk) => {
+    if (layout.firstPadding === -1) {
+      const k = chunk.indexOf('=');
+      if (k !== -1) {
+        let j = k;
+        while (j < chunk.length && chunk[j] === '=') j += 1;
+        layout.firstPadding = layout.length + k;
+        layout.paddingRunEnd = layout.length + j;
+      }
+    } else if (layout.paddingRunEnd === layout.length) {
+      let j = 0;
+      while (j < chunk.length && chunk[j] === '=') j += 1;
+      if (j > 0) layout.paddingRunEnd = layout.length + j;
+    }
+    layout.length += chunk.length;
+  };
+  appendLayout(joined);
   let evidenceSeen = false;
   // THE ACCEPTANCE IS READ TO THE END OF THE RUN, NOT TO THE FIRST ACCEPTING PREFIX (Batch 105; the
   // closing sweep's F45-1, which is also TR-344 / FINAL43 F43-3's early stop). This reader used to
@@ -1676,25 +1719,43 @@ function gluedBasicTokenEnd(raw, absoluteStart) {
   // and the shipped keyless pool's summary (measured). The LONGEST accepted prefix is tracked here
   // while the evidence can still extend the payload, so the join recovers exactly what the unsplit
   // rule recovers from the run, and no payload tail is left published.
-  let best = -1;
+  // THE WALK IS ENTERED UNCONDITIONALLY (Batch 106; the FINAL46 pair's F46-1). Until this batch the
+  // caller consulted it only when the separated view read NOTHING, so a payload whose FIRST run was
+  // a whole base64 group that decodes to a valid 'user:password' pair never reached the walk, and the
+  // rest of the base64 stream published: 'Basic <group> <rest>' -> '[redacted]<rest>', the rest a
+  // clean base64 of the password's continuation (198 rows of the FINAL46 matrix across 40 of 60
+  // userinfo lengths, on candidate, notice, the assembly at 128/402/1000 and the real keyless pool).
+  // 'acceptedLength' is the SEPARATED view's accepted payload length (the quoted spelling is peeled
+  // above, so it is the payload without its quotes), or -1 when that view read nothing. It is the
+  // walk's INITIAL best, not its end: the runs after the first one are still read, and the walk
+  // returns the LONGEST accepted payload across the split evidence.
+  let best = acceptedLength;
   for (let runs = 0; runs < body.length; runs += 1) {
     const afterSeparator = separatorRunEnd(body, end);
     if (afterSeparator === -1) break;
     const evidence = separatorRunIsEvidence(body.slice(end, afterSeparator));
-    if (!evidence && !evidenceSeen && runs > 0) break;
-    // A token already accepted whose run ends at an ORDINARY separator is the payload: the word
-    // after it is prose, not a continuation, and joining it could only extend the removal past the
-    // payload (the word is base64 letters as often as not).
-    if (best !== -1 && !evidence) break;
+    if (!evidence) {
+      // THE ORDINARY WORD GAP keeps the prose guard in BOTH entry states. When the separated view has
+      // already accepted a complete payload, the word after an ordinary gap is prose and the walk
+      // stops (joining it would reap the ordinary word after a valid credential). When this walk
+      // started because the first run FAILED, the gap is crossed at most once, exactly as before.
+      if (acceptedLength >= 0) break;
+      if (!evidenceSeen && runs > 0) break;
+      // A token already accepted inside the walk whose run ends at an ORDINARY separator is the
+      // payload: the word after it is prose, not a continuation (the word is base64 letters as often
+      // as not).
+      if (best !== -1) break;
+    }
     const nextEnd = valueRunEnd(body, afterSeparator, isBasicRunChar);
     if (nextEnd === afterSeparator) break;
     const added = body.slice(afterSeparator, nextEnd);
-    const before = joined.length;
+    const before = layout.length;
     joined += added;
+    appendLayout(added);
     for (let i = afterSeparator; i < nextEnd; i += 1) positions.push(i);
     tracker.feed(added);
     const state = tracker.state();
-    const tokenLength = acceptedBasicTokenLength(joined, state);
+    const tokenLength = acceptedBasicTokenLength(joined, state, layout);
     if (tokenLength !== -1) {
       if (quote === '') {
         // Across split evidence the joined run is what the rule reads, so any accepted prefix is the
@@ -1703,7 +1764,7 @@ function gluedBasicTokenEnd(raw, absoluteStart) {
         // reader already declined -- a 'user:' pair with an empty password and '==' padding followed
         // by an ordinary word (the final verify's F45-3) -- and the gap was prose, not a split.
         if (evidence || tokenLength > before) best = Math.max(best, tokenLength);
-      } else if (tokenLength === joined.length && body[nextEnd] === quote) {
+      } else if (tokenLength === layout.length && body[nextEnd] === quote) {
         // The quoted spelling: the token is the payload, and the span the published text carries is
         // the payload plus the closing quote that stands right after it, exactly as the separated
         // view requires.
@@ -1769,8 +1830,21 @@ function redactBasicCredentials(text) {
     if (tokenStart < at) continue;
     const payload = after.slice(space[0].length);
     const token = decodedBasicToken(payload);
-    // The separated view first; the GLUED view only when it read nothing (Batch 100; F41-1).
-    const tokenEnd = token !== null ? tokenStart + token.length : gluedBasicTokenEnd(payload, tokenStart);
+    // THE GLUED WALK IS CONSULTED UNCONDITIONALLY, AND THE LONGEST END WINS (Batch 106; the FINAL46
+    // pair's F46-1). Batch 100 consulted it only when the separated view read NOTHING; Batch 105 made
+    // it keep the longest accepted prefix once entered. A split after a whole base64 group left the
+    // separated view accepting the first group as a complete 'user:password' pair, so the walk was
+    // never entered and the rest of the stream published (the FINAL46 matrix's 198 decodable rows).
+    // The two views' ends are compared now: the separated view's accepted prefix is the walk's
+    // initial best, and the walk extends it across split evidence to the longest accepted payload, so
+    // NO split position that carries split evidence can leave a fragment: the payload's own runs are
+    // all read, the acceptance is read at every joined length and to the end of the joined run, and
+    // the removal maps back over every separator the split used.
+    const quote = payload.startsWith('"') || payload.startsWith("'") ? payload[0] : '';
+    const acceptedLength = token === null ? -1 : quote === '' ? token.length : token.length - 2;
+    const separatedEnd = token === null ? -1 : tokenStart + token.length;
+    const gluedEnd = gluedBasicTokenEnd(payload, tokenStart, acceptedLength);
+    const tokenEnd = Math.max(separatedEnd, gluedEnd);
     if (tokenEnd === -1) continue;
     out += source.slice(at, tokenStart) + REDACTION_SENTINEL;
     at = tokenEnd;
@@ -2248,16 +2322,14 @@ function redactBearerValues(text) {
     const tokenStart = match.index + match[0].length;
     if (tokenStart < at) continue;
     const runEnd = valueRunEnd(source, tokenStart, isBearerTokenChar);
-    let removeEnd = -1;
-    if (credentialShapedToken(source.slice(tokenStart, runEnd))) {
-      removeEnd = runEnd;
-    } else {
-      // The fragment before the split is below the rule's own shape test: read the run in the
-      // GLUED view, across one separator run, and remove the mapped span whole (F41-1).
-      const glued = gluedContinuation(source, tokenStart, runEnd, isBearerTokenChar,
-        credentialShapedToken, (run) => credentialShapedToken(run) && !isDiagnosticStamp(run));
-      if (glued !== null) removeEnd = glued;
-    }
+    // The GLUED walk is consulted UNCONDITIONALLY (Batch 106; F46-1b's entry condition): a first run
+    // that already passes the shape test is the walk's initial best, and the runs after it are still
+    // read, so a Bearer value split after its own shape test cannot leave the rest published. The
+    // ordinary word gap keeps the prose guard inside the walk.
+    const glued = gluedContinuation(source, tokenStart, runEnd, isBearerTokenChar,
+      credentialShapedToken, (run) => credentialShapedToken(run) && !isDiagnosticStamp(run));
+    const removeEnd = glued !== null ? glued
+      : credentialShapedToken(source.slice(tokenStart, runEnd)) ? runEnd : -1;
     if (removeEnd === -1) continue;
     out += source.slice(at, match.index) + REDACTION_SENTINEL;
     at = removeEnd;
@@ -2290,14 +2362,16 @@ function redactCuratedShapes(text) {
       if (start < at) continue;
       const bodyStart = start + match[0].length;
       const runEnd = valueRunEnd(source, bodyStart, shape.isBody);
-      let removeEnd = -1;
-      if (runEnd - bodyStart >= shape.minimum) {
-        removeEnd = runEnd;
-      } else {
-        const glued = gluedContinuation(source, bodyStart, runEnd, shape.isBody,
-          (run) => run.length >= shape.minimum, (run) => run !== '');
-        if (glued !== null) removeEnd = glued;
-      }
+      // The GLUED walk is consulted UNCONDITIONALLY (Batch 106; the FINAL46 pair's F46-1b): a body
+      // run at or above the minimum is the walk's initial best, not the end of the walk, so a body
+      // split AFTER the rule's minimum is joined to the longest accepted span instead of leaving the
+      // rest of its own body published (a classic body of 36 characters split at 18, 24 or 36 left
+      // 22, 16 and 4 body characters published). A body run followed by an ordinary word gap keeps
+      // the prose guard: the walk stops at the gap and the prose after it is not reaped.
+      const firstOk = runEnd - bodyStart >= shape.minimum;
+      const glued = gluedContinuation(source, bodyStart, runEnd, shape.isBody,
+        (run) => run.length >= shape.minimum, (run) => run !== '');
+      const removeEnd = glued !== null ? glued : firstOk ? runEnd : -1;
       if (removeEnd === -1 || !wordBoundaryAfter(source, removeEnd)) continue;
       built += source.slice(at, start) + REDACTION_SENTINEL;
       at = removeEnd;
@@ -2909,11 +2983,16 @@ const NAMED = {
   InvisibleComma: '\u2063', InvisibleSeparator: '\u2063', ensp: '\u2002', emsp: '\u2003',
   thinsp: '\u2009', ThinSpace: '\u2009', hairsp: '\u200a', numsp: '\u2007', puncsp: '\u2008',
   MediumSpace: '\u205f', NonBreakingSpace: '\u00a0', Tab: '\t', NewLine: '\n',
-  // Five spellings in the table are NOT in the WHATWG table and are over-reads: 'ZeroWidthJoiner',
-  // 'ZeroWidthNonJoiner', 'NoBreakSpace', 'InvisiblePlus' and 'VeryThinSpace' (HTML5 leaves
-  // '&ZeroWidthJoiner;' literal). They are kept in their exact case so an existing removal does not
+  // THE OVER-READS, LISTED EXACTLY (Batch 106; the FINAL46 pair's F46-2). Five spellings in the table
+  // are NOT in the WHATWG table and are over-reads: 'ZeroWidthJoiner', 'ZeroWidthNonJoiner',
+  // 'NoBreakSpace', 'InvisiblePlus' and 'InvisibleSeparator' (HTML5 leaves every one of them
+  // literal). The list this comment carried named 'VeryThinSpace' as the fifth and omitted
+  // 'InvisibleSeparator': measured offline against Python's html.entities.html5, 'VeryThinSpace;' IS
+  // a WHATWG name (U+200A) and 'InvisibleSeparator;' is NOT, so the list was wrong in both
+  // directions. The five above are measured absent; the table's other separator-valued rows are
+  // WHATWG spellings. The over-reads are kept in their exact case so an existing removal does not
   // move, and they are recorded here rather than silently dropped; the case-sensitivity above is what
-  // this batch changes, not the membership of the table.
+  // Batch 105 changed, not the membership of the table.
   ZeroWidthJoiner: '\u200d', ZeroWidthNonJoiner: '\u200c', VeryThinSpace: '\u200a',
   InvisiblePlus: '\u2064', NoBreakSpace: '\u00a0', ThickSpace: '\u205f',
   // THE FAMILY IS DERIVED, NOT SAMPLED (Batch 103; the Gate's F43-1). Batch 102 claimed the table was
@@ -2921,12 +3000,13 @@ const NAMED = {
   // were outside it, and a reference a Markdown/HTML reader decodes published the value behind it --
   // measured through the shipped keyless collectAll, a PAT body split by '&af;' came back byte for
   // byte in the pool title AND summary. The table is now DERIVED from the WHATWG list: of
-  // the 2,125 named references Python's html.entities.html5 carries (offline, the HTML5 table), the
-  // 33 whose value is one code point of the one separator class are all here (32 single-code-point
-  // names plus 'ThickSpace', the one multi-code-point name whose every code point is a class member:
-  // U+205F U+200A, named by its first member, which is the same evidence). A name outside the table
-  // is left as the text it is, and the derivation is re-runnable: the commit that added these rows
-  // carries the command.
+  // the 2,231 keys Python's html.entities.html5 carries (2,125 semicolon forms and 106 legacy
+  // no-semicolon forms, offline), the 35 whose value's every code point is a member of the one
+  // separator class are all here: 33 semicolon forms -- 32 whose value is one code point plus
+  // 'ThickSpace', the one multi-code-point name whose every code point is a class member (U+205F
+  // U+200A, named by its first member, which is the same evidence) -- and the two legacy forms
+  // 'nbsp' and 'shy'. A name outside the table is left as the text it is, and the derivation is
+  // re-runnable: the commit that added these rows carries the command.
   af: '\u2061', ApplyFunction: '\u2061', emsp13: '\u2004', emsp14: '\u2005',
   ic: '\u2063', it: '\u2062', NegativeVeryThinSpace: '\u200b',
   NegativeThinSpace: '\u200b', NegativeMediumSpace: '\u200b', NegativeThickSpace: '\u200b',
