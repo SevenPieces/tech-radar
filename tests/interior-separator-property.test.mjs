@@ -99,7 +99,6 @@ test('the separator class is pinned: the gap and the interior are ONE set, and i
   // Every separator in the range really is a member (anti-vacuity: a matrix over a class that does not
   // contain its own rows would assert nothing).
   for (const cp of [...CONTROL_BYTES, ...INVISIBLE_WITNESSES, ...WHITESPACE_SPELLINGS, ...LINE_TERMINATORS]) {
-    if (cp === 0x2007) continue; // a bridge member in the whitespace spellings, not the module's class
     assert.ok(SCHEME_GAP_PATTERN.test(String.fromCodePoint(cp)),
       u(cp) + ' is one of the separators this file measures and is not in the separator class');
   }
@@ -273,5 +272,13 @@ test('THE RECORDED BOUND: the interior read covers the keyword and the shape pre
       assert.ok(!shaped.includes(CRED.slice(12)),
         label + ': the surviving separator should have been swallowed with the run: ' + JSON.stringify(shaped));
     }
+    // The SAME bound at a curated shape's body, which is contiguous for the same reason: the surface
+    // split after 'gh' + 'p_abcdefgh' + separator + 'ijklmnop' and the shape pass removes the prefix plus the
+    // body up to the separator, leaving the tail. It is asserted here so the bound is one statement
+    // about the whole class and not a note about one rule.
+    const body = redactCredentialShapes(plainText('a commit carried gh' + 'p_abcdefgh' + ch
+      + 'ijklmnop end', 400));
+    assert.ok(!body.includes(TOK.slice(0, 10)), label + ': the keyless pass did not remove the shape');
+    assert.ok(body.includes('ijklmnop'), label + ': the recorded shape-body tail bound moved: ' + JSON.stringify(body));
   }
 });

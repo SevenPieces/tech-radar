@@ -15,8 +15,32 @@
 // measurement that the fix moves no published byte for real inputs.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { redactSecrets } from '../scripts/lib/net.mjs';
+import { readFileSync, readdirSync } from 'node:fs';
+import { join, relative } from 'node:path';
+import { redactSecrets, SCHEME_GAP } from '../scripts/lib/net.mjs';
 import { assembleNotice, neutraliseNoticeText } from '../scripts/collect.mjs';
+
+// The tracked-file walk the two corpus rows share, so the guard and the differential read one corpus.
+async function corpusWalk() {
+  const root = new URL('..', import.meta.url).pathname;
+  const SKIP = new Set(['.git', 'node_modules', 'docs']);
+  const files = [];
+  const walk = (dir) => {
+    for (const entry of readdirSync(dir, { withFileTypes: true })) {
+      if (entry.name.startsWith('.') && entry.name !== '.gitignore') continue;
+      const full = join(dir, entry.name);
+      if (entry.isDirectory()) {
+        if (SKIP.has(entry.name)) continue;
+        walk(full);
+      } else if (entry.isFile() && /\.(mjs|md|json|html|yml|txt)$/.test(entry.name)) {
+        files.push(full);
+      }
+    }
+  };
+  walk(root);
+  assert.ok(files.length > 80, 'the corpus walk shrank: ' + files.length);
+  return { files, root, relative };
+}
 
 const CRED = 'tok_' + '9f3a2c7d1e5b';
 // The value split at a point inside a run the reader can see, so the pattern has to cross the
@@ -54,40 +78,81 @@ test('the assembled notice carries no value split by any separator and is a fixe
   }
 });
 
-test('the wider gap leaves every shipped file byte-identical through both text boundaries', async () => {
-  // The measurement the fix rests on, pinned over the shipped tree rather than asserted: the grown
-  // gap changes no PUBLISHED byte for real inputs, because the two paths that reach a NEL have
-  // already removed it (plainText spaces it before looseValue runs, and the union re-push redacts
-  // the notice). The corpus is walked with no child process, so the row holds with node alone on
-  // PATH -- the ignored working-material directories under docs/ are excluded, which is what a
-  // tracked-file walk would produce for the shipped set.
-  const { readFileSync, readdirSync, statSync } = await import('node:fs');
-  const { join, relative } = await import('node:path');
-  const root = new URL('..', import.meta.url).pathname;
-  const SKIP = new Set(['.git', 'node_modules', 'docs']);
-  const files = [];
-  const walk = (dir) => {
-    for (const entry of readdirSync(dir, { withFileTypes: true })) {
-      if (entry.name.startsWith('.') && entry.name !== '.gitignore') continue;
-      const full = join(dir, entry.name);
-      if (entry.isDirectory()) {
-        if (SKIP.has(entry.name)) continue;
-        walk(full);
-      } else if (entry.isFile() && /\.(mjs|md|json|html|yml|txt)$/.test(entry.name)) {
-        files.push(full);
-      }
-    }
-  };
-  walk(root);
-  assert.ok(files.length > 80, 'the corpus walk shrank: ' + files.length);
+test('a corpus-wide GUARD: every shipped file answers the probe value cleanly through both boundaries', async () => {
+  // RENAMED, HONESTLY (closing sweep F40-4). This row was named as the differential the fix rests on
+  // and performs none: it computes ONE answer per file, never compares two, and CRED is a probe token
+  // no corpus file contains, so it passes identically at the revision before the fix and cannot detect
+  // a moved byte. It is renamed to what it is -- a corpus-wide guard that no shipped file publishes the
+  // probe value through either boundary -- and the differential it claimed to be is the row below,
+  // which compares the module's gap with the pre-fix gap on the same text.
+  //
+  // The corpus is walked with no child process, so the row holds with node alone on PATH; the ignored
+  // working-material directories under docs/ are excluded, which is what a tracked-file walk produces
+  // for the shipped set.
+  const { files, root, relative } = await corpusWalk();
   for (const full of files) {
     const text = readFileSync(full, 'utf8');
     if (text.includes('\u0000')) continue;
-    // No file can have its answer moved by the wider gap unless a NEL stands inside a value the
-    // pass is removing; a file whose redaction answer is unchanged is a file the fix cannot touch.
     assert.equal(redactSecrets(text, [CRED]).includes(CRED), false,
       'a corpus file published the probe value: ' + relative(root, full));
     assert.equal(typeof neutraliseNoticeText(text), 'string',
       'the notice pass did not answer: ' + relative(root, full));
   }
+});
+
+test('the by-value gap IS the separator class, and the Batch-95 gap publishes a control- or invisible-split value', async () => {
+  // THE DIFFERENTIAL (closing sweep F40-4): two answers over the same text, compared. The PREVIOUS
+  // class is the one Batch 95 named -- '\s\u0085', the module's whitespace plus the NEL -- and Batch
+  // 98 made the gap the module's ONE separator class, which adds every control byte and the
+  // default-ignorable property. A narrow back to the previous class moves this row; the earlier
+  // version of this file could not see that because it compared no two answers.
+  const CURRENT_GAP = SCHEME_GAP.slice(1, -1);
+  const PREVIOUS_GAP = '\\s\\u0085';
+  const escape = (ch) => ch.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  const removeWith = (text, value, gap) => text.replace(
+    new RegExp([...value].map(escape).join('[' + gap + ']*'), 'gu'), '[redacted]');
+  const splitBy = (sep) => CRED.slice(0, 13) + sep + CRED.slice(13);
+  assert.notEqual(CURRENT_GAP, PREVIOUS_GAP,
+    'the by-value gap is no wider than the class Batch 95 named, so this differential is inert');
+  // The positive controls: a NEL is in BOTH classes (the direction Batch 95 closed), and a control
+  // byte and an invisible character are in the module class ONLY (the direction Batch 98 closed).
+  // The second half is what makes an empty corpus differential below a fact rather than an inert test.
+  const CASES = [
+    ['NEL, in both classes', String.fromCharCode(0x85), true],
+    ['NUL, a control byte', String.fromCharCode(0x00), false],
+    ['CSI, a C1 control byte', String.fromCharCode(0x9b), false],
+    ['SHY, default-ignorable', String.fromCharCode(0xad), false],
+    ['ZWSP, default-ignorable', String.fromCharCode(0x200b), false],
+  ];
+  for (const [name, sep, inBoth] of CASES) {
+    const text = 'the answer said the token is ' + splitBy(sep) + ' and then prose';
+    assert.ok(!removeWith(text, CRED, CURRENT_GAP).includes(CRED.slice(0, 13)),
+      name + ': the module separator class did not remove the split value');
+    assert.ok(!removeWith(text, CRED, CURRENT_GAP).includes(CRED.slice(13)),
+      name + ': the module separator class left the value tail');
+    if (inBoth) {
+      assert.ok(!removeWith(text, CRED, PREVIOUS_GAP).includes(CRED.slice(0, 13)),
+        name + ': the previous class should still remove this one');
+    } else {
+      assert.ok(removeWith(text, CRED, PREVIOUS_GAP).includes(CRED.slice(0, 13)),
+        name + ': the previous class removed a separator Batch 98 added, so the differential is inert');
+    }
+    // The module's own answer is exactly the one built from its own separator class: the gap the fix
+    // rests on IS that class, in the module and in this row.
+    assert.equal(removeWith(text, CRED, CURRENT_GAP), redactSecrets(text, [CRED]),
+      name + ': the module by-value gap is no longer the class SCHEME_GAP names');
+  }
+  // The corpus differential: the two classes find the same spans in every shipped file. This is a
+  // real two-answer comparison; what it cannot show on its own is a fired detector, which is why the
+  // positive control above is asserted first.
+  const { files, root, relative } = await corpusWalk();
+  const moved = [];
+  for (const full of files) {
+    const fileText = readFileSync(full, 'utf8');
+    if (fileText.includes('\u0000')) continue;
+    if (removeWith(fileText, CRED, CURRENT_GAP) !== removeWith(fileText, CRED, PREVIOUS_GAP)) {
+      moved.push(relative(root, full));
+    }
+  }
+  assert.deepEqual(moved, [], 'the wider gap moves a published byte in: ' + moved.join(', '));
 });
