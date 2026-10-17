@@ -254,6 +254,18 @@ const AUTH_INLINE_SPACE = '\t\v\f \u00a0\u1680\u2000-\u200a\u202f\u205f\u3000\uf
 const AUTH_LINE_TERMINATORS = '\\r\\n\\u2028\\u2029\\u0085';
 // The bridge itself: a character class, so a caller writes AUTH_BRIDGE_SPACE + '*' (or '+').
 const AUTH_BRIDGE_SPACE = '[' + AUTH_INLINE_SPACE + AUTH_LINE_TERMINATORS + ']';
+// The bridge as a RUN, for the two GENERIC keyword rules (Batch 88; closing sweep F38-1). Those two
+// rules -- the Basic keyword's own gap and BEARER_VALUE's gap -- each still read JavaScript's \s,
+// which is exactly AUTH_INLINE_SPACE + CR/LF/LS/PS and NOT U+0085, so 'Basic' + NEL + <base64> and
+// 'Bearer' + NEL + <token> came back byte for byte from redactSecrets (both entry points) AND through
+// the shipped keyless candidate pass, while LF, CR, CRLF, LS, PS and all eight inline spellings
+// removed them. A run of the bridge is the same set the keyword's own AUTH_BRIDGE_SPACE '*' reads, so
+// a NEL at these gaps answers exactly as LF does; the optional form is the same run for a gap that may
+// be absent. Nothing else changes: the run adds U+0085 to \s and no other character.
+const AUTH_BRIDGE_RUN = new RegExp('^' + AUTH_BRIDGE_SPACE + '+');
+// The same optional gap in front of the Basic token's base64 run, which is the second half of that
+// keyword's gap (Batch 88; closing sweep F38-1).
+const AUTH_BRIDGE_RUN_OPTIONAL = new RegExp('^' + AUTH_BRIDGE_SPACE + '*([A-Za-z0-9+/]+={0,2})');
 
 const AUTHORIZATION_KEYWORD = new RegExp('(?<![\\w\\/])(?:proxy-)?' + AUTH_NAME + '["\']?' + AUTH_BRIDGE_SPACE + '*' + AUTH_COLON + AUTH_BRIDGE_SPACE + '*', 'gi');
 // Sweep F31-4's neighbour rows: the keyword was that one spelling with a word boundary on each
@@ -1013,7 +1025,10 @@ function decodedBasicToken(text) {
   // with the token and the published line keeps no orphan quote.
   const raw = String(text);
   const quote = raw.startsWith('"') || raw.startsWith("'") ? raw[0] : '';
-  const prefix = /^\s*([A-Za-z0-9+/]+={0,2})/.exec(quote === '' ? ' ' + raw : raw.slice(1));
+  // The gap before the run reads the bridge, not \s (Batch 88; closing sweep F38-1): with
+  // 'Basic' + SP + NEL + <base64> the caller's own gap consumes only the inline space, so the NEL
+  // stands here -- \s matched nothing and the run was never read, which published the blob.
+  const prefix = AUTH_BRIDGE_RUN_OPTIONAL.exec(quote === '' ? ' ' + raw : raw.slice(1));
   if (prefix === null) return null;
   const run = prefix[1];
   for (let length = run.length; length >= 8; length -= 1) {
@@ -1077,7 +1092,9 @@ function redactBasicCredentials(text) {
     const prev = idx === 0 ? '' : source[idx - 1];
     if (/[A-Za-z0-9_]/.test(prev) && idx !== resumeAt) continue;
     const after = source.slice(idx + 'Basic'.length);
-    const space = /^\s+/.exec(after);
+    // The keyword's own gap reads AUTH_BRIDGE_RUN, not \s (Batch 88; closing sweep F38-1): a NEL
+    // between 'Basic' and its blob is a line end exactly as LF is, and \s does not match it.
+    const space = AUTH_BRIDGE_RUN.exec(after);
     if (space === null) continue;
     const tokenStart = idx + 'Basic'.length + space[0].length;
     if (tokenStart < at) continue;
@@ -1505,7 +1522,12 @@ export function redactSecrets(text, secrets) {
 // abcdefghijklmnopqrstuvwxyz012345' is a value. A Bearer value standing in an authorization header
 // is not read by this rule at all: it is the header's own scheme, and the header rule consumes the
 // whole value (whatever it spells) because the header says it is one.
-const BEARER_VALUE = /\bBearer\s+([^\s,;"']+)/gi;
+// The gap reads AUTH_BRIDGE_SPACE and the value run reads the reader's own token class
+// (AUTH_TOKEN_CHARS), not JavaScript's \s (Batch 88; closing sweep F38-1). \s is every line end
+// except U+0085, so 'Bearer' + NEL + <token> matched nothing at all and was published, and a value
+// run built from \s did not stop at a NEL either -- 'Bearer ' + SP + NEL + <token> let the capture
+// run past the line end where LF stopped it. Both positions now answer exactly as LF does.
+const BEARER_VALUE = new RegExp('\\bBearer' + AUTH_BRIDGE_SPACE + '+(' + AUTH_TOKEN_CHARS + ')', 'gi');
 function redactBearerValues(text) {
   return String(text).replace(BEARER_VALUE, (m, token) => (
     credentialShapedToken(token) ? REDACTION_SENTINEL : m));
@@ -2458,9 +2480,20 @@ export function plainText(raw, limit) {
   // the digest is written from, and a GitHub release body is Markdown by construction, so its
   // links are the normal case rather than a hostile spelling. The notice rewriting that ends the
   // seam belongs to notice text alone (TR-112, TR-165).
+  // U+0085 NEXT LINE is a whitespace control by Unicode (White_Space=Yes) and one of the five line
+  // ends the module reads (AUTH_LINE_TERMINATORS), but JavaScript's \s -- the predicate this line
+  // used -- is every other whitespace character and NOT it, so the NEL fell into the DROP branch
+  // instead of the SPACE branch. Dropping it glues the words it separated, and the words it separated
+  // are exactly a credential keyword and its value: 'auth=Basic' + NEL + <base64> reached the pool as
+  // the single word 'auth=Basic<base64>', which no rule can read, because every keyword gap requires
+  // at least one character. Measured on the shipped collector with an RSS title (Batch 88; closing
+  // sweep F38-1): LF, CR, CRLF, LS, PS, SP and TAB were all removed and the NEL spelling published
+  // byte for byte, at 87bddfd and with the wider keyword rules alone. Spacing it here is LF's own
+  // answer -- this pass already collapses every whitespace run to one space -- and it is the
+  // documented rule for a whitespace control ('so words keep their separation').
   const text = neutraliseMarkers(
     decodeEntities(neutraliseEntityTags(String(raw)).replace(/<[^>]*>/g, ' '))
-      .replace(CONTROLS, (ch) => (/\s/.test(ch) ? ' ' : '')),
+      .replace(CONTROLS, (ch) => (/\s/.test(ch) || ch === '\u0085' ? ' ' : '')),
   )
     .replace(/\s+/g, ' ').trim();
   return text.length > bound ? text.slice(0, bound) : text;

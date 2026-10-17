@@ -20,6 +20,10 @@
 // whitespace was still JavaScript's '\s', which does not contain U+0085, so a value position that IS
 // a NEL published the credential where LF removed it. It is pinned at both bridge positions -- the
 // value position itself, and the scheme token's gap -- and against LF's own answer.
+// Closing sweep F38-1 (Medium, Batch 88) is the same sentence false at the two GENERIC keyword rules
+// the F37-1 row does not reach: redactBasicCredentials' own gap and its second half inside
+// decodedBasicToken, and the one generic Bearer rule's gap and value run. Their rows stand with the
+// F37-1 row below, on the same equality-with-LF property and through both entry points.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { redactCredentialShapes, redactSecrets } from '../scripts/lib/net.mjs';
@@ -131,6 +135,60 @@ test('F36-6: the fold stops at the same boundary, and a line end is not an inden
     assert.equal(redactSecrets(unindented, []).split(separator).join(LF),
       redactSecrets('authorization: x' + LF + LF + CRED, []),
       name + ' is not read as a line end where the fold looks for an indentation');
+  }
+});
+
+// Closing sweep F38-1 (Medium) and Batch 88, the same boundary at the two GENERIC keyword rules. The
+// F37-1 row above is scoped to the two positions Batch 86 moved -- the authorization keyword's own
+// bridging whitespace and the scheme token's gap -- and both sentences this file opens with ('one
+// boundary, read everywhere the code means the end of this line'; 'every shape the reader has') were
+// still false for two other rules in the same shape pipeline: redactBasicCredentials' own gap
+// (/^\s+/ on the text after 'Basic') and its second half, the base64 run's leading gap inside
+// decodedBasicToken (/^\s*/, which is why 'Basic' + SP + NEL + <base64> failed even with the first
+// gap read), and the ONE generic Bearer rule's gap and value run (BEARER_VALUE). JavaScript's \s is
+// exactly AUTH_INLINE_SPACE + CR/LF/LS/PS and NOT U+0085, so 'auth=Basic' + NEL + <base64> and
+// 'Bearer' + NEL + <token> were PUBLISHED byte for byte at 87bddfd on both entry points -- and
+// redactCredentialShapes is the shipped keyless candidate pass (collect.mjs runs it over every string
+// field of every candidate), so a feed title, summary or release body carrying that spelling reached
+// the published pool and digest where LF, CR, CRLF, LS, PS and all eight inline spellings removed it.
+// The assembled notice published it readably and the notice's own C1 neutralisation then DROPPED the
+// NEL, gluing 'Basic' to the blob, so no later pass ever removed it.
+// Batch 88 reads AUTH_BRIDGE_SPACE at all four positions: the property asserted is once again
+// equality with LF's own answer, on the shapes the two rules have, through BOTH entry points.
+test('F38-1: the two generic keyword rules answer for NEL exactly as they do for LF', () => {
+  const B64 = Buffer.from('alice:' + 's3cr3tp4ssw0rd').toString('base64');
+  const shapes = [
+    // the Basic keyword's own gap ...
+    (s) => 'auth=Basic' + s + B64,
+    // ... and its second half: the caller's gap consumes the inline space, so the run's own leading
+    // gap is the one that has to read the NEL (decodedBasicToken).
+    (s) => 'auth=Basic ' + s + B64,
+    // the shipped keyless candidate pass, over a candidate-shaped field.
+    (s) => 'release notes: auth=Basic' + s + B64 + ' shipped',
+    // the one generic Bearer rule: its gap ...
+    (s) => 'Bearer' + s + CRED,
+    (s) => 'bearer' + s + CRED,
+    (s) => 'Bearer ' + s + CRED,
+    // ... and its value run's own boundary, so a NEL is a line end there too and the run cannot
+    // swallow the text on the next line.
+    (s) => 'Bearer' + s + CRED + s + 'the run covered 43 domains',
+    (s) => 'commit msg: Bearer' + s + CRED + ' (rotated)',
+  ];
+  const asLf = (text, separator) => text.split(separator).join(LF);
+  for (const shape of shapes) {
+    const want = redactSecrets(shape(LF), []);
+    // Load-bearing: an equality against LF would pass vacuously if LF published the credential too.
+    assert.ok(!want.includes(CRED) && !want.includes(B64),
+      'LF is not the removal on ' + JSON.stringify(shape('<SEP>')) + ': ' + JSON.stringify(want));
+    for (const [name, separator] of [['CR', CR], ['CRLF', CRLF]].concat(SEPARATORS)) {
+      const got = redactSecrets(shape(separator), []);
+      assert.ok(!got.includes(CRED) && !got.includes(B64),
+        name + ' publishes the credential on ' + JSON.stringify(shape('<SEP>')) + ': ' + JSON.stringify(got));
+      assert.equal(asLf(got, separator), want,
+        name + ' is not read as the line end LF is, on ' + JSON.stringify(shape('<SEP>')) + ': ' + JSON.stringify(got));
+      assert.equal(asLf(redactCredentialShapes(shape(separator)), separator), want,
+        'the two entry points disagree about ' + name + ' on ' + JSON.stringify(shape('<SEP>')));
+    }
   }
 });
 

@@ -75,6 +75,30 @@ test('plainText drops C0, DEL and C1 controls instead of passing them through', 
   assert.match(out, /a\[2Kbcd/, 'the printable text around each control is still there');
 });
 
+// Closing sweep F38-1 (Medium, Batch 88), the upstream half of the same class. U+0085 is a
+// whitespace control by Unicode (White_Space=Yes) and one of the five line ends the module reads,
+// but JavaScript's \s excludes it, so this pass DROPPED it where every other line end became a
+// space. Dropping it glues the words it separated, and the words a candidate carries can be a
+// credential keyword and its value: 'auth=Basic' + NEL + <base64> reached the pool as the single
+// word 'auth=Basic<base64>', which no rule can read because every keyword gap requires at least one
+// character. Measured on the shipped collector with an RSS title carrying both spellings: LF, CR,
+// CRLF, LS, PS, SP and TAB were removed and the NEL spelling was published, at 87bddfd AND with the
+// wider keyword rules alone -- the upstream drop was the reason. The row is an equality with LF's
+// own answer, which is the one space this pass already gives every whitespace run.
+test('plainText spaces a NEL exactly as it spaces LF, so a keyword keeps its distance from its value', () => {
+  const B64 = Buffer.from('alice:' + 's3cr3tp4ssw0rd').toString('base64');
+  const NEL = String.fromCharCode(0x85);
+  const shape = (sep) => 'auth=Basic' + sep + B64;
+  assert.equal(plainText(shape(NEL), 200), plainText(shape(String.fromCharCode(10)), 200),
+    'the upstream pass answers a NEL differently from LF: ' + JSON.stringify(plainText(shape(NEL), 200)));
+  assert.equal(plainText(shape(NEL), 200), 'auth=Basic ' + B64,
+    'the NEL is not the space LF is');
+});
+test('plainText still drops every other C1 control beside the NEL it now spaces', () => {
+  const out = plainText('a\u009b' + 'b' + String.fromCharCode(0x85) + 'c\u009fd', 200);
+  assert.equal(out, 'ab cd', 'the C1 controls beside the NEL are no longer dropped: ' + JSON.stringify(out));
+});
+
 // Regression test: the length bound must survive the character-class rule, so a
 // bounded result is bounded either way.
 test('plainText still bounds a body that is all control bytes', () => {
