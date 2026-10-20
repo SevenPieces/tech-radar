@@ -1,7 +1,6 @@
 // tests/rd24-cv1-f1f2-regression.test.mjs
-// Regression tests for the two findings the closing adversarial sweep over bced468 filed
-// (docs/hardening-2026-10-15/scratch-final24-sweep/CLOSING24-SWEEP-REPORT.md, probes exp4/exp5/exp8
-// for F1 and exp18/exp21/exp22 for F2).
+// Regression tests for the two findings the closing adversarial sweep over bced468 filed (probes
+// exp4/exp5/exp8 for F1 and exp18/exp21/exp22 for F2).
 //
 // F1 (Med) -- a detail redacted AFTER it was priced. shapeHttpError bounds the shaped error to
 // error_snippet_max_chars against the REQUEST's own secrets; assembleNotice then redacts that

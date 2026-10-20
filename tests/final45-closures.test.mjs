@@ -1,8 +1,7 @@
 // tests/final45-closures.test.mjs
-// THE CLOSING PAIR'S FINDINGS, CLOSED (Batch 105). The terminal pair
-// (docs/hardening-2026-10-15/scratch-final45-verify/FINAL45-VERIFY-REPORT.md and
-// docs/hardening-2026-10-15/scratch-final45-sweep/CLOSING45-SWEEP-REPORT.md) measured the same
-// revision and agreed the two earlier Highs were closed; what remained is pinned here and closed:
+// THE CLOSING PAIR'S FINDINGS, CLOSED (Batch 105). A terminal verification and an adversarial
+// sweep measured the same revision and agreed the two earlier Highs were closed; what remained is
+// pinned here and closed:
 //   (a) F45-1 (High, the shipped keyless pool): the Basic join accepted the SHORTEST valid
 //       'user:1char' prefix while the unsplit rule takes the LONGEST, so the rest of the payload
 //       published. With a 46-character userinfo and password 's3cr3tp4ssw0rd' the tail
