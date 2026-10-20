@@ -374,6 +374,25 @@ missed. **A failing gate means the digest does not ship** — re-cut the items, 
 coverage note until it passes. Exit 2 means the Markdown, the plan, the config or the `--html` file could not be read: that is a path
 bug, not a quality judgement.
 
+## Known limits
+
+The collector's notice cleaning is **best-effort for text an upstream answer supplies** and **hard for the
+run's own credentials**: a value the run itself carries is removed before any notice or candidate field is
+published, while a credential shape echoed from someone else's page is removed by the class rules, with a few
+accepted exceptions. Before treating a notice or redaction observation as a new problem, read
+`reference/accepted-limits.md` — it lists every accepted exception with its measured reach and the rule for
+re-opening one. The ones worth knowing at run time:
+
+- a credential split by an **ordinary space or line end** can publish in the pool, because the rule does not
+  join across a real word gap (joining would reap ordinary prose);
+- a **single all-lower-case word** is not treated as a credential, because the shape test wants a digit, a
+  capital or a separator;
+- a credential supplied behind **three or more quotes** is not read.
+
+None of these is repaired by re-running the collector. If a run publishes a value from your own configuration
+under one of these shapes, treat it as a configuration choice — no shipped row carries a query parameter or
+userinfo — and record it in the register rather than reporting it as a regression.
+
 ## Common mistakes
 
 One line each, written against the failures the skill exists to prevent:
