@@ -1,10 +1,8 @@
 // tests/rd24-cv1-regression.test.mjs
 // Regression tests for CV-1 (the notice cap and the push's redaction) and CV-4 (an installed
 // tree without .git that carries the skill's own run artifact). CV-1 was recorded independently
-// by two passes over 976b549: docs/hardening-2026-10-15/scratch-close-verify (section 5(b),
-// cv-redact-cap.mjs) and docs/hardening-2026-10-15/scratch-close-sweep12 (F1, probe-redact-cap.mjs
-// and probe-shipped-plus-listing.mjs). Both report the same mechanism, and it is the one this file
-// pins.
+// by two passes over 976b549, a verification and a sweep, each with its own probe; both report the
+// same mechanism, and it is the one this file pins.
 //
 // The cap and the shaped-error bound are one guarantee: a notice is the source it names, the
 // ': ' separator and the shaped error text, the room is split between the two halves, and a pair

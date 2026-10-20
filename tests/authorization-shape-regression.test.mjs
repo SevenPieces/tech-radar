@@ -427,7 +427,8 @@ test('F31 a scheme\'s whole value goes, on both entry points (Batch 67 corrected
   // only because the reader stopped at the first atom that was not part of its idea of a header
   // value, and every stop is a credential that publishes. Before: '[redacted] and then prose'
   // After: '[redacted]'. The design cost is the tail of a sentence that literally spells a header
-  // name; it is recorded in docs/hardening-2026-10-15/ and named in the implementation's comment.
+  // name; it is recorded as an accepted limit in `reference/accepted-limits.md`, and named in the
+  // implementation's comment.
   assert.equal(redactSecrets(text, []), '[redacted]',
     'the whole value of a scheme-headed header was not consumed: ' + JSON.stringify(redactSecrets(text, [])));
   assert.equal(redactCredentialShapes(text), redactSecrets(text, []),

@@ -1,7 +1,6 @@
 // tests/final46-closures.test.mjs
-// THE FINAL46 PAIR'S STRUCTURAL GAP, CLOSED (Batch 106). The terminal pair
-// (docs/hardening-2026-10-15/scratch-final46-verify/FINAL46-VERIFY-REPORT.md and
-// scratch-final46-sweep/CLOSING46-SWEEP-REPORT.md) measured one gap left in the join model:
+// THE FINAL46 PAIR'S STRUCTURAL GAP, CLOSED (Batch 106). A terminal verification and an
+// adversarial sweep measured one gap left in the join model:
 //   (a) F46-1 (High, the shipped keyless pool): the Basic join's longest-accepted walk was ENTERED
 //       ONLY WHEN THE FIRST RUN FAILED, so a payload split AFTER a complete 'user:password' pair left
 //       the separated view accepting the first base64 group and the rest of the stream published. The

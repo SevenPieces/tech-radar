@@ -16,8 +16,9 @@ while text an upstream answer supplies is cleaned on a **best-effort** basis, an
 the accepted exceptions to that best effort.
 
 Each entry states the reach that was measured, and its executable evidence is its pin in
-`tests/accepted-limits.test.mjs`. Measurement detail beyond the pins is held with this repository's review
-material, which - like every file under `docs/` except `docs/design.md` - is not shipped.
+`tests/accepted-limits.test.mjs`. The measurement detail behind the pins belonged to the review's own
+working material, which was never shipped and is no longer kept; the pins are what a later reader can
+re-run.
 
 ## Decisions taken
 

@@ -1,7 +1,6 @@
 // tests/rd24-cv4-f1f2f3f4-regression.test.mjs
-// Regression tests for the findings the closing adversarial sweep over 2b6fca0 filed
-// (docs/hardening-2026-10-15/scratch-final25-sweep/CLOSING25-SWEEP-REPORT.md) and the ones the
-// final verification filed beside them (scratch-final25-verify/FINAL25-VERIFY-REPORT.md).
+// Regression tests for the findings the closing adversarial sweep over 2b6fca0 filed, and the
+// ones the final verification filed beside them.
 //
 // S-F1 (Med, regression from Batch 32) -- a long NON-SHAPED detail lost its reason. The
 // composition fallback bounded the whole line by keeping both ends, and the front half is the

@@ -35,7 +35,11 @@ export const SKILL_ROOT = join(dirname(fileURLToPath(import.meta.url)), '..', '.
 // Assembled from fragments so that no shipped file -- this one included -- ever spells
 // out a name the guards forbid.
 export const WORKING_NAMES = ['implementation' + '-plan', 'build' + '-plan', 'baseline' + '-failures',
-  'implementation' + '-report', 'verification' + '-report'];
+  'implementation' + '-report', 'verification' + '-report',
+  // The review pass's own working directory, named from fragments for the reason above. It is
+  // here because shipped test comments used to record where a measurement came from by pointing
+  // into it, which handed the reader a path to material that never ships.
+  'hardening-' + '2026-' + '10-15'];
 
 // The rule .gitignore states, applied from the tree itself: a docs/ directory ships only the
 // design document that sits directly inside it. A tree carrying a nested copy of this layout

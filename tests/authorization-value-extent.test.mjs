@@ -9,9 +9,9 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
-// The module under test. The default is the shipped one; the closing sweep's mutation check
-// (docs/hardening-2026-10-15/scratch-round67-impl/) points it at a mutated copy, because the only
-// way to prove a corpus can catch a change is to make the change and read the verdict.
+// The module under test. The default is the shipped one; a mutation check points it at a mutated
+// copy, because the only way to prove a corpus can catch a change is to make the change and read the
+// verdict.
 const NET_MODULE = process.env.TECH_RADAR_NET_MODULE ?? '../scripts/lib/net.mjs';
 const { redactCredentialShapes, redactSecrets } = await import(NET_MODULE);
 import { assembleNotice } from '../scripts/collect.mjs';
