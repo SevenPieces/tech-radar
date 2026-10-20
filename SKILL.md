@@ -31,6 +31,8 @@ deliverable. The HTML is a single self-contained file that opens from `file://` 
   hosts, the per-domain hype rule and the contradiction rule.
 - Read `reference/state-schema.md` before you plan a window or merge a run: it is the exact shape of the state,
   the story key and the retention rule.
+- Read `reference/accepted-limits.md` before you treat a notice or a redaction observation as a defect: it
+  records every accepted exception, the reach measured for it, and the one rule for re-opening an entry.
 
 ## The window rule
 
@@ -379,9 +381,7 @@ bug, not a quality judgement.
 The collector's notice cleaning is **best-effort for text an upstream answer supplies** and **hard for the
 run's own credentials**: a value the run itself carries is removed before any notice or candidate field is
 published, while a credential shape echoed from someone else's page is removed by the class rules, with a few
-accepted exceptions. Before treating a notice or redaction observation as a new problem, read
-`reference/accepted-limits.md` — it lists every accepted exception with its measured reach and the rule for
-re-opening one. The ones worth knowing at run time:
+accepted exceptions. The three worth knowing at run time:
 
 - a credential split by an **ordinary space or line end** can publish in the pool, because the rule does not
   join across a real word gap (joining would reap ordinary prose);
